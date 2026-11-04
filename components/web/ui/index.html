@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zigbee Hub</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <form id="login-form" class="card login-card">
+    <h1 id="login-title">Zigbee Hub</h1>
+    <label>Admin password
+      <input id="login-pw" type="password" autocomplete="current-password" required autofocus>
+    </label>
+    <button type="submit">Log in</button>
+    <p id="login-err" class="err" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <div class="brand"><span id="dot" class="dot" title="live connection"></span><span id="hostname">hub</span></div>
+    <nav>
+      <a href="#system">System</a>
+      <a href="#wifi">Wi-Fi</a>
+      <a href="#firmware">Firmware</a>
+    </nav>
+    <button id="logout" class="ghost">Log out</button>
+  </header>
+  <main id="view"></main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

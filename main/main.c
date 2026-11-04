@@ -1,0 +1,210 @@
+// esp32c5-zigbee-hub — boot sequence.
+// Phase 0: report hardware/build. Phase 1: provisioning + 5 GHz Wi-Fi + mDNS.
+// Later phases add Zigbee (before Wi-Fi), web UI, Tailscale, automations.
+
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_app_desc.h"
+#include "esp_netif.h"
+#include "mdns.h"
+#include "nvs_flash.h"
+#include "prov.h"
+#include "hubsys.h"
+#include "web.h"
+#include "wifi5g.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_psram.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static const char *TAG = "hub";
+
+static const char *reset_reason_str(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software (esp_restart)";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "SDIO";
+    case ESP_RST_USB:       return "USB";
+    case ESP_RST_JTAG:      return "JTAG";
+    case ESP_RST_EFUSE:     return "eFuse error";
+    case ESP_RST_PWR_GLITCH:return "power glitch";
+    case ESP_RST_CPU_LOCKUP:return "CPU lockup";
+    default:                return "unknown";
+    }
+}
+
+static void report_firmware(void)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    ESP_LOGI(TAG, "firmware %s %s, IDF %s, built %s %s",
+             app->project_name, app->version, app->idf_ver, app->date, app->time);
+    ESP_LOGI(TAG, "running from %s @ 0x%06" PRIx32, running->label, running->address);
+    ESP_LOGI(TAG, "reset reason: %s", reset_reason_str(esp_reset_reason()));
+}
+
+static void report_hardware(void)
+{
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    ESP_LOGI(TAG, "chip: ESP32-C5 rev v%d.%d, %d core(s)",
+             chip.revision / 100, chip.revision % 100, chip.cores);
+
+    uint32_t flash_size = 0;
+    if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+        ESP_LOGI(TAG, "flash: %" PRIu32 " MB", flash_size / (1024 * 1024));
+    } else {
+        ESP_LOGE(TAG, "flash: size query failed");
+    }
+
+    if (esp_psram_is_initialized()) {
+        ESP_LOGI(TAG, "psram: %u KB initialised", (unsigned)(esp_psram_get_size() / 1024));
+    } else {
+        ESP_LOGE(TAG, "psram: NOT initialised");
+    }
+}
+
+static void report_partitions(void)
+{
+    ESP_LOGI(TAG, "partitions:");
+    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY,
+                                                     ESP_PARTITION_SUBTYPE_ANY, NULL);
+    for (; it != NULL; it = esp_partition_next(it)) {
+        const esp_partition_t *p = esp_partition_get(it);
+        ESP_LOGI(TAG, "  %-11s type %d/0x%02x  0x%06" PRIx32 "  %5" PRIu32 " KB",
+                 p->label, p->type, p->subtype, p->address, p->size / 1024);
+    }
+    esp_partition_iterator_release(it);
+}
+
+static void report_heap(void)
+{
+    ESP_LOGI(TAG, "heap internal: %u KB free (min %u KB, largest block %u KB)",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+    ESP_LOGI(TAG, "heap psram:    %u KB free (min %u KB)",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM) / 1024));
+}
+
+static void report_wifi(void)
+{
+    wifi5g_stats_t w;
+    wifi5g_get_stats(&w);
+    if (w.connected) {
+        ESP_LOGI(TAG, "wifi: up on %s, ch %u, rssi %d, first ip at %lld ms, connects %" PRIu32
+                 ", disconnects %" PRIu32 " (no_ap_found %" PRIu32 "), failovers %" PRIu32
+                 ", driver restarts %" PRIu32,
+                 w.net == 0 ? "primary" : "backup", w.channel, w.rssi, w.first_ip_ms, w.connects,
+                 w.disconnects, w.no_ap_found, w.failovers, w.driver_restarts);
+    } else {
+        ESP_LOGW(TAG, "wifi: down, last reason %u, disconnects %" PRIu32 ", driver restarts %" PRIu32,
+                 w.last_reason, w.disconnects, w.driver_restarts);
+    }
+}
+
+static void init_nvs(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // Only the app-settings partition; prov and zb_storage are separate.
+        ESP_LOGW(TAG, "nvs: %s, erasing app settings", esp_err_to_name(err));
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+}
+
+static void start_mdns(const char *hostname)
+{
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mdns: init failed: %s", esp_err_to_name(err));
+        return;
+    }
+    mdns_hostname_set(hostname);
+    mdns_instance_name_set("Zigbee Hub");
+    mdns_service_add("Zigbee Hub", "_http", "_tcp", 80, NULL, 0);
+    ESP_LOGI(TAG, "mdns: %s.local", hostname);
+}
+
+// A freshly updated image runs on trial: the bootloader rolls it back if it
+// reboots before confirming. Phase 2 health = Wi-Fi has an IP and the web server
+// runs (a firmware that breaks either is exactly what should roll back). Phase 3
+// changes this to "Zigbee is up". Cost: an update installed while the router is
+// down for 2+ minutes rolls back too — it can simply be installed again.
+#define OTA_HEALTH_DEADLINE_S 120
+
+static void ota_health_task(void *arg)
+{
+    for (int s = 0; s < OTA_HEALTH_DEADLINE_S; s++) {
+        if (wifi5g_is_connected() && web_is_running()) {
+            vTaskDelay(pdMS_TO_TICKS(5000));  // and still alive a moment later
+            if (wifi5g_is_connected()) {
+                hubsys_ota_confirm();
+                vTaskDelete(NULL);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGE(TAG, "new firmware not healthy after %d s: rebooting to roll back", OTA_HEALTH_DEADLINE_S);
+    esp_restart();  // still pending-verify: the bootloader picks the previous slot
+}
+
+void app_main(void)
+{
+    report_firmware();
+    report_hardware();
+    report_partitions();
+    report_heap();
+
+    init_nvs();
+    hubsys_ota_boot_check();
+
+    // Phase 3 starts Zigbee here, before Wi-Fi: it must never wait for the uplink.
+
+    static prov_t prov;  // static: holds secrets, keep it off the small main stack
+    bool have_prov = prov_load(&prov) == ESP_OK;
+    if (have_prov && prov.has_wifi) {
+        static wifi5g_net_t nets[WIFI5G_MAX_NETS];
+        strlcpy(nets[0].ssid, prov.ssid, sizeof(nets[0].ssid));
+        strlcpy(nets[0].psk, prov.psk, sizeof(nets[0].psk));
+        strlcpy(nets[1].ssid, prov.ssid2, sizeof(nets[1].ssid));
+        strlcpy(nets[1].psk, prov.psk2, sizeof(nets[1].psk));
+        ESP_ERROR_CHECK(wifi5g_start(nets, prov.hostname, prov.country));
+        memset(nets, 0, sizeof(nets));
+        start_mdns(prov.hostname);
+
+        web_config_t wc = {.hostname = prov.hostname, .admin_hash = prov.admin_hash};
+        if (web_start(&wc) != ESP_OK) ESP_LOGE(TAG, "web UI failed to start");
+    } else {
+        ESP_LOGW(TAG, "no Wi-Fi credentials; running offline (provision with ./flash.sh)");
+    }
+
+    if (hubsys_ota_pending_verify()) {
+        xTaskCreate(ota_health_task, "ota_health", 3072, NULL, 3, NULL);
+    }
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(30000));
+        report_heap();
+        report_wifi();
+    }
+}

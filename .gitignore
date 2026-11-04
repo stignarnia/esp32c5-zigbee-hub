@@ -1,0 +1,9 @@
+vendor/
+.esp/
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+skills/
+.cache/
+CLAUDE.local.md

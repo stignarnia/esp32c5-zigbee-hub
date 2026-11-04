@@ -1,0 +1,12 @@
+# esp32c5-zigbee-hub — 16 MB flash layout (see CLAUDE.md "Partition table")
+# Bootloader at 0x2000, partition table at 0x8000 (C5 defaults).
+# Name,      Type, SubType,  Offset,   Size,     Flags
+nvs,         data, nvs,      0x9000,   0x6000,
+otadata,     data, ota,      0xF000,   0x2000,
+phy_init,    data, phy,      0x11000,  0x1000,
+prov,        data, nvs,      0x12000,  0x4000,
+ota_0,       app,  ota_0,    0x20000,  0x400000,
+ota_1,       app,  ota_1,    0x420000, 0x400000,
+zb_storage,  data, fat,      0x820000, 0x100000,
+zb_fct,      data, fat,      0x920000, 0x1000,
+storage,     data, littlefs, 0x930000, 0x6D0000,

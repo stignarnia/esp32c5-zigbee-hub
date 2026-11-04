@@ -13,6 +13,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "hublog.h"
 #include "hubsys.h"
 #include "web_internal.h"
 #include "wifi5g.h"
@@ -350,6 +351,41 @@ static esp_err_t h_ota(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ---- diagnostic log ------------------------------------------------------------------
+
+static esp_err_t send_file(httpd_req_t *req, const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return ESP_OK;  // not there yet: nothing to send
+    size_t n;
+    esp_err_t err = ESP_OK;
+    while ((n = fread(buf, 1, cap, f)) > 0) {
+        err = httpd_resp_send_chunk(req, buf, n);
+        if (err != ESP_OK) break;
+    }
+    fclose(f);
+    return err;
+}
+
+static esp_err_t h_logs(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    hublog_flush();  // include what's still buffered
+    char disp[96];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s-log.txt\"", web_hostname());
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const size_t cap = 4096;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) return web_send_error(req, "500 Internal Server Error", "out of memory");
+    esp_err_t err = send_file(req, HUBLOG_OLD, buf, cap);
+    if (err == ESP_OK) err = send_file(req, HUBLOG_CUR, buf, cap);
+    free(buf);
+    if (err != ESP_OK) return err;
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t h_reboot(httpd_req_t *req)
 {
     if (!web_guard(req)) return ESP_OK;
@@ -373,6 +409,7 @@ esp_err_t api_register(httpd_handle_t server)
         {.uri = "/api/wifi/reset", .method = HTTP_POST, .handler = h_wifi_reset},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = h_ota},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = h_reboot},
+        {.uri = "/api/logs", .method = HTTP_GET, .handler = h_logs},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);

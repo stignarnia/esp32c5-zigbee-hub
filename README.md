@@ -372,6 +372,13 @@ throughout.
 Uptime, memory (internal and PSRAM, current and lowest since boot), Wi-Fi channel
 and signal, reset reason, firmware version, and firmware updates.
 
+**Diagnostic log.** The hub keeps its own log on flash: warnings, errors, Wi-Fi
+events, updates and reboots (with the reason), plus a status sample every 5
+minutes, all with UTC timestamps. **Download log** on the System page gets the
+last ~500 KB, so you can look into a drop or a crash from last night without
+ever connecting a cable. It survives reboots, and a planned or watchdog reboot
+writes everything out before restarting.
+
 ## Updating the firmware remotely
 
 No USB cable needed after the first flash, and it works from anywhere on your

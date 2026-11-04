@@ -210,7 +210,7 @@ Notes from the first boot:
   We don't plan flash encryption, but Phase 4 must decide deliberately where
   microlink's TLS/WireGuard state lives (keys internal, bulk buffers in PSRAM).
 
-### Phase 1 — Provisioning + 5 GHz Wi-Fi (code done 2026-11-04; soak test running)
+### Phase 1 — Provisioning + 5 GHz Wi-Fi (code done 2026-11-04; overnight test running via the on-board log)
 - [x] `flash.sh` (+ `tools/mkprov.py`):
   - finds the active Wi-Fi connection with `nmcli`; reads SSID + PSK (sudo
     fallback only if NetworkManager withholds the secret — here it didn't)
@@ -224,8 +224,8 @@ Notes from the first boot:
   - builds, creates `prov.bin` (secrets passed via env, never argv; temp CSV 0600,
     deleted), flashes app + prov in one esptool call, waits for `HUB_READY`
   - `--prov-only` re-writes credentials without rebuilding
-  - [ ] `--ota [--host H]` updates over the network instead of USB (Phase 2 adds
-    the board side; see "Remote firmware updates")
+  - [x] `--ota [--host H]` updates over the network instead of USB (board side in
+    Phase 2; see "Remote firmware updates")
 - [x] `wifi5g`: band set to `WIFI_BAND_MODE_5G_ONLY` **after** `esp_wifi_start()`
       (the API returns `ESP_ERR_WIFI_NOT_STARTED` before) and **before** the first
       connect — nothing connects on `STA_START`. Re-applied on every driver
@@ -264,8 +264,8 @@ Notes from the first boot:
 - [x] Log channel + RSSI + band on connect; `HUB_READY ip=… net=… ch=… rssi=… boot_ms=…`
       line for tools
 - [x] mDNS `zigbee-hub.local` (espressif/mdns 1.15.0) — resolves from the dev machine
-- [~] Verified on the home network **as-is, DFS**: see measurements. Multi-hour soak running
-      (`.esp/soak/`); record disconnects here when done
+- [~] Verified on the home network **as-is, DFS**: see measurements. 22 min serial soak: 0 disconnects.
+      Overnight run started 2026-11-04 21:18 UTC, recorded by `hublog`; results go here
 
 #### Phase 1 measurements (2026-11-04, home network, WPA3-SAE, RSSI −30…−43 dBm)
 
@@ -397,6 +397,40 @@ OTA bookkeeping), `wifi5g` (runtime network API).
       for the whole command when nothing needs rebuilding.** Faster than USB
 - [ ] Rollback demonstrated with a deliberately broken image (not yet)
 - [x] What OTA can't change: bootloader, partition table — USB only, by design
+- [ ] **Optional: signed updates** (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` +
+      `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, RSA-3072, Secure Boot V2
+      signature format, no eFuses burned):
+  - verification runs in the **running app** when an update arrives — no
+    bootloader change, so it can be switched on later through a normal OTA
+    (the old firmware doesn't check, the new one does from then on)
+  - `flash.sh --gen-signing-key` creates the key in `.esp/secrets/` (gitignored);
+    builds sign automatically (`CONFIG_SECURE_BOOT_SIGNING_KEY`)
+  - effect: even with the admin password, nobody can install firmware you didn't sign
+  - **the key must be backed up**: lose it and every future update needs USB.
+    `flash.sh` refuses to enable signing until the user confirms a backup exists
+  - USB flashing keeps working regardless (this isn't hardware secure boot)
+
+#### On-board diagnostic log (`hublog`, user request; stays in the final build)
+For long tests without a serial cable: log on the board, download later.
+- [x] `/storage` = LittleFS (joltwallet/littlefs 1.23.1) on the `storage`
+      partition; first mount formats it (one-time "Corrupted dir pair" error is
+      just the blank partition). Mount 5 ms
+- [x] `esp_log_set_vprintf` hook keeps WARN/ERROR from everything + INFO from
+      `wifi5g hubsys web* sample boot hublog prov`; strips colour codes; drops
+      prefix-only fragments (the Wi-Fi driver prints capability dumps in pieces)
+- [x] The hook only copies into a 32 KB PSRAM ring (it can run inside the Wi-Fi
+      driver: no flash I/O there); a task writes to flash every 10 s, and a
+      shutdown handler flushes on every `esp_restart()` (watchdog, OTA, planned).
+      A hard crash loses ≤ 10 s
+- [x] Two rotating files, 256 KB each (`/storage/logs/events{,.1}.log`)
+- [x] UTC timestamps via SNTP (`pool.ntp.org`, synced 3 s after IP); the RTC keeps
+      time across soft reboots; `+Ns` uptime before the first sync after power-on
+- [x] `sample` line every 5 min: uptime, Wi-Fi state, channel, RSSI, counters, heap
+- [x] `GET /api/logs` (authenticated, flushes first, streams both files) +
+      "Download log" on the System page
+- Cost: 64 KB PSRAM, no internal RAM; flash writes only when there are new lines
+  (~50–100 KB/night), wear-levelled over 7 MB
+- Phase 5 builds the script log (`log(...)`, script errors) on this
 
 #### Phase 2 findings
 - **IDF 6.1 never calls the WebSocket URI handler for the handshake.** The
@@ -414,18 +448,6 @@ OTA bookkeeping), `wifi5g` (runtime network API).
   awk exited, ~30 s). awk now reads the port directly: `--prov-only` 42 s → 15 s
 - Internal heap with web server + a logged-in WebSocket client: ~139 KB free
   (min ~111 KB)
-- [ ] **Optional: signed updates** (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` +
-      `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, RSA-3072, Secure Boot V2
-      signature format, no eFuses burned):
-  - verification runs in the **running app** when an update arrives — no
-    bootloader change, so it can be switched on later through a normal OTA
-    (the old firmware doesn't check, the new one does from then on)
-  - `flash.sh --gen-signing-key` creates the key in `.esp/secrets/` (gitignored);
-    builds sign automatically (`CONFIG_SECURE_BOOT_SIGNING_KEY`)
-  - effect: even with the admin password, nobody can install firmware you didn't sign
-  - **the key must be backed up**: lose it and every future update needs USB.
-    `flash.sh` refuses to enable signing until the user confirms a backup exists
-  - USB flashing keeps working regardless (this isn't hardware secure boot)
 
 ### Phase 3 — Zigbee coordinator + enrollment
 - [ ] Use `espressif/esp-zigbee-lib` **2.x** (2.1.0 current). The reference repo

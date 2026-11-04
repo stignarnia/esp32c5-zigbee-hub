@@ -48,6 +48,9 @@ input[type=text], input[type=password] {
 input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
 button { font: inherit; padding: .55rem 1rem; border-radius: 8px; border: 1px solid var(--accent);
          background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+a.button { display: inline-block; font: inherit; padding: .55rem 1rem; border-radius: 8px;
+           border: 1px solid var(--accent); background: var(--accent); color: var(--accent-fg);
+           text-decoration: none; }
 button.ghost { background: transparent; color: var(--fg); border-color: var(--line); }
 button.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
 button:disabled { opacity: .5; cursor: default; }

@@ -147,7 +147,12 @@ pages.system = {
         ['Firmware', `${esc(f.version)} <span class="muted">${esc(f.build_id.slice(0, 8))}</span>`],
         ['Built', esc(f.built)],
         ['ESP-IDF', esc(f.idf)],
-      ])}</section>`;
+      ])}</section>
+      <section class="card"><h2>Diagnostic log</h2>
+        <p class="muted">Warnings, errors, Wi-Fi events, updates and reboots, plus a sample every
+        5 minutes, kept on the hub (the last ~500 KB) with UTC timestamps.</p>
+        <div class="row"><a class="button" href="/api/logs" download>Download log</a></div>
+      </section>`;
   },
 };
 

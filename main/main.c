@@ -11,6 +11,7 @@
 #include "mdns.h"
 #include "nvs_flash.h"
 #include "prov.h"
+#include "hublog.h"
 #include "hubsys.h"
 #include "web.h"
 #include "wifi5g.h"
@@ -22,6 +23,7 @@
 #include "esp_partition.h"
 #include "esp_psram.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -168,8 +170,36 @@ static void ota_health_task(void *arg)
     esp_restart();  // still pending-verify: the bootloader picks the previous slot
 }
 
+// One line every 5 min into the on-board log (tag "sample"): enough to see signal,
+// memory and Wi-Fi recovery over a night without flooding the flash.
+static void log_sample(void)
+{
+    wifi5g_stats_t w;
+    wifi5g_get_stats(&w);
+    ESP_LOGI("sample", "up=%llds wifi=%s ch=%u rssi=%d disc=%" PRIu32 " nap=%" PRIu32
+             " fo=%" PRIu32 " drv=%" PRIu32 " heap=%uK min=%uK psram=%uK",
+             esp_timer_get_time() / 1000000, w.connected ? "up" : "DOWN", w.channel, w.rssi,
+             w.disconnects, w.no_ap_found, w.failovers, w.driver_restarts,
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+}
+
+static void log_boot_summary(void)
+{
+    hubsys_ota_result_t r;
+    hubsys_ota_last_result(&r);
+    ESP_LOGI("boot", "build %s, reset: %s%s%s, slot %s%s, last update: %s",
+             hubsys_build_id(), reset_reason_str(esp_reset_reason()),
+             hubsys_last_planned_reason()[0] ? " / " : "", hubsys_last_planned_reason(),
+             esp_ota_get_running_partition()->label, hubsys_ota_pending_verify() ? " (on trial)" : "",
+             r.kind);
+}
+
 void app_main(void)
 {
+    hublog_init();  // first: capture everything from here on into the on-board log
+
     report_firmware();
     report_hardware();
     report_partitions();
@@ -177,6 +207,7 @@ void app_main(void)
 
     init_nvs();
     hubsys_ota_boot_check();
+    log_boot_summary();
 
     // Phase 3 starts Zigbee here, before Wi-Fi: it must never wait for the uplink.
 
@@ -191,6 +222,7 @@ void app_main(void)
         ESP_ERROR_CHECK(wifi5g_start(nets, prov.hostname, prov.country));
         memset(nets, 0, sizeof(nets));
         start_mdns(prov.hostname);
+        hublog_start_time_sync();
 
         web_config_t wc = {.hostname = prov.hostname, .admin_hash = prov.admin_hash};
         if (web_start(&wc) != ESP_OK) ESP_LOGE(TAG, "web UI failed to start");
@@ -202,9 +234,10 @@ void app_main(void)
         xTaskCreate(ota_health_task, "ota_health", 3072, NULL, 3, NULL);
     }
 
-    for (;;) {
+    for (int tick = 1;; tick++) {
         vTaskDelay(pdMS_TO_TICKS(30000));
         report_heap();
         report_wifi();
+        if (tick % 10 == 0) log_sample();  // every 5 min
     }
 }

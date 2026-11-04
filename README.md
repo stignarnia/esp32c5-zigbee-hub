@@ -213,7 +213,9 @@ end)
 | `timer.after(s, fn)` / `timer.every(s, fn)` | one-shot / repeating timers, return a handle with `:cancel()` |
 | `cron(expr, fn)` | standard 5-field cron, local time |
 | `state.get(key)` / `state.put(key, value)` | small persistent key-value store, survives reboots |
-| `http.post(url, body)` | outbound request, queued, never blocks; dropped when offline |
+| `http.request{url=, method=, headers=, body=/json=, retry_for=, on_done=}` | HTTP(S) request; never blocks the script, the result arrives in `on_done(status, body)` |
+| `http.get(url, opts)` / `http.post(url, body, opts)` | shorthands for the above |
+| `secret(name)` | a value stored under **System → Secrets** (tokens, webhook URLs), so it never appears in script text |
 | `log(...)` | shows up in the script's live log in the UI |
 | `gpio.write(pin, v)` / `gpio.read(pin)` | drive or read one of the board's pins |
 | `gpio.on(pin, edge, fn)` | call `fn` on a rising/falling edge (debounced) |
@@ -247,6 +249,41 @@ never leaves a buzzer sounding.
 **Wiring:** a pin can safely supply about 20 mA at 3.3 V. Many 3 V buzzers draw
 around that, or more. Drive them through a small NPN transistor or logic-level
 MOSFET, and add a flyback diode across magnetic buzzers.
+
+#### Calling other services: Alexa, webhooks
+
+Scripts can make HTTP and HTTPS requests. Certificates are verified against the
+usual public authorities. The request goes out in the background, so a slow or
+offline service never delays the rest of the script; the local buzzer still
+sounds at once.
+
+Alexa has no webhook of its own, but third-party skills (routine triggers,
+announcement services) give you an HTTPS URL that runs an Alexa routine when
+called, for example one that plays an alarm on every Echo in the house. Store that
+URL under **System → Secrets** as `alexa_alarm`, then:
+
+```lua
+-- Water leak: buzzer here, alarm on the Echos, and keep trying for 10 minutes
+-- if the internet happens to be down
+zb.on("laundry_leak", "water_leak", function(wet)
+  if not wet then return end
+  zb.set("washer_plug", { state = "off" })
+  gpio.beep("buzzer", { on = 500, off = 300, times = 20 })
+  http.get(secret("alexa_alarm"), {
+    retry_for = 600,
+    on_done = function(status)
+      if status ~= 200 then log("Alexa alarm failed, status " .. status) end
+    end,
+  })
+end)
+```
+
+`retry_for` is what makes it dependable: without it a request made while offline
+is dropped; with it, the hub keeps retrying with backoff until the deadline.
+Requests are limited to 10 per minute per script, and responses are capped at
+16 KB.
+
+#### Safety and limits
 
 Each script runs in its own sandbox with a memory cap (256 KB by default) and an
 instruction limit. A script that crashes, loops forever or runs out of memory is

@@ -42,8 +42,10 @@ Everything below follows from that ordering:
 4. **Watchdog and memory budgets are set by the Zigbee/automation side.** The UI
    and Tailscale get what's left; if memory is short, Tailscale buffers shrink
    first.
-5. **Automation side effects that touch the network are fire-and-forget**
-   (`http.post` queues, drops when offline) so a dead uplink can't stall a script.
+5. **Automation side effects that touch the network never block a script.**
+   HTTP requests are queued to their own task; results come back as callbacks.
+   A dead uplink delays them (or, with `retry_for`, holds them until it's back) but
+   can't stall a trigger or timer — the local buzzer still sounds at once.
 6. **HA mode doesn't change the priority.** The ESPHome API server is a consumer
    of the device registry like the UI; it must never block Zigbee. With HA as the
    brain, automations depend on Wi-Fi by definition — that's the user's choice by
@@ -543,8 +545,28 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
   - `zb.set(device, {state="on", brightness=128})`, `zb.get(device, attr)`
   - `timer.after(s, fn)`, `timer.every(s, fn)`, `cron("0 7 * * 1-5", fn)`
   - `state.get/put(key, value)` — small persistent KV for scripts
-  - `http.post(url, body)` — outbound only, rate-limited, queued; never blocks
-    the script, dropped when offline
+  - **HTTP requests** (user request: call an Alexa skill URL that sounds the
+    alarm, instead of or together with the buzzer). Typical target: a
+    third-party Alexa skill / routine trigger that gives an HTTPS URL with a
+    token in it; calling it runs an Alexa routine (alarm sound, announcement)
+    - `http.request{url=, method="GET"|"POST"|"PUT", headers={}, body= | json={},
+      timeout=10, retry_for=0, on_done=function(status, body) end}`
+      plus shorthands `http.get(url, opts)` / `http.post(url, body, opts)`
+    - **never blocks the script**: queued to one dedicated HTTP task, the result
+      comes back later through `on_done` on the automation task (status 0 =
+      network error / gave up)
+    - **HTTPS** with the ESP-IDF certificate bundle (public CAs), certificates
+      verified; plain HTTP allowed for LAN targets
+    - **`retry_for = seconds`**: while offline or on errors (5xx, timeouts),
+      retried with backoff until that deadline — for alarms that must arrive
+      once Wi-Fi is back. Default 0 = one attempt, dropped when offline
+    - limits: response bodies truncated at 16 KB; queue of 16 requests;
+      per-script rate limit (default 10/min); one TLS connection at a time
+      (~40 KB internal RAM while it runs — measure in Phase 7)
+  - **Secrets**: `secret("alexa_alarm_url")` reads a value stored under
+    System → Secrets (write-only in the UI, kept in NVS, never shown in script
+    text or logs). URLs with tokens belong there, not pasted into scripts;
+    `log()` masks secret values if a script prints one
   - `log(...)` → UI log stream
   - **GPIO** (user request: 3 V buzzers on the board's pins):
     - `gpio.write(pin, 0|1)`, `gpio.read(pin)`, `gpio.on(pin, "rising"|"falling"|"both", fn)`

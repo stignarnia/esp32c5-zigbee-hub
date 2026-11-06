@@ -1,6 +1,6 @@
 'use strict';
 // Zigbee Hub web UI. No framework: a hash router, one status object refreshed over
-// a WebSocket every 2 s, and three pages (System, Wi-Fi, Firmware).
+// a WebSocket every 2 s, and four pages (Devices, System, Wi-Fi, Firmware).
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -98,15 +98,102 @@ function onStatus() {
 
 // ---- pages --------------------------------------------------------------------------
 const pages = {};
-const currentPage = () => (location.hash.slice(1) || 'system');
+const currentPage = () => (location.hash.slice(1) || 'devices');
 
 function render() {
   const name = currentPage();
   document.querySelectorAll('nav a').forEach((a) =>
     a.classList.toggle('active', a.getAttribute('href') === `#${name}`));
-  (pages[name] || pages.system).render();
+  if (name !== 'devices') pages.devices.stop();
+  (pages[name] || pages.devices).render();
 }
 window.addEventListener('hashchange', render);
+
+// Devices -------------------------------------------------------------------------------
+// Polls /api/zb every second while open: a new device shows up within a second of
+// its announce, before the interview finishes.
+const ZONE_STATE = { contact: ['closed', 'OPEN'], motion: ['clear', 'MOTION'], water: ['dry', 'LEAK'],
+  fire: ['ok', 'FIRE'], co: ['ok', 'CO'], vibration: ['still', 'VIBRATION'] };
+pages.devices = {
+  timer: null, data: null, rev: -1,
+  stop() { clearInterval(this.timer); this.timer = null; },
+  async render() {
+    $('#view').innerHTML = `
+      <section class="card"><h2>Zigbee network</h2><div id="zb-net" class="muted">Loading…</div>
+        <div class="row"><button id="zb-scan">Scan for devices</button><span id="zb-permit" class="muted"></span></div>
+      </section>
+      <div id="zb-devs" class="grid"></div>`;
+    $('#zb-scan').addEventListener('click', () => this.permit());
+    this.rev = -1;
+    await this.poll();
+    this.stop();
+    this.timer = setInterval(() => this.poll(), 1000);
+  },
+  async poll() {
+    let d;
+    try { d = await api('/api/zb'); } catch (e) { return; }
+    if (!$('#zb-net')) { this.stop(); return; }
+    this.data = d;
+    const n = d.network;
+    $('#zb-net').innerHTML = n.up ? dl([['Channel', n.channel], ['PAN ID', esc(n.pan)], ['Extended PAN', `<code>${esc(n.ext_pan)}</code>`],
+      ['Devices', d.devices.length]]) : 'Starting…';
+    const open = n.permit_s > 0;
+    $('#zb-scan').textContent = open ? 'Stop scanning' : 'Scan for devices';
+    $('#zb-permit').innerHTML = open ? `<span class="badge ok">open</span> ${n.permit_s} s left — insert the battery or press the device's pairing button` : '';
+    this.list(d.devices);
+  },
+  list(devs) {
+    const el = $('#zb-devs');
+    if (document.activeElement && el.contains(document.activeElement)) return;  // don't clobber typing
+    el.innerHTML = devs.length ? devs.map((v) => this.card(v)).join('') : '<div class="card muted">No devices yet. Press “Scan for devices”, then power up the device.</div>';
+    el.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', () => this.rename(b.dataset.rename)));
+    el.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', () => this.remove(b.dataset.remove)));
+  },
+  card(v) {
+    const title = v.name || [v.manuf, v.model].filter(Boolean).join(' ') || `0x${v.short.toString(16).padStart(4, '0')}`;
+    const st = v.status === 'ready' ? '<span class="badge ok">ready</span>'
+      : v.status === 'interviewing' ? '<span class="badge warn">interviewing…</span>'
+      : '<span class="badge warn">waiting for it to wake up</span>';
+    const rows = [];
+    if (v.kind && v.zone_status !== undefined) {
+      const [idle, alarm] = ZONE_STATE[v.kind] || ['normal', 'ALARM'];
+      rows.push([v.kind, v.alarm ? `<span class="badge bad">${alarm}</span>` : `<span class="badge ok">${idle}</span>`]);
+      if (v.tamper) rows.push(['Tamper', '<span class="badge bad">tampered</span>']);
+    } else if (v.kind) rows.push([v.kind, '<span class="muted">no report yet</span>']);
+    if (v.temperature !== undefined) rows.push(['Temperature', `${v.temperature.toFixed(1)} °C`]);
+    if (v.humidity !== undefined) rows.push(['Humidity', `${v.humidity.toFixed(0)} %`]);
+    if (v.on !== undefined) rows.push(['State', v.on ? 'on' : 'off']);
+    if (v.occupied !== undefined) rows.push(['Occupancy', v.occupied ? 'occupied' : 'clear']);
+    if (v.battery !== undefined) rows.push(['Battery', `${Math.round(v.battery)} %${v.battery_low ? ' <span class="badge bad">low</span>' : ''}`]);
+    else if (v.battery_v !== undefined) rows.push(['Battery', `${v.battery_v.toFixed(1)} V`]);
+    if (v.rssi !== undefined) rows.push(['Signal', rssiBadge(v.rssi)]);
+    rows.push(['Last seen', v.seen_s < 0 ? '—' : v.seen_s < 5 ? 'just now' : `${dur(v.seen_s)} ago`]);
+    rows.push(['Model', esc([v.manuf, v.model].filter(Boolean).join(' / ') || '—')]);
+    rows.push(['IEEE', `<code>${esc(v.ieee)}</code>`]);
+    rows.push(['Type', v.sleepy ? 'battery (sleepy)' : 'mains / router']);
+    const clusters = v.eps.map((e) => `ep ${e.id}: ${e.in.map((c) => c.toString(16).padStart(4, '0')).join(' ')}`).join('<br>');
+    return `<section class="card"><h2>${esc(title)} ${st}</h2>${dl(rows)}
+      <details><summary class="muted">Clusters</summary><p class="muted"><code>${clusters || '—'}</code></p></details>
+      <label>Name <input type="text" id="name-${v.ieee}" value="${esc(v.name)}" maxlength="31" placeholder="e.g. Front door"></label>
+      <div class="row"><button class="ghost" data-rename="${v.ieee}">Save name</button>
+        <button class="danger" data-remove="${v.ieee}">Remove</button></div></section>`;
+  },
+  async permit() {
+    const open = this.data && this.data.network.permit_s > 0;
+    try { await api('/api/zb/permit', { method: 'POST', json: { seconds: open ? 0 : 120 } }); } catch (e) { alert(e.message); }
+    this.poll();
+  },
+  async rename(ieee) {
+    const name = $(`#name-${ieee}`).value.trim();
+    try { await api('/api/zb/rename', { method: 'POST', json: { ieee, name } }); document.activeElement.blur(); } catch (e) { alert(e.message); }
+    this.poll();
+  },
+  async remove(ieee) {
+    if (!confirm('Remove this device? It is asked to leave the network; to use it again, pair it again.')) return;
+    try { await api('/api/zb/remove', { method: 'POST', json: { ieee } }); } catch (e) { alert(e.message); }
+    this.poll();
+  },
+};
 
 // System ------------------------------------------------------------------------------
 pages.system = {

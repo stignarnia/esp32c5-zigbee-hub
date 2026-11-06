@@ -149,18 +149,17 @@ static void start_mdns(const char *hostname)
 }
 
 // A freshly updated image runs on trial: the bootloader rolls it back if it
-// reboots before confirming. Phase 2 health = Wi-Fi has an IP and the web server
-// runs (a firmware that breaks either is exactly what should roll back). Phase 3
-// changes this to "Zigbee is up". Cost: an update installed while the router is
-// down for 2+ minutes rolls back too — it can simply be installed again.
+// reboots (crash) or isn't healthy within the deadline. Health = the Zigbee network
+// is up and the web server runs. Wi-Fi is deliberately not required: an update
+// installed while the router is down must not roll back (Zigbee comes first).
 #define OTA_HEALTH_DEADLINE_S 120
 
 static void ota_health_task(void *arg)
 {
     for (int s = 0; s < OTA_HEALTH_DEADLINE_S; s++) {
-        if (wifi5g_is_connected() && web_is_running()) {
+        if (zb_is_up() && web_is_running()) {
             vTaskDelay(pdMS_TO_TICKS(5000));  // and still alive a moment later
-            if (wifi5g_is_connected()) {
+            if (zb_is_up()) {
                 hubsys_ota_confirm();
                 vTaskDelete(NULL);
             }

@@ -170,17 +170,19 @@ tools/           host helpers (provisioning image generation)
 
 ### Partition table (16 MB)
 
+Eight partitions, contiguous. Small ones packed first, ending on the 64 KB boundary
+the app slots need; app slots and LittleFS take everything else (2026-11-06).
+
 | Name | Type | Offset | Size | Purpose |
 |---|---|---|---|---|
-| nvs | nvs | 0x9000 | 0x6000 | app settings, Wi-Fi driver state |
-| otadata | ota | 0xF000 | 0x2000 | |
-| phy_init | phy | 0x11000 | 0x1000 | |
-| prov | nvs | 0x12000 | 0x4000 | **written by flash.sh**: SSID, PSK, admin password, TS auth key, hostname, optional HA setting + API key |
-| ota_0 | app | 0x20000 | 0x400000 | |
-| ota_1 | app | 0x420000 | 0x400000 | |
-| zb_storage | fat | 0x820000 | 0x100000 | Zigbee stack NVRAM (network key, PAN, children) |
-| zb_fct | fat | 0x920000 | 0x1000 | |
-| storage | littlefs | 0x930000 | 0x6D0000 | device registry, scripts, UI overrides, optional converter DB |
+| nvs | nvs | 0x9000 | 0x4000 | app settings, Wi-Fi driver state, radio calibration (~3 KB used, measured) |
+| otadata | ota | 0xD000 | 0x2000 | |
+| prov | nvs | 0xF000 | 0x3000 | **written by flash.sh**: SSID, PSK, admin password, TS auth key, hostname, optional HA setting + API key (< 1 KB) |
+| zb_storage | nvs | 0x12000 | 0x1E000 | Zigbee stack NVRAM (network key, PAN, children). esp-zigbee-lib 2.x needs NVS, not FAT. Generous on purpose: resizing it later means re-pairing every device |
+| coredump | coredump | 0x30000 | 0x10000 | ELF core dump on panic; summary logged on next boot, `/api/coredump` |
+| ota_0 | app | 0x40000 | 0x400000 | |
+| ota_1 | app | 0x440000 | 0x400000 | |
+| storage | littlefs | 0x840000 | 0x7C0000 | device registry, scripts, logs, UI overrides, optional converter DB |
 
 Credentials live in their own partition so re-provisioning never touches the
 Zigbee network (re-pairing every device would be the cost) or app settings.
@@ -193,8 +195,8 @@ Status markers: `[ ]` todo · `[~]` in progress · `[x]` done and verified on ha
 - [x] Project `CMakeLists.txt`, `sdkconfig.defaults` (16 MB flash, PSRAM quad
       80 MHz + malloc, custom partitions, 240 MHz, app rollback in bootloader).
       WPA3 setting moves to Phase 1 together with Wi-Fi
-- [x] `partitions.csv` as above — boot log lists all nine partitions at the
-      planned offsets (`storage` is subtype 0x83 littlefs, 6976 KB)
+- [x] `partitions.csv` — boot log listed the partitions at the planned offsets.
+      (Re-laid out in Phase 3 to the 8-partition table above; boot log confirms it)
 - [x] Boot log: `flash: 16 MB`, `esp_psram: Found 8MB PSRAM device`,
       `Adding pool of 8192K of PSRAM memory to heap allocator`
 - [x] Baseline (skeleton only): app image 218 KB (5 % of a 4 MB slot);
@@ -458,17 +460,37 @@ For long tests without a serial cable: log on the board, download later.
 - Internal heap with web server + a logged-in WebSocket client: ~139 KB free
   (min ~111 KB)
 
-### Phase 3 — Zigbee coordinator + enrollment
-- [ ] Use `espressif/esp-zigbee-lib` **2.x** (2.1.0 current). The reference repo
-      is on 1.6.x — the API differs; read its logic, don't paste its code
-- [ ] **Coex before Wi-Fi connects**: `esp_coex_wifi_i154_enable()` early in boot.
-      Reference repo's single biggest finding: without it the station barely
-      associated (371 s → 27 s). Re-measure for 5G-only, don't assume
-- [ ] Coex preference set explicitly in favour of 802.15.4 (the reference never
-      set it); measure Zigbee command latency with Wi-Fi under load
-- [ ] Form network on first boot: channel mask {15, 25}, energy scan picks;
-      random PAN ID + extended PAN ID; network key from hardware RNG.
-      Zigbee starts **independently of Wi-Fi** (devices keep working with no uplink)
+### Phase 3 — Zigbee coordinator + enrollment (in progress 2026-11-06)
+- [x] `espressif/esp-zigbee-lib` **2.1.0** (released 2026-10-30, built against IDF
+      5.5.6) builds and links on IDF 6.1. Stack NVRAM in the NVS `zb_storage` partition
+- [x] **Coex before Wi-Fi connects**: `esp_coex_wifi_i154_enable()` in `zb_start()`,
+      before `wifi5g_start()`
+- [~] **Coex priority — measured 2026-11-06** (802.15.4 PTI via `esp_ieee802154_set_coex_config`):
+  - txrx/txrx_at HIGH permanently: Wi-Fi never associates (NO_AP_FOUND after 15 s,
+    every attempt). A coordinator is always receiving, so HIGH never yields
+  - driver defaults (idle 4, txrx LOW, txrx_at MIDDLE) from boot: network formation
+    never completes, with Wi-Fi `PS_NONE` or `PS_MIN_MODEM`
+  - **chosen**: HIGH until the network is formed/restored, defaults after.
+    Formation 576 ms, restore 8 ms (done before Wi-Fi starts)
+  - Wi-Fi in **modem sleep** (`WIFI_PS_MIN_MODEM`, as Espressif's gateway does with
+    coex). Ping avg 7 → ~60 ms
+  - **open**: after an abrupt reset Wi-Fi now takes ~20 s to an IP (early auth abort
+    at 2 s, then a 15 s scan under coex); a clean boot without Zigbee scans was 1.7 s.
+    And whether sensors are *heard* reliably with these priorities is unmeasured:
+    measure with real devices (missed reports / join success) and tune
+- [x] Form network on first boot: channel mask {15, 25} → channel 15; random PAN
+      (0x4668); network key generated by the stack. Starts **before Wi-Fi**, never waits for it
+- [x] Device registry (`zb_dev.c`): PSRAM table (32 devices), persisted to
+      `/storage/zb/devices.json` by a saver task (no file I/O on the Zigbee task),
+      **including endpoints and cluster lists**
+- [x] Interview code written (Basic "magic" read + Active EP in parallel on announce
+      → Simple Desc → IAS CIE write + unsolicited enroll + zone read → bind +
+      reporting; 2 s retries ×6, resume on next check-in). **Untested with a device**
+- [x] Web: Devices page (default), `GET /api/zb`, `POST /api/zb/{permit,rename,remove}`;
+      the page polls every 1 s. Permit-join round trip verified (open 10 s → 9 s left → closed)
+- [x] OTA health = Zigbee up + web server (Wi-Fi no longer required)
+- Internal heap with Zigbee + Wi-Fi + web (no client): **95 KB free, lowest 63 KB**
+  (Phase 2: 133 / 98) — Zigbee costs ~40 KB
 - [ ] Enrollment ("Scan for devices" in the UI):
   - permit-join for N seconds (default 120) with live countdown over WebSocket
   - live list of `device_announce` events as they arrive
@@ -696,7 +718,7 @@ records free and lowest internal heap in its verification notes, so a shortage i
 seen coming.
 
 Where it stands: after Phase 2, **133 KB free, lowest 98 KB** (Wi-Fi + web UI +
-WebSocket client + on-board log). Expected next (estimates, not measured here):
+WebSocket client + on-board log); with Zigbee (Phase 3) **95 KB free, lowest 63 KB**. Expected next (estimates, not measured here):
 Zigbee ~60–80 KB, Tailscale ~42 KB of task stacks + ~30–40 KB for its persistent
 TLS connection, Lua engine task ~8–16 KB. That adds up to more than what's free,
 so expect to pull levers during Phase 3 or 4.

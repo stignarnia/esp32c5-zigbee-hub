@@ -4,7 +4,7 @@ idf_component_register(
     PRIV_INCLUDE_DIRS "."
     REQUIRES esp_common
     PRIV_REQUIRES esp_http_server esp_timer esp_system esp_netif app_update esp_app_format
-                  nvs_flash mbedtls log hubsys hublog wifi5g spi_flash
+                  nvs_flash mbedtls log hubsys hublog wifi5g spi_flash zb
 )
 
 # UI assets: gzipped at build time (-n: no timestamp, reproducible), embedded as

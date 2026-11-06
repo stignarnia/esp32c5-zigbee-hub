@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "zb.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_flash.h"
@@ -387,6 +388,74 @@ static esp_err_t h_logs(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+// ---- Zigbee ---------------------------------------------------------------------------------
+
+static esp_err_t send_cjson(httpd_req_t *req, cJSON *j)
+{
+    char *txt = cJSON_PrintUnformatted(j);
+    cJSON_Delete(j);
+    if (!txt) return web_send_error(req, "500 Internal Server Error", "out of memory");
+    esp_err_t err = web_send_json(req, "200 OK", txt);
+    cJSON_free(txt);
+    return err;
+}
+
+static esp_err_t h_zb_get(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddItemToObject(o, "network", zb_network_json());
+    cJSON_AddNumberToObject(o, "rev", zb_revision());
+    cJSON_AddItemToObject(o, "devices", zb_devices_json());
+    return send_cjson(req, o);
+}
+
+// Small JSON body -> cJSON (NULL on error; the caller replies 400).
+static cJSON *read_json(httpd_req_t *req)
+{
+    char body[160];
+    if (web_read_body(req, body, sizeof(body)) != ESP_OK) return NULL;
+    return cJSON_Parse(body);
+}
+
+static esp_err_t h_zb_permit(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    cJSON *j = read_json(req);
+    const cJSON *s = cJSON_GetObjectItem(j, "seconds");
+    int secs = cJSON_IsNumber(s) ? s->valueint : -1;
+    cJSON_Delete(j);
+    if (secs < 0 || secs > 254) return web_send_error(req, "400 Bad Request", "seconds: 0..254");
+    esp_err_t err = zb_permit_join((uint8_t)secs);
+    if (err != ESP_OK) return web_send_error(req, "503 Service Unavailable", esp_err_to_name(err));
+    return web_send_json(req, "200 OK", "{\"ok\":true}");
+}
+
+static esp_err_t h_zb_rename(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    cJSON *j = read_json(req);
+    const cJSON *ieee = cJSON_GetObjectItem(j, "ieee"), *name = cJSON_GetObjectItem(j, "name");
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (cJSON_IsString(ieee) && cJSON_IsString(name)) err = zb_rename(ieee->valuestring, name->valuestring);
+    cJSON_Delete(j);
+    if (err == ESP_ERR_INVALID_ARG) return web_send_error(req, "400 Bad Request", "ieee and name required");
+    if (err != ESP_OK) return web_send_error(req, "404 Not Found", "no such device");
+    return web_send_json(req, "200 OK", "{\"ok\":true}");
+}
+
+static esp_err_t h_zb_remove(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    cJSON *j = read_json(req);
+    const cJSON *ieee = cJSON_GetObjectItem(j, "ieee");
+    esp_err_t err = cJSON_IsString(ieee) ? zb_remove(ieee->valuestring) : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(j);
+    if (err == ESP_ERR_INVALID_ARG) return web_send_error(req, "400 Bad Request", "ieee required");
+    if (err != ESP_OK) return web_send_error(req, "404 Not Found", "no such device");
+    return web_send_json(req, "200 OK", "{\"ok\":true}");
+}
+
 static esp_err_t h_coredump(httpd_req_t *req)
 {
     if (!web_guard(req)) return ESP_OK;
@@ -438,6 +507,10 @@ esp_err_t api_register(httpd_handle_t server)
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = h_reboot},
         {.uri = "/api/logs", .method = HTTP_GET, .handler = h_logs},
         {.uri = "/api/coredump", .method = HTTP_GET, .handler = h_coredump},
+        {.uri = "/api/zb", .method = HTTP_GET, .handler = h_zb_get},
+        {.uri = "/api/zb/permit", .method = HTTP_POST, .handler = h_zb_permit},
+        {.uri = "/api/zb/rename", .method = HTTP_POST, .handler = h_zb_rename},
+        {.uri = "/api/zb/remove", .method = HTTP_POST, .handler = h_zb_remove},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);

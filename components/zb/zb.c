@@ -1,4 +1,5 @@
 #include "zb.h"
+#include "zb_internal.h"
 
 #include <inttypes.h>
 
@@ -11,17 +12,18 @@
 #include "ezbee/zha.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 
 static const char *TAG = "zb";
 
 // 2.4 GHz neighbours here sit on Wi-Fi channels 6, 8, 9, 11: Zigbee 15 and 25
 // are clear of them. The energy scan at formation picks the quieter one.
 #define ZB_CHANNEL_MASK    ((1u << 15) | (1u << 25))
-#define ZB_HUB_EP          1
 #define ZB_STORAGE_PART    "zb_storage"
 #define ZB_MAX_CHILDREN    32
 
 static volatile bool s_up;
+static volatile int64_t s_permit_until_us;
 static esp_ieee802154_coex_config_t s_coex_default;
 static int64_t s_start_us;
 
@@ -35,6 +37,9 @@ static int64_t s_start_us;
 static void coex_settle(const char *what)
 {
     esp_ieee802154_set_coex_config(s_coex_default);
+    ezb_extaddr_t me;
+    ezb_get_extended_address(&me);
+    zb_dev_set_my_ieee(me.u64);
     s_up = true;
     ESP_LOGI(TAG, "%s in %lld ms; coex back to defaults (txrx %d, txrx_at %d)", what,
              (esp_timer_get_time() - s_start_us) / 1000, s_coex_default.txrx, s_coex_default.txrx_at);
@@ -92,12 +97,19 @@ static bool on_signal(const ezb_app_signal_t *sig)
     }
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS: {
         uint8_t secs = *(const uint8_t *)params;
+        s_permit_until_us = secs ? esp_timer_get_time() + (int64_t)secs * 1000000 : 0;
         ESP_LOGI(TAG, "permit join: %s (%u s)", secs ? "open" : "closed", secs);
+        zb_dev_notify();
         break;
     }
     case EZB_ZDO_SIGNAL_DEVICE_ANNCE: {
         const ezb_zdo_signal_device_annce_params_t *p = params;
-        ESP_LOGI(TAG, "device announce: short 0x%04x", p->short_addr);
+        zb_dev_on_announce(p->short_addr, p->device_addr.u64, p->capability);
+        break;
+    }
+    case EZB_ZDO_SIGNAL_LEAVE_INDICATION: {
+        const ezb_zdo_signal_leave_indication_params_t *p = params;
+        if (p->leave_type == EZB_ZDO_LEAVE_TYPE_RESET) zb_dev_on_leave(p->device_addr.u64);
         break;
     }
     default:
@@ -116,7 +128,22 @@ static esp_err_t register_hub_endpoint(void)
                                                                     EZB_ZCL_CLUSTER_SERVER);
     ezb_zcl_basic_cluster_desc_add_attr(basic, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)"\x0a" "zigbee-hub");
     ezb_zcl_basic_cluster_desc_add_attr(basic, EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)"\x07" "esp32c5");
+    // Client-side clusters: what the hub reads, configures and receives reports or
+    // IAS notifications from.
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_power_config_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_on_off_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_level_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_color_control_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_temperature_measurement_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_rel_humidity_measurement_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_pressure_measurement_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_illuminance_measurement_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_occupancy_sensing_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_ias_zone_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_electrical_measurement_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_metering_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
     esp_err_t err = esp_zigbee_err_to_esp(ezb_af_device_add_endpoint_desc(dev, ep));
+    if (err == ESP_OK) ezb_zcl_core_action_handler_register(zb_dev_on_zcl);
     if (err == ESP_OK) err = esp_zigbee_err_to_esp(ezb_af_device_desc_register(dev));
     return err;
 }
@@ -181,8 +208,18 @@ fail:
     vTaskDelete(NULL);
 }
 
+static void tick_cb(TimerHandle_t t)
+{
+    if (s_up) esp_zigbee_task_queue_post(zb_dev_tick, NULL);
+}
+
 esp_err_t zb_start(void)
 {
+    esp_err_t e = zb_dev_init();
+    if (e != ESP_OK) return e;
+    TimerHandle_t t = xTimerCreate("zb_tick", pdMS_TO_TICKS(1000), pdTRUE, NULL, tick_cb);
+    if (!t || xTimerStart(t, 0) != pdPASS) return ESP_ERR_NO_MEM;
+
     // Before the first Wi-Fi association (reference repo: without it the station
     // barely associated, 371 s -> 27 s).
     esp_err_t err = esp_coex_wifi_i154_enable();
@@ -194,4 +231,73 @@ esp_err_t zb_start(void)
 bool zb_is_up(void)
 {
     return s_up;
+}
+
+// ---- API for other tasks ---------------------------------------------------------------
+
+esp_err_t zb_permit_join(uint8_t seconds)
+{
+    if (!s_up) return ESP_ERR_INVALID_STATE;
+    if (!esp_zigbee_lock_acquire(pdMS_TO_TICKS(1000))) return ESP_ERR_TIMEOUT;
+    ezb_err_t e = seconds ? ezb_bdb_open_network(seconds) : ezb_bdb_close_network();
+    esp_zigbee_lock_release();
+    if (e == EZB_ERR_NONE) {
+        s_permit_until_us = seconds ? esp_timer_get_time() + (int64_t)seconds * 1000000 : 0;
+        zb_dev_notify();
+    }
+    ESP_LOGI(TAG, "permit join %u s requested: 0x%x", seconds, e);
+    return esp_zigbee_err_to_esp(e);
+}
+
+uint32_t zb_permit_left(void)
+{
+    int64_t left = s_permit_until_us - esp_timer_get_time();
+    return left > 0 ? (uint32_t)((left + 999999) / 1000000) : 0;
+}
+
+cJSON *zb_network_json(void)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "up", s_up);
+    cJSON_AddNumberToObject(o, "permit_s", zb_permit_left());
+    if (s_up && esp_zigbee_lock_acquire(pdMS_TO_TICKS(200))) {
+        ezb_extpanid_t ext;
+        ezb_nwk_get_extended_panid(&ext);
+        char buf[20];
+        snprintf(buf, sizeof(buf), "0x%04x", ezb_nwk_get_panid());
+        cJSON_AddStringToObject(o, "pan", buf);
+        snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)ext.u64);
+        cJSON_AddStringToObject(o, "ext_pan", buf);
+        cJSON_AddNumberToObject(o, "channel", ezb_nwk_get_current_channel());
+        esp_zigbee_lock_release();
+    }
+    return o;
+}
+
+static void remove_on_zb_task(void *arg)
+{
+    uint64_t *p = arg;
+    uint64_t ieee = p[0];
+    uint16_t short_addr = (uint16_t)p[1];
+    free(p);
+    ezb_zdo_nwk_mgmt_leave_req_t req = {
+        .dst_nwk_addr = short_addr,
+        .field = {.rejoin = false},
+    };
+    req.field.device_addr.u64 = ieee;
+    ezb_err_t e = ezb_zdo_nwk_mgmt_leave_req(&req);
+    ESP_LOGI(TAG, "0x%04x: leave request sent (0x%x); forgotten", short_addr, e);
+    zb_dev_forget(ieee);  // sleepy devices may not hear it: forget them anyway
+}
+
+esp_err_t zb_remove(const char *ieee_hex)
+{
+    uint16_t short_addr;
+    uint64_t ieee;
+    if (!zb_dev_lookup_short(ieee_hex, &short_addr, &ieee)) return ESP_ERR_NOT_FOUND;
+    uint64_t *p = malloc(2 * sizeof(uint64_t));
+    if (!p) return ESP_ERR_NO_MEM;
+    p[0] = ieee;
+    p[1] = short_addr;
+    return esp_zigbee_task_queue_post(remove_on_zb_task, p);
 }

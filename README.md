@@ -298,7 +298,7 @@ as its own device, with its name, area, manufacturer and model:
 
 | Zigbee device | In Home Assistant |
 |---|---|
-| temperature/humidity/pressure/illuminance sensor | sensors with the right device class |
+| temperature/humidity sensor | sensors with the right device class |
 | contact, motion, leak, smoke sensor | binary sensors |
 | any device | battery, link quality, last seen (diagnostic) |
 

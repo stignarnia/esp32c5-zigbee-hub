@@ -571,10 +571,10 @@ For long tests without a serial cable: log on the board, download later.
   - a sensor that fell asleep mid-interview is finished on its next check-in,
     instead of being dropped as failed
   - the UI shows it within a second of the announce, even before the interview ends
-- [~] Capability mapping, sensors only: IAS Zone (contact/motion/water/smoke) and Power
+- [x] Capability mapping, sensors only: IAS Zone (contact/motion/water/smoke) and Power
       Config (battery) verified on the contact sensors; Temperature, Humidity and
-      Occupancy reporting built (no such sensor here to verify); Pressure and
-      Illuminance not mapped yet
+      Occupancy reporting built (no such sensor here to verify). Pressure and
+      illuminance: not doing (user decision 2026-11-06)
 - [x] Device page: live state, LQI/RSSI, last seen, availability, rename, remove — done;
       re-interview (redoes every step; battery devices at their next check-in) — verified
       2026-11-06 on the Door sensor: pressed twice, each time "waiting for it to wake up",

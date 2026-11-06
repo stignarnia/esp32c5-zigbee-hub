@@ -210,7 +210,7 @@ Notes from the first boot:
   We don't plan flash encryption, but Phase 4 must decide deliberately where
   microlink's TLS/WireGuard state lives (keys internal, bulk buffers in PSRAM).
 
-### Phase 1 — Provisioning + 5 GHz Wi-Fi (code done 2026-11-04; overnight test running via the on-board log)
+### Phase 1 — Provisioning + 5 GHz Wi-Fi (done 2026-11-04; 42 h soak passed 2026-11-06)
 - [x] `flash.sh` (+ `tools/mkprov.py`):
   - finds the active Wi-Fi connection with `nmcli`; reads SSID + PSK (sudo
     fallback only if NetworkManager withholds the secret — here it didn't)
@@ -264,8 +264,15 @@ Notes from the first boot:
 - [x] Log channel + RSSI + band on connect; `HUB_READY ip=… net=… ch=… rssi=… boot_ms=…`
       line for tools
 - [x] mDNS `zigbee-hub.local` (espressif/mdns 1.15.0) — resolves from the dev machine
-- [~] Verified on the home network **as-is, DFS**: see measurements. 22 min serial soak: 0 disconnects.
-      Overnight run started 2026-11-04 21:18 UTC, recorded by `hublog`; results go here
+- [x] Verified on the home network **as-is, DFS**: see measurements. 22 min serial soak: 0 disconnects.
+      **`hublog` soak 2026-11-04 21:18 → 2026-11-06 15:43 UTC (42.4 h, 508 samples, no gaps):
+      0 disconnects, 0 NO_AP_FOUND, 0 failovers, 0 driver restarts, 0 watchdog reboots,
+      1 connect.** Router stayed on ch 112 (DFS) throughout. Heap flat at 132 KB free /
+      97 KB min (the min is from boot), PSRAM flat — no leak. No WARN/ERROR after boot.
+      DFS stays; no need to move the router
+- [ ] **Bug: RSSI is stale.** Read once at connect (`wifi5g.c:244`) and never refreshed,
+      so the UI, status API and every `sample` line show the association-time value
+      (−20 dBm for 42 h). Refresh with `esp_wifi_sta_get_rssi()` in the 1 s tick
 
 #### Phase 1 measurements (2026-11-04, home network, WPA3-SAE, RSSI −30…−43 dBm)
 
@@ -304,8 +311,8 @@ Ping from the dev machine: 80/80 over 7 min, avg 9.6 ms, max 96 ms. 0 disconnect
 |---|---|---|
 | boot → Wi-Fi | 25–27 s, "0 failed attempts" | **4.07 s** after abrupt reset; ~2.4 s clean |
 | scanning | all-channel (their own test: longer passive dwell made it *worse*, 51 s vs 27 s) | fast scan + per-network channel hint + BSSID-pinned retries |
-| DFS | ch 64: API login 10–28 s, frequent timeouts | ch 52 → router moved to 112; ping 9.6 ms avg; HTTP/API latency to measure in Phase 2 |
-| AP loss (reason 201) | periodic, at −50 dBm, recovered by watchdog | soak running (none in the first 7 min) |
+| DFS | ch 64: API login 10–28 s, frequent timeouts | ch 52 → router moved to 112; ping 7 ms avg; `GET /api/status` p50 19 ms, max 27 ms (60 req, after 42 h up); login 0.92 s (all PBKDF2) |
+| AP loss (reason 201) | periodic, at −50 dBm, recovered by watchdog | **none in 42.4 h** (no Zigbee/coex yet) |
 | 2.4 GHz | falls back to AUTO band after failures | never |
 
 Not yet a fair fight: the reference measured with **Zigbee + coex running** (and its
@@ -678,6 +685,33 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       UI client + 3 scripts, and Zigbee + Tailscale + UI client + HA connected
 - [ ] Zigbee network backup/restore (download from UI)
 - [ ] Factory reset (UI + long-press BOOT button)
+
+## Internal RAM
+
+**Policy (user, 2026-11-04): reclaim only when a phase actually needs it** — the
+hardware is there to be used. No pre-emptive audits or cuts. Every phase still
+records free and lowest internal heap in its verification notes, so a shortage is
+seen coming.
+
+Where it stands: after Phase 2, **133 KB free, lowest 98 KB** (Wi-Fi + web UI +
+WebSocket client + on-board log). Expected next (estimates, not measured here):
+Zigbee ~60–80 KB, Tailscale ~42 KB of task stacks + ~30–40 KB for its persistent
+TLS connection, Lua engine task ~8–16 KB. That adds up to more than what's free,
+so expect to pull levers during Phase 3 or 4.
+
+Levers, roughly cheapest first — pull only what's needed:
+1. Wi-Fi code out of IRAM (`CONFIG_ESP_WIFI_IRAM_OPT`, `_RX_IRAM_OPT`,
+   `_SLP_IRAM_OPT` = n; the boot log shows all three on). On the C5, IRAM code and
+   heap share the same 320 KB. Costs Wi-Fi throughput we don't need. Est. tens of KB
+2. Fewer static Wi-Fi RX buffers (`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM`, now 16
+   × ~1.7 KB). 6–8 is plenty here. Est. ~14 KB
+3. mbedTLS allocations in PSRAM (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`). IDF's warning
+   about PSRAM on rev v1.0 only matters with flash encryption, which we don't use —
+   anyone with the board can read the flash anyway. Biggest win for Tailscale
+4. Task stacks in PSRAM (`CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM` +
+   `xTaskCreateWithCaps`) — only for tasks that never write flash/NVS (audit each)
+5. Measure first when a lever is needed: per-task stack high-water marks,
+   `heap_caps_print_heap_info`, `idf.py size-components`
 
 ## Lessons carried over from the reference repo
 

@@ -28,3 +28,5 @@ uint32_t zb_revision(void);     // changes whenever devices/state change
 esp_err_t zb_rename(const char *ieee_hex, const char *name);
 esp_err_t zb_remove(const char *ieee_hex);  // asks the device to leave, then forgets it
 esp_err_t zb_reinterview(const char *ieee_hex);  // sleepy devices: at their next check-in
+bool zb_interviewing(void);  // a device is being interviewed right now (awake, retrying)
+void zb_save_now(void);      // write the device registry to flash now (before a reboot)

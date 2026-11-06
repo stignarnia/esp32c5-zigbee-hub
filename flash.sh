@@ -82,9 +82,15 @@ if [[ "$OTA" == 1 ]]; then
   NEW_ID=$("$PY" -I -c 'import sys,hashlib; d=open(sys.argv[1],"rb").read(); print(d[32+144:32+144+8].hex())' "$BIN")
   JAR=$(mktemp); trap 'rm -f "$JAR"' EXIT
   # Password goes through stdin, never argv.
-  printf '{"password":"%s"}' "$(<"$SECRETS/admin_password")" |
-    curl -sf --max-time 10 -c "$JAR" -H 'X-Hub: 1' -H 'Content-Type: application/json' \
-      --data @- "http://$HOST/api/login" >/dev/null || die "login to $HOST failed (is it online? right password?)"
+  login_ok=0
+  for try in 1 2 3; do
+    code=$(printf '{"password":"%s"}' "$(<"$SECRETS/admin_password")" |
+      curl -sS --max-time 10 -c "$JAR" -o /dev/null -w '%{http_code}' -H 'X-Hub: 1' \
+        -H 'Content-Type: application/json' --data @- "http://$HOST/api/login" 2>&1) && [[ "$code" == 200 ]] && { login_ok=1; break; }
+    warn "login to $HOST, attempt $try: ${code:-no answer}"
+    sleep 2
+  done
+  [[ "$login_ok" == 1 ]] || die "login to $HOST failed 3 times (is it online? right password?)"
   OLD_ID=$(curl -sf --max-time 5 -b "$JAR" "http://$HOST/api/status" | "$PY" -I -c 'import sys,json; print(json.load(sys.stdin)["firmware"]["build_id"])')
   [[ "$OLD_ID" == "$NEW_ID" ]] && warn "the hub already runs this exact build ($NEW_ID); installing anyway"
   info "uploading to $HOST…"

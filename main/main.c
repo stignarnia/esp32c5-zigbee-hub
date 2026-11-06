@@ -196,6 +196,26 @@ static void log_boot_summary(void)
              r.kind);
 }
 
+// Wi-Fi watchdog's last resort (a reboot after a long outage) waits for a safe moment:
+// nothing pairing, no device mid-interview, no firmware upload being written. Asked
+// every second while the reboot is due; the registry is flushed before saying yes.
+// (Script timers join this check with the automation engine, Phase 5.)
+static bool reboot_gate(void)
+{
+    static const char *last;
+    const char *why = zb_permit_left() > 0 ? "pairing window open"
+                    : zb_interviewing()    ? "a device is being interviewed"
+                    : hubsys_ota_in_progress() ? "firmware upload in progress"
+                    : NULL;
+    if (why) {
+        if (why != last) ESP_LOGW(TAG, "watchdog reboot deferred: %s", why);
+        last = why;
+        return false;
+    }
+    zb_save_now();
+    return true;
+}
+
 void app_main(void)
 {
     hublog_init();  // first: capture everything from here on into the on-board log
@@ -222,6 +242,7 @@ void app_main(void)
         strlcpy(nets[1].ssid, prov.ssid2, sizeof(nets[1].ssid));
         strlcpy(nets[1].psk, prov.psk2, sizeof(nets[1].psk));
         ESP_ERROR_CHECK(wifi5g_start(nets, prov.hostname, prov.country));
+        wifi5g_set_reboot_gate(reboot_gate);
         memset(nets, 0, sizeof(nets));
         start_mdns(prov.hostname);
         hublog_start_time_sync();

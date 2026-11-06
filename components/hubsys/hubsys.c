@@ -259,6 +259,11 @@ esp_err_t hubsys_ota_finish(void)
     return ESP_OK;
 }
 
+bool hubsys_ota_in_progress(void)
+{
+    return s_ota_part != NULL;
+}
+
 void hubsys_ota_abort(void)
 {
     if (s_ota_part) {

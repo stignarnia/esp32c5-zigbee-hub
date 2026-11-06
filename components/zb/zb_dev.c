@@ -791,8 +791,11 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
     return o;
 }
 
+static SemaphoreHandle_t s_save_mtx;  // one writer of the registry file at a time
+
 static void save_now(void)
 {
+    xSemaphoreTake(s_save_mtx, portMAX_DELAY);
     LOCK();
     s_dirty = false;
     cJSON *arr = cJSON_CreateArray();
@@ -818,6 +821,25 @@ static void save_now(void)
         s_dirty = true;
         UNLOCK();
     }
+    xSemaphoreGive(s_save_mtx);
+}
+
+void zb_save_now(void)
+{
+    if (s_save_mtx) save_now();
+}
+
+bool zb_interviewing(void)
+{
+    bool busy = false;
+    LOCK();
+    for (int i = 0; i < ZB_MAX_DEVICES && !busy; i++) {
+        // Actively retrying only: a sleepy device waiting for its next check-in
+        // could otherwise hold off a reboot indefinitely.
+        busy = s_dev[i].used && !complete(&s_dev[i]) && s_dev[i].next_try_us != 0;
+    }
+    UNLOCK();
+    return busy;
 }
 
 static void saver_task(void *arg)
@@ -894,7 +916,8 @@ esp_err_t zb_dev_init(void)
 {
     s_dev = heap_caps_calloc(ZB_MAX_DEVICES, sizeof(zdev_t), MALLOC_CAP_SPIRAM);
     s_mtx = xSemaphoreCreateMutex();
-    if (!s_dev || !s_mtx) return ESP_ERR_NO_MEM;
+    s_save_mtx = xSemaphoreCreateMutex();
+    if (!s_dev || !s_mtx || !s_save_mtx) return ESP_ERR_NO_MEM;
     load();
     if (xTaskCreate(saver_task, "zb_save", 4096, NULL, 2, NULL) != pdPASS) return ESP_ERR_NO_MEM;
     return ESP_OK;

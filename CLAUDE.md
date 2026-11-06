@@ -257,8 +257,11 @@ Notes from the first boot:
        (timers saved to RTC memory and restored after the soft reset)
      - if not safe, re-checked every second until it is
   4. so a router that's off overnight costs a handful of reboots, never a loop
-  - [x] watchdog reboot logged on the next boot; [ ] shown in the UI (Phase 2)
-  - [ ] gate implemented (Phases 3/5: timers, pairing, OTA, state flushed)
+  - [x] watchdog reboot logged on the next boot; [x] shown in the UI (Status → Wi-Fi recovery)
+  - [~] gate implemented 2026-11-06 (`reboot_gate` in `main.c`): defers while the pairing
+    window is open, a device is actively being interviewed, or a firmware upload is
+    being written; flushes the device registry before allowing it. Script timers and
+    `state` join with Phase 5. Not yet observed deferring (needs a 20+ min outage)
   - [ ] **not yet observed firing** — needs the AP gone for 5+ / 20+ min
   - the cost being guarded: a reboot takes a few seconds until Zigbee is back
     (network restored from `zb_storage`, no re-pairing), and reports sent in that
@@ -401,19 +404,21 @@ OTA bookkeeping), `wifi5g` (runtime network API).
       reports "running the new firmware" / "rolled back"
 - [x] Bookkeeping in NVS (`ota`: pending build id, from id) → on the next boot
       `updated` or `rolled_back`, shown in the UI and the status API
-- [~] **Confirmation rule, Phase 2 version**: confirmed once Wi-Fi has an IP and
-      the web server runs, held 5 s; not healthy within 120 s → `esp_restart()` →
-      bootloader rolls back. Phase 3 replaces this with "Zigbee is up". Known
-      cost: an update installed while the router is down 2+ min rolls back too
+- [x] **Confirmation rule**: Phase 3 version — confirmed once Zigbee is up and the web
+      server runs, held 5 s (Wi-Fi not required); not healthy within 120 s →
+      `esp_restart()` → bootloader rolls back. Verified 2026-11-06 over the air:
+      confirmed in 26.6 s and 35.2 s total
 - [x] Planned reboots disconnect Wi-Fi cleanly first (`wifi5g_prepare_reboot`), so
       the next boot doesn't hit the stale-association login delay
-- [ ] **Reboot gate** ("safe moment": timers/pairing) — nothing to gate yet;
-      lands with Phase 5 (timers) and Phase 3 (pairing)
+- [~] **Reboot gate** — see Phase 1 (pairing/interview/upload done; timers in Phase 5)
 - [x] `flash.sh --ota [--host H]` (default `<hostname>.local`; MagicDNS name
       after Phase 4): build → login (password via stdin) → upload → wait →
       report. **Measured: upload 5.6 s, confirmed 16 s after upload start, ~21 s
       for the whole command when nothing needs rebuilding.** Faster than USB
-- [ ] Rollback demonstrated with a deliberately broken image (not yet)
+- [x] Rollback demonstrated 2026-11-06: an image that calls `abort()` at the start of
+      `app_main`, installed with `flash.sh --ota` → crashed on its first boot → the
+      bootloader loaded the previous slot (`ota_0`), the hub logged `ROLLED_BACK` and the
+      core-dump summary, Wi-Fi back in 2.5 s, `flash.sh` reported the rollback
 - [x] What OTA can't change: bootloader, partition table — USB only, by design
 - [ ] **Optional: signed updates** (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` +
       `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, RSA-3072, Secure Boot V2

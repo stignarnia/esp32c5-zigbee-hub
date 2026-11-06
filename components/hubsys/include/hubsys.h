@@ -33,6 +33,7 @@ esp_err_t hubsys_ota_begin(size_t image_size);
 esp_err_t hubsys_ota_write(const void *data, size_t len);
 esp_err_t hubsys_ota_finish(void);  // validates, sets boot partition, records it
 void hubsys_ota_abort(void);
+bool hubsys_ota_in_progress(void);  // an upload is being written
 
 typedef struct {
     const char *kind;      // "none" | "trial" | "updated" | "rolled_back"

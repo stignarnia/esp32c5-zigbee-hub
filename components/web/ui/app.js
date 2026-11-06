@@ -298,13 +298,14 @@ pages.status = {
         ['Last reset', esc(s.boot.reset_reason) + (s.boot.planned_reason ? `<br><span class="muted">${esc(s.boot.planned_reason)}</span>` : '')],
       ])}</section>
       <section class="card"><h2>Firmware</h2>${dl([
-        ['Version', esc(f.version)],
+        ['Version', `${esc(f.version)} <span class="muted">(git)</span>`],
         ['Build', `<code>${esc(f.build_id)}</code>`],
         ['Built', esc(f.built)],
         ['ESP-IDF', esc(f.idf)],
         ['Slot', esc(f.partition)],
         ['State', f.on_trial ? '<span class="badge warn">on trial</span>' : '<span class="badge ok">confirmed</span>'],
-        ['Last update', last],
+        ['Last over-the-air update', last + (u.result === 'updated' && u.to !== f.build_id
+          ? '<br><span class="muted">flashed over USB since</span>' : '')],
       ])}</section>`;
   },
 };

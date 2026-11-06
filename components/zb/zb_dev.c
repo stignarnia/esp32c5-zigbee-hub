@@ -802,14 +802,22 @@ static void save_now(void)
     UNLOCK();
     char *txt = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
-    if (!txt) return;
-    mkdir(REG_DIR, 0755);
-    FILE *f = fopen(REG_TMP, "w");
-    bool ok = f && fputs(txt, f) >= 0;
-    if (f) ok = (fclose(f) == 0) && ok;
-    if (ok) ok = rename(REG_TMP, REG_PATH) == 0;
-    if (!ok) ESP_LOGE(TAG, "saving the device registry failed");
-    cJSON_free(txt);
+    bool ok = txt != NULL;
+    if (ok) {
+        mkdir(REG_DIR, 0755);
+        FILE *f = fopen(REG_TMP, "w");
+        ok = f && fputs(txt, f) >= 0;
+        if (f) ok = (fclose(f) == 0) && ok;
+        if (ok) ok = rename(REG_TMP, REG_PATH) == 0;
+        cJSON_free(txt);
+    }
+    if (!ok) {
+        // Still unsaved: the saver task tries again on its next pass (2 s).
+        ESP_LOGE(TAG, "saving the device registry failed, retrying");
+        LOCK();
+        s_dirty = true;
+        UNLOCK();
+    }
 }
 
 static void saver_task(void *arg)

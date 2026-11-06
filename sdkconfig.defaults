@@ -50,8 +50,8 @@ CONFIG_HTTPD_WS_SUPPORT=y
 # Auth runs before the WebSocket upgrade (IDF 6.1 skips the handler on handshake).
 CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
-# Room for the web UI (13 httpd slots + 3 internal), mDNS, SNTP, and later Tailscale
-# and the ESPHome API (default 10).
+# Room for the web UI (httpd default 7 slots + 3 internal), mDNS, SNTP, and later
+# Tailscale and the ESPHome API (default 10).
 CONFIG_LWIP_MAX_SOCKETS=24
 
 # Wi-Fi event handlers log, and every log line also passes through the on-board

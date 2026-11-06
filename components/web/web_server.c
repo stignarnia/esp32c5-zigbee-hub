@@ -252,10 +252,6 @@ esp_err_t web_start(const web_config_t *cfg)
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size = 8192;           // PBKDF2 + JSON building
     hc.max_uri_handlers = 24;
-    // Measured: with 7, a phone's Chrome failed with ERR_TOO_MANY_RETRIES while a
-    // laptop had the UI open — the LRU purge kept closing the phone's own freshly
-    // opened parallel connections. Must stay <= LWIP_MAX_SOCKETS - 3.
-    hc.max_open_sockets = 13;
     hc.lru_purge_enable = true;     // a stuck client can't lock others out
     hc.recv_wait_timeout = 10;      // OTA uploads stream for seconds
     hc.send_wait_timeout = 10;

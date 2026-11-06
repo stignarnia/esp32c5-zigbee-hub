@@ -75,16 +75,11 @@ static struct {
     wifi5g_stats_t stats;
 } s;
 
-// No early auth abort (removed 2026-11-06). Without Zigbee, aborting 2 s after
-// connect() and retrying pinned saved ~2 s after an abrupt reset (the AP ignores the
-// first auth of a stale association). With 802.15.4 coex it made things worse, so it
-// is gone. Measured on DFS channel 112: the first connect after boot always walks the
-// whole band passively (DFS: listen only) and misses the AP's beacons under coex ->
-// NO_AP_FOUND after ~15 s; the next attempt goes straight to the hinted channel and
-// connects in ~0.5 s. Boot -> IP 17.7 s, every time. An abort only restarted the walk.
-// Tried, no effect: PS_NONE during the first connect, coex prefer-Wi-Fi, re-applying
-// the config after the band switch. A 120 ms passive dwell failed the walk sooner but
-// made the retry miss beacons too. Non-DFS channels (active scan) avoid it entirely.
+// No early auth abort. After an abrupt reset the AP still holds our old (PMF)
+// association and ignores new auths for ~4 s (measured 2026-11-06 with Zigbee up:
+// first auth 1.7 s -> AUTH_EXPIRE 5.8 s -> pinned retry associates at once, IP 5.9 s).
+// Aborting 2 s in and retrying was also ignored and cost another 4 s (IP ~8.5 s), so
+// the driver's own timeout plus the pinned retry is the fastest. Clean boots: 1.7 s.
 
 static const char *reason_str(uint8_t r)
 {
@@ -167,7 +162,6 @@ static void radio_up_and_connect(void)
     // Modem sleep, not PS_NONE: with Wi-Fi/802.15.4 coex the station must yield the
     // shared RF between beacons, or Zigbee never gets air time (measured: network
     // formation never completed with PS_NONE; Espressif's gateway does the same).
-    // (PS_NONE during the first connect was tried: no effect on the first-scan stall.)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
     try_connect();
 }

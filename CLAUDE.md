@@ -506,7 +506,11 @@ For long tests without a serial cable: log on the board, download later.
     help); the A/B that pointed at Zigbee: no Zigbee → probe on air at 1.74 s every boot;
     Wi-Fi started 20 s after Zigbee → connected on the first attempt. Removed earlier
     because they "made it worse under coex", but measured *with this bug*: the early auth
-    abort (Phase 1) — worth re-measuring now for the 4 s stale-association case
+    abort (Phase 1). Re-measured after the fix, 5 abrupt resets: clean boots 1.66 s; with
+    a stale association the AP ignored the aborted-and-retried auth too (retry at 3.8 s →
+    AUTH_EXPIRE at 7.9 s, IP ~8.5 s) vs 5.9 s without the abort → stays removed. The AP
+    now ignores new auths for ~4 s (Phase 1, no Zigbee: 1.8 s). Planned reboots deauth
+    first (`wifi5g_prepare_reboot`), so only crashes and power blips pay the 4 s
   - Laptop capture notes: the mt7925 monitor interface works only as `wlan0` itself
     (NetworkManager told `managed no`, RF-kill unblocked), and in that mode it captured
     on ch 36 but nothing on 40 even from a hub probing without coex

@@ -71,16 +71,20 @@ static struct {
     bool want_pin, pinned;
     uint8_t pin_bssid[6];
     uint8_t pin_tries;
-    // Early auth abort: after an abrupt reset the AP still holds our old (PMF)
-    // association and ignores the first auth; the driver waits its full 4 s. The
-    // AP is ready well before that (measured: accepted 1.8 s after auth start), so
-    // abort once, early, and retry pinned. Healthy connects finish in ~1.3 s.
     int64_t attempt_us;       // when the current connect attempt started, 0 = none
-    bool abort_done, abort_pending;  // once per outage; re-armed on GOT_IP
     wifi5g_stats_t stats;
 } s;
 
-#define AUTH_ABORT_US (2000LL * 1000)  // after connect(); auth starts ~0.9 s in
+// No early auth abort (removed 2026-11-06). Without Zigbee, aborting 2 s after
+// connect() and retrying pinned saved ~2 s after an abrupt reset (the AP ignores the
+// first auth of a stale association). With 802.15.4 coex it made things worse, so it
+// is gone. Measured on DFS channel 112: the first connect after boot always walks the
+// whole band passively (DFS: listen only) and misses the AP's beacons under coex ->
+// NO_AP_FOUND after ~15 s; the next attempt goes straight to the hinted channel and
+// connects in ~0.5 s. Boot -> IP 17.7 s, every time. An abort only restarted the walk.
+// Tried, no effect: PS_NONE during the first connect, coex prefer-Wi-Fi, re-applying
+// the config after the band switch. A 120 ms passive dwell failed the walk sooner but
+// made the retry miss beacons too. Non-DFS channels (active scan) avoid it entirely.
 
 static const char *reason_str(uint8_t r)
 {
@@ -163,6 +167,7 @@ static void radio_up_and_connect(void)
     // Modem sleep, not PS_NONE: with Wi-Fi/802.15.4 coex the station must yield the
     // shared RF between beacons, or Zigbee never gets air time (measured: network
     // formation never completed with PS_NONE; Espressif's gateway does the same).
+    // (PS_NONE during the first connect was tried: no effect on the first-scan stall.)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
     try_connect();
 }
@@ -187,20 +192,6 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         const wifi_event_sta_disconnected_t *e = data;
         taskENTER_CRITICAL(&s_lock);
         s.attempt_us = 0;
-        if (s.abort_pending) {
-            // Our own early abort: retry right away, not counted as a failure.
-            s.abort_pending = false;
-            s.reconnect_at_us = now;
-            static const uint8_t zero[6] = {0};
-            if (memcmp(e->bssid, zero, 6) != 0) {
-                s.want_pin = true;  // the abort blacklists the AP too
-                memcpy(s.pin_bssid, e->bssid, 6);
-            }
-            taskEXIT_CRITICAL(&s_lock);
-            ESP_LOGI(TAG, "auth abort: retrying now (reason %u)", e->reason);
-            if (s_task) xTaskNotifyGive(s_task);
-            return;
-        }
         bool was_connected = s.connected;
         s.connected = false;
         s.stats.connected = false;
@@ -253,7 +244,6 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
     s.reconnect_at_us = 0;
     s.backoff_us = BACKOFF_MIN_US;
     s.strikes = 0;
-    s.abort_done = false;
     s.stats.connected = true;
     s.stats.net = s.net;
     s.stats.channel = ap.primary;
@@ -459,21 +449,6 @@ static void wifi_task(void *arg)
         int64_t now = esp_timer_get_time();
 
         trial_tick(now);
-
-        taskENTER_CRITICAL(&s_lock);
-        bool do_abort = !s.connected && s.attempt_us && !s.abort_done && !s.pinned &&
-                        s_ch_hint[s.net] && now - s.attempt_us >= AUTH_ABORT_US;
-        if (do_abort) {
-            s.abort_done = true;
-            s.abort_pending = true;
-        }
-        taskEXIT_CRITICAL(&s_lock);
-        if (do_abort) {
-            ESP_LOGW(TAG, "auth abort: no association %lld ms after connect, aborting once",
-                     AUTH_ABORT_US / 1000);
-            esp_wifi_disconnect();
-            continue;
-        }
 
         taskENTER_CRITICAL(&s_lock);
         bool connected = s.connected;

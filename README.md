@@ -150,23 +150,9 @@ Zone enrollment, without which a contact sensor joins but never reports. If a
 sensor falls asleep mid-interview, the hub finishes the interview the next time
 the sensor checks in.
 
-New devices appear in the list as soon as they announce themselves. You then
-watch the interview step by step:
-
-```
-0x59D3  announced                       ✓
-        manufacturer: Zbeacon           ✓
-        model: DS01
-        endpoints: 1                    ✓
-        clusters on 1: Basic, PowerCfg, Identify, IASZone, PollCtrl
-        IAS Zone enrollment             ✓
-        battery reporting               ✓
-        → Contact sensor (open/closed, battery)
-```
-
-Give it a name and it's ready, both in the Devices page and in your
-scripts. Devices with a Zigbee 3.0 install code can be joined by entering the
-code.
+New devices appear in the list as soon as they announce themselves, marked
+"interviewing" until the interview is done. Give it a name and it's ready, both in
+the Devices page and in your scripts.
 
 ### Automations
 
@@ -314,7 +300,6 @@ as its own device, with its name, area, manufacturer and model:
 |---|---|
 | temperature/humidity/pressure/illuminance sensor | sensors with the right device class |
 | contact, motion, leak, smoke sensor | binary sensors |
-| radiator valve, thermostat | climate |
 | any device | battery, link quality, last seen (diagnostic) |
 
 The hub itself adds a **Permit join** button, so you can pair new devices from
@@ -517,7 +502,5 @@ your tailnet requires device approval.
 - [Lua](https://www.lua.org/) (MIT, PUC-Rio)
 - [zigbee2esphome](https://github.com/moag1000/zigbee2esphome): hard-won,
   measured lessons about Zigbee and Wi-Fi on the ESP32-C5
-- [zigbee-herdsman-converters](https://github.com/Koenkk/zigbee-herdsman-converters)
-  (MIT, Koen Kanters): device knowledge
 - [ESPHome](https://github.com/esphome/esphome): the native API's wire format
   and entity model

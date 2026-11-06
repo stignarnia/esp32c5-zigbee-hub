@@ -182,7 +182,7 @@ the app slots need; app slots and LittleFS take everything else (2026-11-06).
 | coredump | coredump | 0x30000 | 0x10000 | ELF core dump on panic; summary logged on next boot, `/api/coredump` |
 | ota_0 | app | 0x40000 | 0x400000 | |
 | ota_1 | app | 0x440000 | 0x400000 | |
-| storage | littlefs | 0x840000 | 0x7C0000 | device registry, scripts, logs, UI overrides, optional converter DB |
+| storage | littlefs | 0x840000 | 0x7C0000 | device registry, scripts, logs, UI overrides |
 
 Credentials live in their own partition so re-provisioning never touches the
 Zigbee network (re-pairing every device would be the cost) or app settings.
@@ -542,12 +542,11 @@ For long tests without a serial cable: log on the board, download later.
 - [x] OTA health = Zigbee up + web server (Wi-Fi no longer required)
 - Internal heap with Zigbee + Wi-Fi + web (no client): **95 KB free, lowest 63 KB**
   (Phase 2: 133 / 98) — Zigbee costs ~40 KB
-- [~] Enrollment ("Scan for devices" in the UI):
+- [x] Enrollment ("Scan for devices" in the UI):
   - [x] permit-join 120 s (button toggles open/close) with live countdown over WebSocket
   - [x] devices appear live as they announce (WebSocket push within 100 ms)
   - [x] interview: active endpoints, simple descriptors, Basic cluster (manufacturer,
     model, power source); the card shows "interviewing" until done
-  - [ ] node descriptor not read (power source comes from Basic); no per-step progress
   - [x] bind + configure reporting (battery, temperature, humidity, on/off, occupancy)
     (reference bug: never initialised → no reports ever arrived)
   - [x] user names the device; persisted to LittleFS **including the cluster list**
@@ -572,11 +571,10 @@ For long tests without a serial cable: log on the board, download later.
   - a sensor that fell asleep mid-interview is finished on its next check-in,
     instead of being dropped as failed
   - the UI shows it within a second of the announce, even before the interview ends
-- [ ] Install-code join (nice-to-have): paste a Zigbee 3.0 install code
-- [ ] Capability mapping from clusters (generic first):
-      On/Off, Level, Color Control (CT + XY), Temperature, Humidity, Pressure,
-      Illuminance, Occupancy, IAS Zone (contact/motion/water/smoke), Power Config
-      (battery), Electrical Measurement, Metering, Window Covering, Thermostat
+- [~] Capability mapping, sensors only: IAS Zone (contact/motion/water/smoke) and Power
+      Config (battery) verified on the contact sensors; Temperature, Humidity and
+      Occupancy reporting built (no such sensor here to verify); Pressure and
+      Illuminance not mapped yet
 - [x] Device page: live state, LQI/RSSI, last seen, availability, rename, remove — done;
       re-interview (redoes every step; battery devices at their next check-in) — verified
       2026-11-06 on the Door sensor: pressed twice, each time "waiting for it to wake up",
@@ -589,7 +587,7 @@ For long tests without a serial cable: log on the board, download later.
       LQI/RSSI/depth)
 - **Zigbee routers (mains devices: plugs, bulbs) are not tested, and this hub is not
   built for them** (user decision 2026-11-06)
-- [~] **Web server stalls (found 2026-11-06, fixed, re-interview not yet re-tested)**:
+- [x] **Web server stalls (found and fixed 2026-11-06; re-interview re-tested by the user)**:
   - one WebSocket client that stops reading blocked the server's only task for
     `send_wait_timeout` (10 s) per push — measured 12 s + 7 s freezes for every page
     and login. Now WS sockets get `SO_SNDTIMEO` 0.5 s and a failed push closes that
@@ -616,9 +614,6 @@ For long tests without a serial cable: log on the board, download later.
       saver copies under `s_mtx` and writes the file after releasing it.
       Minor: a failed registry save clears `s_dirty` first, so it isn't retried until the
       next change
-- [ ] Later, optional: converter DB for quirky devices (Tuya DP etc.), runtime
-      JSON in LittleFS — the reference repo's `data/converters_merged` (z2m-derived,
-      MIT + Apache notices) is the obvious source
 
 ### Phase 4 — Tailscale
 - [ ] **Spike first**: build microlink against IDF v6.1. It uses legacy mbedTLS
@@ -773,9 +768,8 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       CLAUDE.md ("Protobuf device_id Field Numbers") — verify against the current
       `api.proto` before relying on them
 - [ ] Capability → entity mapping (same capabilities as the UI uses):
-      on/off → switch, on/off+level(+color) → light, sensors → sensor with
-      device_class, IAS zone → binary_sensor, covering → cover, thermostat →
-      climate, battery/LQI/last seen → diagnostic entities
+      sensors → sensor with device_class, IAS zone → binary_sensor,
+      battery/LQI/last seen → diagnostic entities
 - [ ] Commands from HA go through the same device command path as Lua
       (one path, two callers)
 - [ ] Gateway entities: permit-join button (pairing works from HA too), Zigbee
@@ -858,8 +852,7 @@ All measured there on the same chip; re-verify, don't assume.
   to modernise it: port to IDF v6.1 / mbedTLS 4 / PSA, newer deps, drop what we
   don't need. It's our fork once copied into `components/tailscale/`.
 - **"Scanning" = discovery, not QR.** Success criterion: *put the battery in a
-  random cheap reed sensor and the hub finds it.* No camera, no install-code UI
-  required (install codes stay a nice-to-have).
+  random cheap reed sensor and the hub finds it.* No camera, no install codes.
 - **HA mode trigger** (opt-in setting on) = zero *enabled* scripts; disabled
   scripts don't count.
 - **Lua** for automations (see Phase 5).

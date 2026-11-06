@@ -73,7 +73,9 @@ function connectWs() {
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onopen = () => $('#dot').classList.add('on');
   ws.onmessage = (ev) => {
-    status = JSON.parse(ev.data);
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'zb') { pages.devices.apply(msg); return; }  // pushed on every device change
+    status = msg;
     onStatus();
   };
   ws.onclose = () => {
@@ -110,8 +112,8 @@ function render() {
 window.addEventListener('hashchange', render);
 
 // Devices -------------------------------------------------------------------------------
-// Polls /api/zb every second while open: a new device shows up within a second of
-// its announce, before the interview finishes.
+// The hub pushes a snapshot over the WebSocket within 100 ms of any change (a sensor
+// opening, a device announcing); polling only while the WebSocket is down.
 const ZONE_STATE = { contact: ['closed', 'OPEN'], motion: ['clear', 'MOTION'], water: ['dry', 'LEAK'],
   fire: ['ok', 'FIRE'], co: ['ok', 'CO'], vibration: ['still', 'VIBRATION'] };
 pages.devices = {
@@ -122,17 +124,18 @@ pages.devices = {
       <section class="card"><h2>Zigbee network</h2><div id="zb-net" class="muted">Loading…</div>
         <div class="row"><button id="zb-scan">Scan for devices</button><span id="zb-permit" class="muted"></span></div>
       </section>
-      <div id="zb-devs" class="grid"></div>`;
+      <div id="zb-devs" class="grid"></div>
+      <section class="card"><h2>Network map</h2><div id="zb-map" class="muted">—</div></section>`;
     $('#zb-scan').addEventListener('click', () => this.permit());
-    this.rev = -1;
     await this.poll();
     this.stop();
-    this.timer = setInterval(() => this.poll(), 1000);
+    this.timer = setInterval(() => { if (!ws || ws.readyState !== WebSocket.OPEN) this.poll(); }, 2000);
   },
   async poll() {
-    let d;
-    try { d = await api('/api/zb'); } catch (e) { return; }
-    if (!$('#zb-net')) { this.stop(); return; }
+    try { this.apply(await api('/api/zb')); } catch (e) { /* offline: keep the last view */ }
+  },
+  apply(d) {
+    if (!$('#zb-net')) return;  // another page is open
     this.data = d;
     const n = d.network;
     $('#zb-net').innerHTML = n.up ? dl([['Channel', n.channel], ['PAN ID', esc(n.pan)], ['Extended PAN', `<code>${esc(n.ext_pan)}</code>`],
@@ -141,6 +144,27 @@ pages.devices = {
     $('#zb-scan').textContent = open ? 'Stop scanning' : 'Scan for devices';
     $('#zb-permit').innerHTML = open ? `<span class="badge ok">open</span> ${n.permit_s} s left — insert the battery or press the device's pairing button` : '';
     this.list(d.devices);
+    this.map(n, d.devices);
+  },
+  map(n, devs) {
+    const el = $('#zb-map');
+    if (!n.up) { el.textContent = '—'; return; }
+    const byIeee = Object.fromEntries(devs.map((v) => [v.ieee, v]));
+    const type = ['coordinator', 'router', 'end device'];
+    const rel = ['parent', 'child', 'sibling', 'none', 'previous child', 'unauthenticated child'];
+    const lqiBadge = (q) => `<span class="badge ${q >= 150 ? 'ok' : q >= 80 ? 'warn' : 'bad'}">LQI ${q}</span>`;
+    const rows = (n.neighbors || []).map((x) => {
+      const v = byIeee[x.ieee];
+      const name = v ? (v.name || [v.manuf, v.model].filter(Boolean).join(' ')) : `0x${x.short.toString(16).padStart(4, '0')}`;
+      return `<tr><td>${esc(name)}</td><td>${type[x.type] || x.type}${x.rx_on ? '' : ' (sleepy)'}</td>
+        <td>${rel[x.relationship] || x.relationship}</td>
+        <td>${x.lqi ? lqiBadge(x.lqi) : '<span class="muted">no frame since boot</span>'}</td>
+        <td>${x.rssi ? `${x.rssi} dBm` : v && v.rssi !== undefined ? `${v.rssi} dBm (last message)` : '—'}</td></tr>`;
+    });
+    el.innerHTML = rows.length
+      ? `<p class="muted">Hub (coordinator) → direct links, from its neighbour table:</p>
+         <table><tr><th>Device</th><th>Type</th><th>Link</th><th>Quality</th><th>RSSI</th></tr>${rows.join('')}</table>`
+      : 'No neighbours yet.';
   },
   list(devs) {
     const el = $('#zb-devs');
@@ -151,7 +175,8 @@ pages.devices = {
   },
   card(v) {
     const title = v.name || [v.manuf, v.model].filter(Boolean).join(' ') || `0x${v.short.toString(16).padStart(4, '0')}`;
-    const st = v.status === 'ready' ? '<span class="badge ok">ready</span>'
+    const st = !v.available ? '<span class="badge bad">offline</span>'
+      : v.status === 'ready' ? '<span class="badge ok">ready</span>'
       : v.status === 'interviewing' ? '<span class="badge warn">interviewing…</span>'
       : '<span class="badge warn">waiting for it to wake up</span>';
     const rows = [];
@@ -167,7 +192,8 @@ pages.devices = {
     if (v.battery !== undefined) rows.push(['Battery', `${Math.round(v.battery)} %${v.battery_low ? ' <span class="badge bad">low</span>' : ''}`]);
     else if (v.battery_v !== undefined) rows.push(['Battery', `${v.battery_v.toFixed(1)} V`]);
     if (v.rssi !== undefined) rows.push(['Signal', rssiBadge(v.rssi)]);
-    rows.push(['Last seen', v.seen_s < 0 ? '—' : v.seen_s < 5 ? 'just now' : `${dur(v.seen_s)} ago`]);
+    rows.push(['Last seen', v.seen_s < 0 ? 'not since boot' : v.seen_s < 5 ? 'just now' : `${dur(v.seen_s)} ago`]);
+    rows.push(['Offline after', `${dur(v.timeout_s)} silent${v.sleepy ? '' : ' + 3 pings'}`]);
     rows.push(['Model', esc([v.manuf, v.model].filter(Boolean).join(' / ') || '—')]);
     rows.push(['IEEE', `<code>${esc(v.ieee)}</code>`]);
     rows.push(['Type', v.sleepy ? 'battery (sleepy)' : 'mains / router']);

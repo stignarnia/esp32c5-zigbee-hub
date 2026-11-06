@@ -112,6 +112,14 @@ static bool on_signal(const ezb_app_signal_t *sig)
         if (p->leave_type == EZB_ZDO_LEAVE_TYPE_RESET) zb_dev_on_leave(p->device_addr.u64);
         break;
     }
+    case EZB_ZDO_SIGNAL_DEVICE_UNAVAILABLE: {
+        const ezb_zdo_signal_device_unavailable_params_t *p = params;
+        ESP_LOGW(TAG, "0x%04x: stack reports the device unavailable (delivery failed)", p->short_addr);
+        break;
+    }
+    case EZB_ZDO_SIGNAL_DEVICE_UPDATE:
+    case EZB_ZDO_SIGNAL_DEVICE_AUTHORIZED:
+        break;  // join bookkeeping; the announce that follows is what matters
     default:
         ESP_LOGI(TAG, "signal %s (0x%02x)", ezb_app_signal_to_string(type), (unsigned)type);
         break;
@@ -269,6 +277,25 @@ cJSON *zb_network_json(void)
         snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)ext.u64);
         cJSON_AddStringToObject(o, "ext_pan", buf);
         cJSON_AddNumberToObject(o, "channel", ezb_nwk_get_current_channel());
+        // Network map: the coordinator's neighbour table (every directly joined
+        // device and neighbouring router, with link quality). Routers' own tables
+        // (Mgmt_Lqi_req) come when there is a router to test with.
+        cJSON *nbrs = cJSON_AddArrayToObject(o, "neighbors");
+        ezb_nwk_info_iterator_t it = EZB_NWK_INFO_ITERATOR_INIT;
+        ezb_nwk_neighbor_info_t n;
+        while (ezb_nwk_get_next_neighbor(&it, &n) == EZB_ERR_NONE) {
+            cJSON *j = cJSON_CreateObject();
+            snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)n.ieee_addr.u64);
+            cJSON_AddStringToObject(j, "ieee", buf);
+            cJSON_AddNumberToObject(j, "short", n.short_addr);
+            cJSON_AddNumberToObject(j, "type", n.device_type);      // 0 coordinator, 1 router, 2 end device
+            cJSON_AddNumberToObject(j, "relationship", n.relationship);
+            cJSON_AddNumberToObject(j, "depth", n.depth);
+            cJSON_AddNumberToObject(j, "lqi", n.lqi);
+            cJSON_AddNumberToObject(j, "rssi", n.rssi);
+            cJSON_AddBoolToObject(j, "rx_on", n.rx_on_when_idle);
+            cJSON_AddItemToArray(nbrs, j);
+        }
         esp_zigbee_lock_release();
     }
     return o;

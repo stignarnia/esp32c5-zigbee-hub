@@ -400,14 +400,28 @@ static esp_err_t send_cjson(httpd_req_t *req, cJSON *j)
     return err;
 }
 
-static esp_err_t h_zb_get(httpd_req_t *req)
+static cJSON *zb_snapshot(void)
 {
-    if (!web_guard(req)) return ESP_OK;
     cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", "zb");
     cJSON_AddItemToObject(o, "network", zb_network_json());
     cJSON_AddNumberToObject(o, "rev", zb_revision());
     cJSON_AddItemToObject(o, "devices", zb_devices_json());
-    return send_cjson(req, o);
+    return o;
+}
+
+char *api_zb_json(void)
+{
+    cJSON *o = zb_snapshot();
+    char *txt = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    return txt;
+}
+
+static esp_err_t h_zb_get(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    return send_cjson(req, zb_snapshot());
 }
 
 // Small JSON body -> cJSON (NULL on error; the caller replies 400).

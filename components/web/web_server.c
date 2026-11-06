@@ -16,6 +16,7 @@
 #include "hubsys.h"
 #include "web.h"
 #include "web_internal.h"
+#include "zb.h"
 
 static const char *TAG = "web";
 
@@ -25,6 +26,7 @@ static char s_etag[24];
 
 #define MAX_WS 4
 static int s_ws_fds[MAX_WS];  // authenticated WebSocket clients; -1 = free
+static volatile bool s_ws_new;  // a client just connected: send it a device snapshot now
 
 // Embedded, gzipped at build time (see CMakeLists.txt).
 extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
@@ -151,6 +153,7 @@ static esp_err_t ws_post_handshake(httpd_req_t *req)
     for (int i = 0; i < MAX_WS; i++) {
         if (s_ws_fds[i] == -1) {
             s_ws_fds[i] = fd;
+            s_ws_new = true;
             return ESP_OK;
         }
     }
@@ -175,9 +178,10 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// arg: NULL = status, non-NULL = Zigbee snapshot.
 static void ws_push_work(void *arg)
 {
-    char *json = api_status_json();
+    char *json = arg ? api_zb_json() : api_status_json();
     if (!json) return;
     httpd_ws_frame_t f = {
         .type = HTTPD_WS_TYPE_TEXT, .payload = (uint8_t *)json, .len = strlen(json),
@@ -193,13 +197,28 @@ static void ws_push_work(void *arg)
     free(json);
 }
 
+// Status every 2 s. Zigbee devices: within 100 ms of any change (a contact opening,
+// a new device announcing), and every 5 s anyway so "last seen" and the permit-join
+// countdown stay current.
 static void ws_push_task(void *arg)
 {
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
+    uint32_t last_rev = UINT32_MAX, last_permit = 0;
+    for (int tick = 1;; tick++) {
+        vTaskDelay(pdMS_TO_TICKS(100));
         bool any = false;
         for (int i = 0; i < MAX_WS; i++) any |= s_ws_fds[i] >= 0;
-        if (any && s_server) httpd_queue_work(s_server, ws_push_work, NULL);
+        if (!any || !s_server) {
+            last_rev = UINT32_MAX;  // a new client gets a snapshot at once
+            continue;
+        }
+        if (tick % 20 == 0) httpd_queue_work(s_server, ws_push_work, NULL);
+        uint32_t rev = zb_revision(), permit = zb_permit_left();
+        if (rev != last_rev || permit != last_permit || tick % 50 == 0 || s_ws_new) {
+            s_ws_new = false;
+            last_rev = rev;
+            last_permit = permit;
+            httpd_queue_work(s_server, ws_push_work, (void *)1);
+        }
     }
 }
 
@@ -233,7 +252,10 @@ esp_err_t web_start(const web_config_t *cfg)
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size = 8192;           // PBKDF2 + JSON building
     hc.max_uri_handlers = 24;
-    hc.max_open_sockets = 7;
+    // Measured: with 7, a phone's Chrome failed with ERR_TOO_MANY_RETRIES while a
+    // laptop had the UI open — the LRU purge kept closing the phone's own freshly
+    // opened parallel connections. Must stay <= LWIP_MAX_SOCKETS - 3.
+    hc.max_open_sockets = 13;
     hc.lru_purge_enable = true;     // a stuck client can't lock others out
     hc.recv_wait_timeout = 10;      // OTA uploads stream for seconds
     hc.send_wait_timeout = 10;
@@ -260,7 +282,7 @@ esp_err_t web_start(const web_config_t *cfg)
     httpd_register_uri_handler(s_server, &ws);
     ESP_ERROR_CHECK(api_register(s_server));
 
-    xTaskCreate(ws_push_task, "ws_push", 2560, NULL, 4, NULL);
+    xTaskCreate(ws_push_task, "ws_push", 2560, NULL, 4, NULL);  // only queues work: small stack
     ESP_LOGI(TAG, "web UI on port %d (UI %u B gzipped)", hc.server_port,
              (unsigned)((index_html_gz_end - index_html_gz_start) + (app_js_gz_end - app_js_gz_start) +
                         (style_css_gz_end - style_css_gz_start)));

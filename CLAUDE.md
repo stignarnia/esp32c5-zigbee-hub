@@ -535,7 +535,9 @@ For long tests without a serial cable: log on the board, download later.
       On/Off, Level, Color Control (CT + XY), Temperature, Humidity, Pressure,
       Illuminance, Occupancy, IAS Zone (contact/motion/water/smoke), Power Config
       (battery), Electrical Measurement, Metering, Window Covering, Thermostat
-- [ ] Device page: live state, controls, LQI/RSSI, last seen, remove/re-interview
+- [~] Device page: live state, LQI/RSSI, last seen, availability, remove/re-interview.
+      **No controls in the UI (user decision 2026-11-06)**: switching is done by Lua
+      (`zb.set`) or Home Assistant
 - [ ] Availability tracking (power-source-aware timeouts)
 - [ ] Network map from neighbour tables (LQI)
 - [ ] Zigbee lock (`esp_zb_lock_acquire`) around every stack call from other tasks
@@ -699,8 +701,8 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       on/off → switch, on/off+level(+color) → light, sensors → sensor with
       device_class, IAS zone → binary_sensor, covering → cover, thermostat →
       climate, battery/LQI/last seen → diagnostic entities
-- [ ] Commands from HA go through the same device command path as the UI and
-      Lua (one path, three callers)
+- [ ] Commands from HA go through the same device command path as Lua
+      (one path, two callers)
 - [ ] Gateway entities: permit-join button (pairing works from HA too), Zigbee
       channel, device count, Wi-Fi RSSI, uptime
 - [ ] Wire-format safety: every length off the socket bounded before use

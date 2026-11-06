@@ -37,6 +37,15 @@ static const char *TAG = "zb";
 #define REG_TMP   REG_DIR "/devices.tmp"
 
 #define RETRY_US        (2000LL * 1000)
+
+// Availability. Sleepy (battery) devices can't be asked: they're offline after 25 h
+// of silence (zigbee2mqtt's default; our battery reporting is configured for at least
+// one report every 6 h). Mains devices are pinged (Basic read) after 10 min of
+// silence, 3 pings 30 s apart; no answer = offline.
+#define SLEEPY_TIMEOUT_US  (25LL * 3600 * 1000000)
+#define MAINS_IDLE_US      (10LL * 60 * 1000000)
+#define PING_EVERY_US      (30LL * 1000000)
+#define PINGS_MAX          3
 #define MAX_TRIES       6           // ~12 s of fast retries, then wait for a check-in
 
 enum {
@@ -72,7 +81,10 @@ typedef struct {
     int64_t joined_us;
     int64_t woke_us;             // when the current interview attempt started
     // live state (not persisted)
-    int64_t last_seen_us;
+    int64_t last_seen_us;        // 0 = not heard since boot (availability counts from boot)
+    bool offline;
+    uint8_t pings;               // unanswered availability pings (mains devices)
+    int64_t ping_at_us;
     int8_t rssi;
     uint16_t zone_type, zone_status;
     bool has_zone_status;
@@ -388,6 +400,12 @@ static void heard(zdev_t *d, int8_t rssi)
 {
     d->last_seen_us = esp_timer_get_time();
     if (rssi) d->rssi = rssi;
+    d->pings = 0;
+    if (d->offline) {
+        d->offline = false;
+        ESP_LOGI(TAG, "0x%04x %s: online again", d->short_addr, d->name[0] ? d->name : d->model);
+        changed(false);
+    }
     if (!complete(d) && d->next_try_us == 0) {
         ESP_LOGI(TAG, "0x%04x awake again: resuming interview", d->short_addr);
         d->woke_us = esp_timer_get_time();
@@ -633,7 +651,9 @@ void zb_dev_on_announce(uint16_t short_addr, uint64_t ieee, uint8_t capability)
     }
     d->short_addr = short_addr;
     d->cap = capability;
-    d->last_seen_us = esp_timer_get_time();
+    d->last_seen_us = esp_timer_get_time();  // not heard(): the interview starts below
+    d->pings = 0;
+    d->offline = false;
     ESP_LOGI(TAG, "%s 0x%016llx short 0x%04x cap 0x%02x%s", fresh ? "NEW device" : "rejoined",
              (unsigned long long)ieee, short_addr, capability, (capability & 0x08) ? "" : " (sleepy)");
     if (!complete(d)) {
@@ -657,12 +677,47 @@ void zb_dev_on_leave(uint64_t ieee)
     UNLOCK();
 }
 
+static bool is_mains(const zdev_t *d)
+{
+    return d->cap & 0x0C;  // MAC capability: mains powered (0x04) or receiver always on (0x08)
+}
+
+static void availability(zdev_t *d, int64_t now)
+{
+    int64_t idle = now - d->last_seen_us;  // last_seen 0 = counts from boot
+    if (d->offline) return;
+    if (!is_mains(d)) {
+        if (idle > SLEEPY_TIMEOUT_US) {
+            d->offline = true;
+            ESP_LOGW(TAG, "0x%04x %s: offline (silent for %lld h)", d->short_addr, d->name[0] ? d->name : d->model,
+                     idle / 3600000000LL);
+            changed(false);
+        }
+        return;
+    }
+    if (idle < MAINS_IDLE_US || now - d->ping_at_us < PING_EVERY_US) return;
+    if (d->pings >= PINGS_MAX) {
+        d->offline = true;
+        ESP_LOGW(TAG, "0x%04x %s: offline (no answer to %d pings)", d->short_addr, d->name[0] ? d->name : d->model,
+                 PINGS_MAX);
+        changed(false);
+        return;
+    }
+    static uint16_t attr = 0x0000;  // ZCL version: every device has it
+    ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, first_ep(d), EZB_ZCL_CLUSTER_ID_BASIC),
+                                 .payload = {.attr_number = 1, .attr_field = &attr}};
+    ezb_zcl_read_attr_cmd_req(&r);
+    d->pings++;
+    d->ping_at_us = now;
+}
+
 void zb_dev_tick(void *arg)
 {
     int64_t now = esp_timer_get_time();
     LOCK();
     for (int i = 0; i < ZB_MAX_DEVICES; i++) {
         zdev_t *d = &s_dev[i];
+        if (d->used) availability(d, now);
         if (!d->used || complete(d) || !d->next_try_us || now < d->next_try_us) continue;
         if (d->tries >= MAX_TRIES) {
             d->next_try_us = 0;  // asleep: resume on its next check-in (heard())
@@ -714,8 +769,10 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
         int64_t now = esp_timer_get_time();
         const char *st = complete(d) ? "ready" : d->next_try_us ? "interviewing" : "waiting";
         cJSON_AddStringToObject(o, "status", st);
+        cJSON_AddBoolToObject(o, "available", !d->offline);
         cJSON_AddBoolToObject(o, "sleepy", !(d->cap & 0x08));
         cJSON_AddNumberToObject(o, "seen_s", d->last_seen_us ? (double)((now - d->last_seen_us) / 1000000) : -1);
+        cJSON_AddNumberToObject(o, "timeout_s", is_mains(d) ? (double)(MAINS_IDLE_US / 1000000) : (double)(SLEEPY_TIMEOUT_US / 1000000));
         if (d->rssi) cJSON_AddNumberToObject(o, "rssi", d->rssi);
         if (d->zone_type || d->has_zone_status) cJSON_AddStringToObject(o, "kind", zone_kind(d->zone_type));
         if (d->has_zone_status) {

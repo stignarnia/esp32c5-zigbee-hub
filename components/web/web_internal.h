@@ -17,6 +17,7 @@ void auth_logout_request(httpd_req_t *req);
 // ---- web_api.c ----
 esp_err_t api_register(httpd_handle_t server);
 char *api_status_json(void);  // malloc'd; caller frees
+char *api_zb_json(void);      // devices + network snapshot, {"type":"zb",...}; caller frees (cJSON_free)
 
 // ---- web_server.c helpers used by the API ----
 esp_err_t web_send_json(httpd_req_t *req, const char *status, const char *json);

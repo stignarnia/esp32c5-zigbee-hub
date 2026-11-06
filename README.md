@@ -126,11 +126,12 @@ Log in with the admin password. The UI updates live over a WebSocket.
 
 ### Devices
 
-Every paired device with its live state and controls: switches, dimmers, colour
-temperature, covers, thermostats, and sensors (temperature, humidity, contact,
-motion, water leak, smoke, battery, power and energy). Each device shows link
-quality, last seen, battery and availability. Rename devices, assign rooms,
-re-interview or remove them.
+Every paired device with its live state: sensors (temperature, humidity, contact,
+motion, water leak, smoke, battery, power and energy) and the on/off, level and
+position of lights, plugs and covers. Each device shows link quality, last seen,
+battery and availability. Rename devices, assign rooms, re-interview or remove
+them. The UI shows state; to switch things, use an automation (`zb.set`) or Home
+Assistant.
 
 ### Enroll
 

@@ -957,3 +957,27 @@ void zb_dev_forget(uint64_t ieee)
 {
     zb_dev_on_leave(ieee);
 }
+
+// Redo the whole interview (endpoints, descriptors, IAS enrollment, bind + reporting).
+// The old endpoint data stays until the answers replace it. Always-on devices start
+// now; sleepy ones are asleep, so they start when next heard from (heard()).
+void zb_dev_reinterview(uint64_t ieee)
+{
+    LOCK();
+    zdev_t *d = by_ieee(ieee);
+    if (d) {
+        d->done = 0;
+        d->desc_ok = 0;
+        d->tries = 0;
+        d->next_try_us = 0;
+        bool awake = d->cap & 0x08;  // receiver on when idle
+        ESP_LOGI(TAG, "0x%04x %s: re-interview%s", d->short_addr, d->name[0] ? d->name : d->model,
+                 awake ? "" : " at its next check-in");
+        if (awake) {
+            d->woke_us = esp_timer_get_time();
+            interview_step(d);
+        }
+        changed(true);
+    }
+    UNLOCK();
+}

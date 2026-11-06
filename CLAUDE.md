@@ -552,7 +552,7 @@ For long tests without a serial cable: log on the board, download later.
     (reference bug: never initialised → no reports ever arrived)
   - [x] user names the device; persisted to LittleFS **including the cluster list**
     (reference bug: restored devices had none)
-  - [ ] rooms: not implemented (README mentions them)
+  - rooms: not doing (user decision 2026-11-06)
 - [x] **Acceptance test: a cheap no-name reed/contact sensor** — passed 2026-11-06 (above) (typically Tuya
       TS0203 or similar). Press "Scan", insert the battery, it shows up, gets
       interviewed, and reports open/closed. What that needs, because these devices
@@ -578,16 +578,17 @@ For long tests without a serial cable: log on the board, download later.
       Illuminance, Occupancy, IAS Zone (contact/motion/water/smoke), Power Config
       (battery), Electrical Measurement, Metering, Window Covering, Thermostat
 - [~] Device page: live state, LQI/RSSI, last seen, availability, rename, remove — done;
-      re-interview button not yet.
+      re-interview (redoes every step; battery devices at their next check-in) — verified
+      2026-11-06 on the Door sensor: pressed twice, each time "waiting for it to wake up",
+      then on the next open/close the full interview ran and completed in 620 / 639 ms.
       **No controls in the UI (user decision 2026-11-06)**: switching is done by Lua
       (`zb.set`) or Home Assistant
-- [~] Availability tracking (power-source-aware timeouts) — built: sleepy devices offline
-      after 25 h of silence; mains devices pinged (Basic read) after 10 min idle, offline
-      after 3 unanswered pings 30 s apart. **Not yet observed firing**: needs a sensor
-      silent for 25 h, or a mains device (none here)
-- [~] Network map from neighbour tables (LQI) — built for the coordinator's own table
-      (both sensors listed with LQI/RSSI/depth). Routers' tables (Mgmt_Lqi_req) not
-      implemented: no router device here to test with
+- [~] Availability tracking — built: battery devices offline after 25 h of silence.
+      **Not yet observed firing** (needs a sensor silent for 25 h)
+- [x] Network map from the coordinator's neighbour table (both sensors listed with
+      LQI/RSSI/depth)
+- **Zigbee routers (mains devices: plugs, bulbs) are not tested, and this hub is not
+  built for them** (user decision 2026-11-06)
 - [x] Zigbee lock around every stack call from other tasks — audited 2026-11-06, none
       missing. All `ezb_*` calls in `zb_dev.c` (interview, enroll, bind/report,
       availability pings) are reached only from the Zigbee task (signal/ZCL/ZDO callbacks,

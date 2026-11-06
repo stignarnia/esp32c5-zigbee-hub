@@ -16,3 +16,4 @@ void zb_dev_notify(void);                     // something changed: tell the UI
 void zb_dev_set_my_ieee(uint64_t ieee);
 bool zb_dev_lookup_short(const char *ieee_hex, uint16_t *short_addr, uint64_t *ieee);
 void zb_dev_forget(uint64_t ieee);
+void zb_dev_reinterview(uint64_t ieee);

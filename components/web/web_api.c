@@ -470,6 +470,19 @@ static esp_err_t h_zb_remove(httpd_req_t *req)
     return web_send_json(req, "200 OK", "{\"ok\":true}");
 }
 
+static esp_err_t h_zb_reinterview(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    cJSON *j = read_json(req);
+    const cJSON *ieee = cJSON_GetObjectItem(j, "ieee");
+    esp_err_t err = cJSON_IsString(ieee) ? zb_reinterview(ieee->valuestring) : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(j);
+    if (err == ESP_ERR_INVALID_ARG) return web_send_error(req, "400 Bad Request", "ieee required");
+    if (err == ESP_ERR_NOT_FOUND) return web_send_error(req, "404 Not Found", "no such device");
+    if (err != ESP_OK) return web_send_error(req, "503 Service Unavailable", esp_err_to_name(err));
+    return web_send_json(req, "200 OK", "{\"ok\":true}");
+}
+
 static esp_err_t h_coredump(httpd_req_t *req)
 {
     if (!web_guard(req)) return ESP_OK;
@@ -525,6 +538,7 @@ esp_err_t api_register(httpd_handle_t server)
         {.uri = "/api/zb/permit", .method = HTTP_POST, .handler = h_zb_permit},
         {.uri = "/api/zb/rename", .method = HTTP_POST, .handler = h_zb_rename},
         {.uri = "/api/zb/remove", .method = HTTP_POST, .handler = h_zb_remove},
+        {.uri = "/api/zb/reinterview", .method = HTTP_POST, .handler = h_zb_reinterview},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);

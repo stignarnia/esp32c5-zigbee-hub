@@ -27,3 +27,4 @@ uint32_t zb_revision(void);     // changes whenever devices/state change
 
 esp_err_t zb_rename(const char *ieee_hex, const char *name);
 esp_err_t zb_remove(const char *ieee_hex);  // asks the device to leave, then forgets it
+esp_err_t zb_reinterview(const char *ieee_hex);  // sleepy devices: at their next check-in

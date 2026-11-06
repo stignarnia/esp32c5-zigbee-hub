@@ -2,8 +2,9 @@
 
 > **Work in progress.** This README describes the finished product. Working today:
 > 5 GHz-only Wi-Fi with backup network and recovery, provisioning via `flash.sh`,
-> the web UI foundation (login, live status, Wi-Fi settings) and over-the-air
-> updates with rollback. Zigbee, Tailscale, automations and Home Assistant are
+> the web UI (login, live status, Wi-Fi settings, devices), over-the-air updates
+> with rollback, and the Zigbee coordinator with enrollment of battery sensors
+> (tested with contact sensors). Tailscale, automations and Home Assistant are
 > next. [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
 
 A Zigbee 3.0 coordinator, automation engine and web UI on a single ESP32-C5,
@@ -18,6 +19,9 @@ broker, no Raspberry Pi.
   the Wi-Fi credentials of the machine you're flashing from.
 - **On your tailnet.** The board joins Tailscale as `zigbee-hub`, so the UI works
   from your phone on cellular just like it does at home.
+- **Made for battery sensors.** Contact, motion, leak, smoke, temperature and
+  humidity sensors. Mains-powered Zigbee devices (plugs, bulbs, other routers) are
+  untested and not what this hub is built for.
 - **Optionally, native Home Assistant devices.** Turn on the Home Assistant
   integration, and whenever no local automation is enabled, every Zigbee device
   appears in Home Assistant as a native ESPHome device. No MQTT, no ZHA, no
@@ -126,12 +130,10 @@ Log in with the admin password. The UI updates live over a WebSocket.
 
 ### Devices
 
-Every paired device with its live state: sensors (temperature, humidity, contact,
-motion, water leak, smoke, battery, power and energy) and the on/off, level and
-position of lights, plugs and covers. Each device shows link quality, last seen,
-battery and availability. Rename devices, assign rooms, re-interview or remove
-them. The UI shows state; to switch things, use an automation (`zb.set`) or Home
-Assistant.
+Every paired sensor with its live state: contact, motion, water leak, smoke,
+temperature, humidity and battery. Each device shows signal strength, last seen
+and availability. Rename, re-interview or remove them. The UI only shows state;
+there are no switches in it.
 
 ### Enroll
 
@@ -152,17 +154,17 @@ New devices appear in the list as soon as they announce themselves. You then
 watch the interview step by step:
 
 ```
-0x4F21  announced                       ✓
-        node descriptor (router, mains) ✓
-        endpoints: 1, 242               ✓
-        clusters on 1: Basic, OnOff, LevelCtrl, ColorCtrl
-        manufacturer: IKEA of Sweden    ✓
-        model: TRADFRI bulb E27 WS 806lm
-        binding + reporting             ✓
-        → Light (brightness, colour temperature)
+0x59D3  announced                       ✓
+        manufacturer: Zbeacon           ✓
+        model: DS01
+        endpoints: 1                    ✓
+        clusters on 1: Basic, PowerCfg, Identify, IASZone, PollCtrl
+        IAS Zone enrollment             ✓
+        battery reporting               ✓
+        → Contact sensor (open/closed, battery)
 ```
 
-Give it a name and a room, and it's ready, both in the Devices page and in your
+Give it a name and it's ready, both in the Devices page and in your
 scripts. Devices with a Zigbee 3.0 install code can be joined by entering the
 code.
 
@@ -172,34 +174,37 @@ Paste Lua, press **Save**. The script is syntax-checked before it's stored, then
 starts immediately and again after every boot.
 
 ```lua
--- Hallway light on motion, off after 2 minutes without motion
-local off_timer
+-- Front door left open for 5 minutes: beep and send a notification
+local door_timer
 
-zb.on("hall_motion", "occupancy", function(occupied)
-  if occupied then
-    zb.set("hall_light", { state = "on", brightness = 180 })
-    if off_timer then off_timer:cancel() end
-  else
-    off_timer = timer.after(120, function()
-      zb.set("hall_light", { state = "off" })
+zb.on("front_door", "contact", function(open)
+  if open then
+    door_timer = timer.after(300, function()
+      gpio.beep("buzzer", {on = 200, off = 200, times = 5})
+      http.post(secret("ntfy_url"), "The front door has been open for 5 minutes")
     end)
+  elseif door_timer then
+    door_timer:cancel()
   end
 end)
 ```
 
 ```lua
--- Weekday morning: warm light in the kitchen at 6:45
-cron("45 6 * * 1-5", function()
-  zb.set("kitchen_ceiling", { state = "on", brightness = 120, color_temp = 370 })
+-- Leak sensor: sound the buzzer at once, then notify (retried until Wi-Fi is back)
+zb.on("laundry_leak", "water_leak", function(wet)
+  if wet then
+    gpio.beep("buzzer", {on = 500, off = 500, times = 20})
+    http.post(secret("ntfy_url"), "Water leak in the laundry room!", {retry_for = 3600})
+  end
 end)
 ```
 
 ```lua
--- Leak sensor: kill the washing machine plug and notify
-zb.on("laundry_leak", "water_leak", function(wet)
-  if wet then
-    zb.set("washer_plug", { state = "off" })
-    http.post("https://ntfy.sh/my-house", "Water leak in the laundry room!")
+-- Weekday mornings at 7: report sensors with a low battery
+cron("0 7 * * 1-5", function()
+  for _, name in ipairs({"front_door", "laundry_leak"}) do
+    local b = zb.get(name, "battery")
+    if b and b < 20 then http.post(secret("ntfy_url"), name .. " battery at " .. b .. "%") end
   end
 end)
 ```
@@ -209,7 +214,7 @@ end)
 | | |
 |---|---|
 | `zb.on(device, attribute, fn)` | call `fn(value, old_value)` when an attribute changes |
-| `zb.set(device, table)` | send a command (`state`, `brightness`, `color_temp`, `position`, …) |
+| `zb.set(device, table)` | send a command to a device that accepts one |
 | `zb.get(device, attribute)` | current value |
 | `timer.after(s, fn)` / `timer.every(s, fn)` | one-shot / repeating timers, return a handle with `:cancel()` |
 | `cron(expr, fn)` | standard 5-field cron, local time |
@@ -268,7 +273,6 @@ URL under **System → Secrets** as `alexa_alarm`, then:
 -- if the internet happens to be down
 zb.on("laundry_leak", "water_leak", function(wet)
   if not wet then return end
-  zb.set("washer_plug", { state = "off" })
   gpio.beep("buzzer", { on = 500, off = 300, times = 20 })
   http.get(secret("alexa_alarm"), {
     retry_for = 600,
@@ -308,11 +312,8 @@ as its own device, with its name, area, manufacturer and model:
 
 | Zigbee device | In Home Assistant |
 |---|---|
-| plug, relay | switch (+ power and energy sensors if it meters) |
-| bulb | light with brightness, colour temperature and colour |
 | temperature/humidity/pressure/illuminance sensor | sensors with the right device class |
 | contact, motion, leak, smoke sensor | binary sensors |
-| blind, shutter | cover |
 | radiator valve, thermostat | climate |
 | any device | battery, link quality, last seen (diagnostic) |
 
@@ -337,8 +338,8 @@ Home Assistant runs somewhere else on your tailnet, add the hub manually as
 
 ### Network
 
-The Zigbee network's channel, PAN ID, and a map of the mesh built from each
-router's neighbour table, with link quality per hop. Download a network backup
+The Zigbee network's channel, PAN ID, and the hub's direct links: every paired
+device with its link quality and signal strength to the hub. Download a network backup
 (keys, PAN, device table) and restore it onto a replacement board.
 
 ### Tailscale
@@ -433,9 +434,9 @@ USB flashing always works either way.
   hardware RNG.
 - **Wi-Fi**: station mode, band locked to 5 GHz before the radio starts, with no
   fallback. WPA2 minimum, WPA3 when the router offers it. If the access point
-  disappears, a watchdog reconnects, then restarts the Wi-Fi driver, and after
-  ~15–20 minutes reboots the board, but only at a safe moment (no timer due soon,
-  nothing pairing or updating) and never more than about once an hour. The
+  disappears, a watchdog reconnects, then restarts the Wi-Fi driver, and after 20
+  minutes of downtime reboots the board (again at 30 and 60 minutes if it's still
+  down), but only at a safe moment (no timer due soon, nothing pairing or updating). The
   System page shows how many times it has done so.
 - **Tailscale**: a native client (Tailscale's control protocol, WireGuard, DERP,
   DISCO, STUN) based on [microlink](https://github.com/CamM2325/microlink). The
@@ -446,8 +447,8 @@ USB flashing always works either way.
 - **Home Assistant**: ESPHome native API on TCP 6053 with Noise encryption, Zigbee
   devices as ESPHome sub-devices (needs Home Assistant 2025.7 or newer). It uses
   no memory unless the integration is on and active.
-- **One command path**: a light toggled from the UI, a Lua script or Home
-  Assistant goes through the same code to the Zigbee stack.
+- **One command path**: a command from a Lua script or from Home Assistant goes
+  through the same code to the Zigbee stack.
 
 ### Flash layout (16 MB)
 

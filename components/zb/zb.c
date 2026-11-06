@@ -335,3 +335,23 @@ esp_err_t zb_remove(const char *ieee_hex)
     p[1] = short_addr;
     return esp_zigbee_task_queue_post(remove_on_zb_task, p);
 }
+
+static void reinterview_on_zb_task(void *arg)
+{
+    uint64_t ieee = *(uint64_t *)arg;
+    free(arg);
+    zb_dev_reinterview(ieee);
+}
+
+esp_err_t zb_reinterview(const char *ieee_hex)
+{
+    uint16_t short_addr;
+    uint64_t ieee;
+    if (!zb_dev_lookup_short(ieee_hex, &short_addr, &ieee)) return ESP_ERR_NOT_FOUND;
+    uint64_t *p = malloc(sizeof(uint64_t));  // a pointer is 32 bits here: the IEEE doesn't fit
+    if (!p) return ESP_ERR_NO_MEM;
+    *p = ieee;
+    esp_err_t err = esp_zigbee_task_queue_post(reinterview_on_zb_task, p);
+    if (err != ESP_OK) free(p);
+    return err;
+}

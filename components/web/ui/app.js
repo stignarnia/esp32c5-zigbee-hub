@@ -172,6 +172,7 @@ pages.devices = {
     el.innerHTML = devs.length ? devs.map((v) => this.card(v)).join('') : '<div class="card muted">No devices yet. Press “Scan for devices”, then power up the device.</div>';
     el.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', () => this.rename(b.dataset.rename)));
     el.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', () => this.remove(b.dataset.remove)));
+    el.querySelectorAll('[data-reinterview]').forEach((b) => b.addEventListener('click', () => this.reinterview(b.dataset.reinterview)));
   },
   card(v) {
     const title = v.name || [v.manuf, v.model].filter(Boolean).join(' ') || `0x${v.short.toString(16).padStart(4, '0')}`;
@@ -202,6 +203,7 @@ pages.devices = {
       <details><summary class="muted">Clusters</summary><p class="muted"><code>${clusters || '—'}</code></p></details>
       <label>Name <input type="text" id="name-${v.ieee}" value="${esc(v.name)}" maxlength="31" placeholder="e.g. Front door"></label>
       <div class="row"><button class="ghost" data-rename="${v.ieee}">Save name</button>
+        <button class="ghost" data-reinterview="${v.ieee}" title="Read its endpoints and clusters again and redo enrollment and reporting${v.sleepy ? '. Battery devices: starts when it next wakes up (open/close it or press its button)' : ''}">Re-interview</button>
         <button class="danger" data-remove="${v.ieee}">Remove</button></div></section>`;
   },
   async permit() {
@@ -212,6 +214,10 @@ pages.devices = {
   async rename(ieee) {
     const name = $(`#name-${ieee}`).value.trim();
     try { await api('/api/zb/rename', { method: 'POST', json: { ieee, name } }); document.activeElement.blur(); } catch (e) { alert(e.message); }
+    this.poll();
+  },
+  async reinterview(ieee) {
+    try { await api('/api/zb/reinterview', { method: 'POST', json: { ieee } }); } catch (e) { alert(e.message); }
     this.poll();
   },
   async remove(ieee) {

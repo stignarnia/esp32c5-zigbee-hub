@@ -36,7 +36,7 @@ function rssiBadge(r) {
   const cls = r >= -60 ? 'ok' : r >= -72 ? 'warn' : 'bad';
   return `<span class="badge ${cls}">${r} dBm</span>`;
 }
-const dl = (rows) => `<dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
+const dl = (rows) => `<dl>${rows.map(([k, v]) => `<dt>${esc(k).replace(/\n/g, '<br>')}</dt><dd>${v}</dd>`).join('')}</dl>`;
 
 // ---- login / session --------------------------------------------------------------
 function showLogin() {
@@ -304,7 +304,7 @@ pages.status = {
         ['ESP-IDF', esc(f.idf)],
         ['Slot', esc(f.partition)],
         ['State', f.on_trial ? '<span class="badge warn">on trial</span>' : '<span class="badge ok">confirmed</span>'],
-        ['Last over-the-air update', last + (u.result === 'updated' && u.to !== f.build_id
+        ['Last over-the-air\nupdate', last + (u.result === 'updated' && u.to !== f.build_id
           ? '<br><span class="muted">flashed over USB since</span>' : '')],
       ])}</section>`;
   },

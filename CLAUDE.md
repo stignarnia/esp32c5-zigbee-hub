@@ -410,7 +410,8 @@ OTA bookkeeping), `wifi5g` (runtime network API).
       confirmed in 26.6 s and 35.2 s total
 - [x] Planned reboots disconnect Wi-Fi cleanly first (`wifi5g_prepare_reboot`), so
       the next boot doesn't hit the stale-association login delay
-- [~] **Reboot gate** — see Phase 1 (pairing/interview/upload done; timers in Phase 5)
+- Updates restart into the new firmware immediately, never gated (user decision
+  2026-11-06: an update is intentional). Only the Wi-Fi watchdog's reboot is gated (Phase 1)
 - [x] `flash.sh --ota [--host H]` (default `<hostname>.local`; MagicDNS name
       after Phase 4): build → login (password via stdin) → upload → wait →
       report. **Measured: upload 5.6 s, confirmed 16 s after upload start, ~21 s

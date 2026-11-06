@@ -389,9 +389,8 @@ What happens:
 
 1. The board writes the new firmware into its spare slot while the current one
    keeps running. Zigbee and your automations aren't interrupted during the upload.
-2. It reboots into the new firmware. If a script timer is about to fire or a
-   device is pairing, it waits for a safe moment first (or reboots right away if
-   you choose).
+2. It reboots into the new firmware right away: an update is something you
+   started on purpose.
 3. The new firmware is **on trial** until Zigbee is up and your automations are
    running. If it crashes or hangs before that, the board automatically goes back
    to the previous version, and the UI and `flash.sh` tell you it rolled back.

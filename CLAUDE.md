@@ -538,19 +538,21 @@ For long tests without a serial cable: log on the board, download later.
     the C5) → truncated → every Active EP response dropped. Context is now slot+short
   - battery 100 % / 3.0 V, RSSI −44…−66 dBm at a few metres
 - [x] Web: Devices page (default), `GET /api/zb`, `POST /api/zb/{permit,rename,remove}`;
-      the page polls every 1 s. Permit-join round trip verified (open 10 s → 9 s left → closed)
+      live over WebSocket (polls only when the socket is down). Permit-join round trip verified (open 10 s → 9 s left → closed)
 - [x] OTA health = Zigbee up + web server (Wi-Fi no longer required)
 - Internal heap with Zigbee + Wi-Fi + web (no client): **95 KB free, lowest 63 KB**
   (Phase 2: 133 / 98) — Zigbee costs ~40 KB
-- [ ] Enrollment ("Scan for devices" in the UI):
-  - permit-join for N seconds (default 120) with live countdown over WebSocket
-  - live list of `device_announce` events as they arrive
-  - interview: node descriptor, active endpoints, simple descriptors, Basic
-    cluster (manufacturer, model, power source); progress streamed per step
-  - bind + configure reporting for supported clusters
+- [~] Enrollment ("Scan for devices" in the UI):
+  - [x] permit-join 120 s (button toggles open/close) with live countdown over WebSocket
+  - [x] devices appear live as they announce (WebSocket push within 100 ms)
+  - [x] interview: active endpoints, simple descriptors, Basic cluster (manufacturer,
+    model, power source); the card shows "interviewing" until done
+  - [ ] node descriptor not read (power source comes from Basic); no per-step progress
+  - [x] bind + configure reporting (battery, temperature, humidity, on/off, occupancy)
     (reference bug: never initialised → no reports ever arrived)
-  - user names the device and assigns a room; persisted to LittleFS
-    **including the cluster list** (reference bug: restored devices had none)
+  - [x] user names the device; persisted to LittleFS **including the cluster list**
+    (reference bug: restored devices had none)
+  - [ ] rooms: not implemented (README mentions them)
 - [x] **Acceptance test: a cheap no-name reed/contact sensor** — passed 2026-11-06 (above) (typically Tuya
       TS0203 or similar). Press "Scan", insert the battery, it shows up, gets
       interviewed, and reports open/closed. What that needs, because these devices
@@ -575,12 +577,27 @@ For long tests without a serial cable: log on the board, download later.
       On/Off, Level, Color Control (CT + XY), Temperature, Humidity, Pressure,
       Illuminance, Occupancy, IAS Zone (contact/motion/water/smoke), Power Config
       (battery), Electrical Measurement, Metering, Window Covering, Thermostat
-- [~] Device page: live state, LQI/RSSI, last seen, availability, remove/re-interview.
+- [~] Device page: live state, LQI/RSSI, last seen, availability, rename, remove — done;
+      re-interview button not yet.
       **No controls in the UI (user decision 2026-11-06)**: switching is done by Lua
       (`zb.set`) or Home Assistant
-- [ ] Availability tracking (power-source-aware timeouts)
-- [ ] Network map from neighbour tables (LQI)
-- [ ] Zigbee lock (`esp_zb_lock_acquire`) around every stack call from other tasks
+- [~] Availability tracking (power-source-aware timeouts) — built: sleepy devices offline
+      after 25 h of silence; mains devices pinged (Basic read) after 10 min idle, offline
+      after 3 unanswered pings 30 s apart. **Not yet observed firing**: needs a sensor
+      silent for 25 h, or a mains device (none here)
+- [~] Network map from neighbour tables (LQI) — built for the coordinator's own table
+      (both sensors listed with LQI/RSSI/depth). Routers' tables (Mgmt_Lqi_req) not
+      implemented: no router device here to test with
+- [x] Zigbee lock around every stack call from other tasks — audited 2026-11-06, none
+      missing. All `ezb_*` calls in `zb_dev.c` (interview, enroll, bind/report,
+      availability pings) are reached only from the Zigbee task (signal/ZCL/ZDO callbacks,
+      `zb_dev_tick` posted via `esp_zigbee_task_queue_post`). From the HTTP task:
+      `zb_permit_join` and `zb_network_json` take `esp_zigbee_lock_acquire`; `zb_remove`
+      posts the Mgmt_Leave to the Zigbee task; rename/list/lookup touch only the registry
+      (`s_mtx`). Lock order is always Zigbee lock → `s_mtx` (web never nests them), and the
+      saver copies under `s_mtx` and writes the file after releasing it.
+      Minor: a failed registry save clears `s_dirty` first, so it isn't retried until the
+      next change
 - [ ] Later, optional: converter DB for quirky devices (Tuya DP etc.), runtime
       JSON in LittleFS — the reference repo's `data/converters_merged` (z2m-derived,
       MIT + Apache notices) is the obvious source

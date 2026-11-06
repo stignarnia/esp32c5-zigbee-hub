@@ -56,3 +56,14 @@ CONFIG_LWIP_MAX_SOCKETS=16
 # Wi-Fi event handlers log, and every log line also passes through the on-board
 # log hook: give the system event task headroom (default 2304).
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# --- Zigbee (esp-zigbee-lib 2.x, native 802.15.4 radio, coordinator) ----------
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZCZR=y
+CONFIG_ZB_RADIO_NATIVE=y
+
+# --- Crash diagnosis without a serial cable ------------------------------------
+# A panic writes an ELF core dump to the `coredump` partition; the next boot logs
+# task/PC/RA into the on-board log and /api/coredump serves the full dump.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y

@@ -98,12 +98,12 @@ if [[ "$OTA" == 1 ]]; then
   for _ in $(seq 1 90); do
     sleep 2
     ST=$(curl -sf --max-time 3 -b "$JAR" "http://$HOST/api/status" 2>/dev/null) || continue
-    read -r RUN_ID RESULT TRIAL < <("$PY" -I -c 'import sys,json; f=json.load(sys.stdin)["firmware"]; print(f["build_id"], f["last_update"]["result"], f["on_trial"])' <<<"$ST")
-    if [[ "$RUN_ID" == "$NEW_ID" && "$RESULT" == updated ]]; then
-      if [[ "$TRIAL" == True ]]; then info "running the new build $NEW_ID, confirming…"; continue; fi
+    read -r RUN_ID RESULT TRIAL TO_ID < <("$PY" -I -c 'import sys,json; f=json.load(sys.stdin)["firmware"]; u=f["last_update"]; print(f["build_id"], u["result"], f["on_trial"], u.get("to") or "-")' <<<"$ST")
+    if [[ "$RUN_ID" == "$NEW_ID" && ( "$RESULT" == updated || "$RESULT" == trial ) ]]; then
+      if [[ "$TRIAL" == True || "$RESULT" == trial ]]; then info "running the new build $NEW_ID, confirming…"; continue; fi
       ok "updated to $NEW_ID and confirmed ($(( ($(date +%s%N) - T0) / 1000000 )) ms total)"; exit 0
     fi
-    [[ "$RESULT" == rolled_back ]] && die "the new firmware failed its health check; the hub rolled back to $RUN_ID"
+    [[ "$RESULT" == rolled_back && "$TO_ID" == "$NEW_ID" ]] && die "the new firmware failed (crash or health check); the hub rolled back to $RUN_ID"
   done
   die "the hub didn't come back within 3 minutes"
 fi

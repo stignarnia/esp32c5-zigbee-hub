@@ -2,6 +2,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_app_desc.h"
@@ -10,6 +11,8 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_core_dump.h"
+#include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -102,7 +105,16 @@ void hubsys_ota_boot_check(void)
     nvs_get_str(h, "from_id", from, &l2);
     nvs_get_str(h, "pend_ver", ver, &l3);
 
-    if (have) {
+    if (have && s_pending_verify && strcmp(pend, hubsys_build_id()) == 0) {
+        // The new image on its first boot: not "updated" until it confirms. If it
+        // crashes first, the bootloader rolls back and that boot finds pend_id
+        // still here, pointing at a build that isn't running -> rolled_back.
+        strlcpy(s_result.from_id, from, sizeof(s_result.from_id));
+        strlcpy(s_result.to_id, pend, sizeof(s_result.to_id));
+        strlcpy(s_result.to_version, ver, sizeof(s_result.to_version));
+        s_result.kind = "trial";
+        ESP_LOGI(TAG, "update installed: %s -> %s (%s), on trial", from, pend, ver);
+    } else if (have) {
         strlcpy(s_result.from_id, from, sizeof(s_result.from_id));
         strlcpy(s_result.to_id, pend, sizeof(s_result.to_id));
         strlcpy(s_result.to_version, ver, sizeof(s_result.to_version));
@@ -148,6 +160,19 @@ void hubsys_ota_confirm(void)
     if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
         s_pending_verify = false;
         ESP_LOGI(TAG, "new image confirmed healthy; rollback disarmed");
+        if (strcmp(s_result.kind, "trial") == 0) {
+            s_result.kind = "updated";
+            nvs_handle_t h;
+            if (nvs_open("ota", NVS_READWRITE, &h) == ESP_OK) {
+                nvs_erase_key(h, "pend_id");
+                nvs_set_str(h, "last_kind", s_result.kind);
+                nvs_set_str(h, "last_from", s_result.from_id);
+                nvs_set_str(h, "last_to", s_result.to_id);
+                nvs_set_str(h, "last_ver", s_result.to_version);
+                nvs_commit(h);
+                nvs_close(h);
+            }
+        }
     }
 }
 
@@ -246,4 +271,39 @@ void hubsys_ota_abort(void)
 void hubsys_ota_last_result(hubsys_ota_result_t *out)
 {
     *out = s_result;
+}
+
+// ---- crash report -------------------------------------------------------------------
+// A panic writes a core dump to the `coredump` partition. On the next boot, one log
+// line with the crashing task, PC, RA and trap cause goes into the on-board log;
+// decode with `riscv32-esp-elf-addr2line -pfiaC -e build/<elf> <pc> <ra>` (same
+// build id). The full dump is downloadable from /api/coredump for esp-coredump.
+
+void hubsys_crash_report(void)
+{
+    if (esp_reset_reason() != ESP_RST_PANIC && esp_reset_reason() != ESP_RST_TASK_WDT &&
+        esp_reset_reason() != ESP_RST_INT_WDT) {
+        return;
+    }
+    if (esp_core_dump_image_check() != ESP_OK) {
+        ESP_LOGE(TAG, "crash on the previous boot, but no valid core dump");
+        return;
+    }
+    esp_core_dump_summary_t *sum = malloc(sizeof(*sum));
+    if (!sum) return;
+    if (esp_core_dump_get_summary(sum) == ESP_OK) {
+        char build[17];
+        hex8(sum->app_elf_sha256, build);
+        ESP_LOGE(TAG, "CRASH on the previous boot: task '%s' pc 0x%08" PRIx32 " ra 0x%08" PRIx32
+                 " mcause 0x%" PRIx32 " mtval 0x%08" PRIx32 " build %s (dump at /api/coredump)",
+                 sum->exc_task, sum->exc_pc, sum->ex_info.ra, sum->ex_info.mcause, sum->ex_info.mtval,
+                 build);
+    }
+    free(sum);
+}
+
+esp_err_t hubsys_coredump_get(size_t *addr, size_t *size)
+{
+    if (esp_core_dump_image_check() != ESP_OK) return ESP_ERR_NOT_FOUND;
+    return esp_core_dump_image_get(addr, size);
 }

@@ -160,7 +160,10 @@ static void radio_up_and_connect(void)
 {
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY));
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));  // mains powered; lowest latency
+    // Modem sleep, not PS_NONE: with Wi-Fi/802.15.4 coex the station must yield the
+    // shared RF between beacons, or Zigbee never gets air time (measured: network
+    // formation never completed with PS_NONE; Espressif's gateway does the same).
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
     try_connect();
 }
 

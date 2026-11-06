@@ -35,7 +35,7 @@ esp_err_t hubsys_ota_finish(void);  // validates, sets boot partition, records i
 void hubsys_ota_abort(void);
 
 typedef struct {
-    const char *kind;      // "none" | "updated" | "rolled_back"
+    const char *kind;      // "none" | "trial" | "updated" | "rolled_back"
     char from_id[17];      // build ids (first 8 bytes of the ELF SHA-256, hex)
     char to_id[17];
     char to_version[33];
@@ -45,3 +45,10 @@ void hubsys_ota_last_result(hubsys_ota_result_t *out);
 
 // Build id of the running image (16 hex chars).
 const char *hubsys_build_id(void);
+
+// Logs the previous boot's crash (task, PC, RA, trap cause) from the core dump, if
+// the last reset was a panic or watchdog. Call once at boot, after hublog_init().
+void hubsys_crash_report(void);
+
+// Flash address and size of a valid core dump; ESP_ERR_NOT_FOUND if there is none.
+esp_err_t hubsys_coredump_get(size_t *addr, size_t *size);

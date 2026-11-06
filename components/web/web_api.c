@@ -7,6 +7,7 @@
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
+#include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -386,6 +387,32 @@ static esp_err_t h_logs(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+static esp_err_t h_coredump(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    size_t addr = 0, size = 0;
+    if (hubsys_coredump_get(&addr, &size) != ESP_OK) {
+        return web_send_error(req, "404 Not Found", "no core dump");
+    }
+    char disp[96];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s-coredump.bin\"", web_hostname());
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const size_t cap = 4096;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) return web_send_error(req, "500 Internal Server Error", "out of memory");
+    esp_err_t err = ESP_OK;
+    for (size_t off = 0; off < size && err == ESP_OK; off += cap) {
+        size_t n = size - off < cap ? size - off : cap;
+        err = esp_flash_read(NULL, buf, addr + off, n);
+        if (err == ESP_OK) err = httpd_resp_send_chunk(req, buf, n);
+    }
+    free(buf);
+    if (err != ESP_OK) return err;
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t h_reboot(httpd_req_t *req)
 {
     if (!web_guard(req)) return ESP_OK;
@@ -410,6 +437,7 @@ esp_err_t api_register(httpd_handle_t server)
         {.uri = "/api/ota", .method = HTTP_POST, .handler = h_ota},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = h_reboot},
         {.uri = "/api/logs", .method = HTTP_GET, .handler = h_logs},
+        {.uri = "/api/coredump", .method = HTTP_GET, .handler = h_coredump},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);

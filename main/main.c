@@ -15,6 +15,7 @@
 #include "hubsys.h"
 #include "web.h"
 #include "wifi5g.h"
+#include "zb.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
@@ -207,9 +208,11 @@ void app_main(void)
 
     init_nvs();
     hubsys_ota_boot_check();
+    hubsys_crash_report();
     log_boot_summary();
 
-    // Phase 3 starts Zigbee here, before Wi-Fi: it must never wait for the uplink.
+    // Zigbee first, before Wi-Fi: it must never wait for the uplink.
+    if (zb_start() != ESP_OK) ESP_LOGE(TAG, "zigbee failed to start");
 
     static prov_t prov;  // static: holds secrets, keep it off the small main stack
     bool have_prov = prov_load(&prov) == ESP_OK;

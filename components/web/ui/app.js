@@ -249,6 +249,7 @@ pages.firmware = {
     if (!el || !status) return;
     const f = status.firmware, u = f.last_update;
     const last = u.result === 'updated' ? `<span class="badge ok">installed</span> ${esc(u.to_version)} <span class="muted">${esc(u.to.slice(0, 8))}</span>`
+      : u.result === 'trial' ? `<span class="badge">confirming</span> ${esc(u.to_version)} <span class="muted">${esc(u.to.slice(0, 8))}</span>`
       : u.result === 'rolled_back' ? `<span class="badge bad">rolled back</span> <span class="muted">${esc(u.to.slice(0, 8))} failed</span>`
       : '<span class="muted">none yet</span>';
     el.innerHTML = dl([

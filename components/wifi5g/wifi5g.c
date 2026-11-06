@@ -159,10 +159,11 @@ static void radio_up_and_connect(void)
 {
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY));
-    // Modem sleep, not PS_NONE: with Wi-Fi/802.15.4 coex the station must yield the
-    // shared RF between beacons, or Zigbee never gets air time (measured: network
-    // formation never completed with PS_NONE; Espressif's gateway does the same).
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
+    // No power save (mains powered). Modem sleep was used because "Zigbee never got air
+    // time with PS_NONE", but that was measured with the coex boost stuck at HIGH (fixed
+    // in zb.c). Re-measured 2026-11-06 with PS_NONE: ping 19 ms avg (modem sleep ~60 ms),
+    // 80/80 contact-sensor events received under Wi-Fi load, boot -> IP unchanged.
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     try_connect();
 }
 

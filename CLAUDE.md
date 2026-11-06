@@ -328,7 +328,7 @@ runs). We had no 802.15.4 yet. Re-run with Zigbee up (Phase 3, 2026-11-06):
 | boot → Wi-Fi | 25–27 s | **1.67 s** (5.9 s after an abrupt reset with a stale association); was 17.7 s until the coex-boost bug was fixed |
 | Zigbee up | after Wi-Fi in their boot order | network restored in 13 ms, **before** Wi-Fi starts (formed in 576 ms on first boot) |
 | reports lost under Wi-Fi load | not measured | 0 of 32 (14 idle + 18 loaded) |
-| ping while associated | not reported | ~60 ms avg (modem sleep, needed for coex) vs 7–10 ms without Zigbee |
+| ping while associated | not reported | 19 ms avg, no power save (was ~60 ms with modem sleep, which turned out unnecessary) vs 7–10 ms without Zigbee |
 
 ### Phase 1b — Buzzer & GPIO hardware validation (user request)
 The user's buzzers: **RUNCCI-YUN "DC 3V active piezo, continuous sound"**, 20 pcs
@@ -479,8 +479,12 @@ For long tests without a serial cable: log on the board, download later.
     never completes, with Wi-Fi `PS_NONE` or `PS_MIN_MODEM`
   - **chosen**: HIGH until the network is formed/restored, defaults after.
     Formation 576 ms, restore 8 ms (done before Wi-Fi starts)
-  - Wi-Fi in **modem sleep** (`WIFI_PS_MIN_MODEM`, as Espressif's gateway does with
-    coex). Ping avg 7 → ~60 ms
+  - Wi-Fi **without power save** (`WIFI_PS_NONE`) since 2026-11-06. Modem sleep was used
+    first ("formation never completed with PS_NONE"), but that was measured with the
+    boost bug below. Re-measured with PS_NONE: ping 19 ms avg (2–60; modem sleep ~60 ms),
+    80/80 Door events strictly alternating under load (3927 small downloads + ping every
+    50 ms, 2966/2966 answered; lighter in bytes than the modem-sleep test: 2 MB vs 29 MB),
+    boot → IP unchanged. User decision: modem sleep not needed
   - **Zigbee reception with these priorities — measured 2026-11-06**, Door sensor
     opened/closed by hand (~2 s per state): Wi-Fi idle 14/14 events, Wi-Fi loaded
     (1059 downloads = 29 MB in 170 s from the hub + ping every 50 ms) 18/18 events.

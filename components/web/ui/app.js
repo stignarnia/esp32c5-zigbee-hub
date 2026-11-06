@@ -264,9 +264,9 @@ pages.status = {
     if (!el || !status) return;
     const s = status, w = s.wifi, m = s.memory, f = s.firmware, u = f.last_update;
     const intTotal = 320 * 1024;
-    const last = u.result === 'updated' ? `<span class="badge ok">installed</span> ${esc(u.to_version)} <span class="muted">${esc(u.to.slice(0, 8))}</span>`
-      : u.result === 'trial' ? `<span class="badge">confirming</span> ${esc(u.to_version)} <span class="muted">${esc(u.to.slice(0, 8))}</span>`
-      : u.result === 'rolled_back' ? `<span class="badge bad">rolled back</span> <span class="muted">${esc(u.to.slice(0, 8))} failed</span>`
+    const last = u.result === 'updated' ? `<span class="badge ok">installed</span> ${esc(u.to_version)} <code>${esc(u.to.slice(0, 8))}</code>`
+      : u.result === 'trial' ? `<span class="badge">confirming</span> ${esc(u.to_version)} <code>${esc(u.to.slice(0, 8))}</code>`
+      : u.result === 'rolled_back' ? `<span class="badge bad">rolled back</span> <code>${esc(u.to.slice(0, 8))}</code> failed`
       : '<span class="muted">none yet</span>';
     el.innerHTML = `
       <section class="card"><h2>Wi-Fi</h2>${dl([
@@ -299,7 +299,7 @@ pages.status = {
       ])}</section>
       <section class="card"><h2>Firmware</h2>${dl([
         ['Version', `${esc(f.version)} <span class="muted">(git)</span>`],
-        ['Build', `<code>${esc(f.build_id)}</code>`],
+        ['Build', `<code>${esc(f.build_id.slice(0, 8))}</code>`],
         ['Built', esc(f.built)],
         ['ESP-IDF', esc(f.idf)],
         ['Slot', esc(f.partition)],

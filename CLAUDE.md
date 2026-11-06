@@ -483,9 +483,20 @@ For long tests without a serial cable: log on the board, download later.
 - [x] Device registry (`zb_dev.c`): PSRAM table (32 devices), persisted to
       `/storage/zb/devices.json` by a saver task (no file I/O on the Zigbee task),
       **including endpoints and cluster lists**
-- [x] Interview code written (Basic "magic" read + Active EP in parallel on announce
-      → Simple Desc → IAS CIE write + unsolicited enroll + zone read → bind +
-      reporting; 2 s retries ×6, resume on next check-in). **Untested with a device**
+- [x] Interview (Basic "magic" read + Active EP in parallel on announce → Simple Desc
+      → IAS CIE write + unsolicited enroll + zone read → bind + reporting; 2 s retries
+      ×6, then resume on the next check-in). **Verified 2026-11-06 with two Zbeacon DS01
+      contact sensors** (Tuya-made, IEEE a4c1…, ep 1: Basic, Identify, Power Config,
+      IAS Zone, Poll Control; zone type 0x0015):
+  - join → card in the UI within a second; Basic answered 0.7 s after the announce
+  - open/closed via Zone Status Change Notifications from the first second, before
+    the interview finished (they notify the coordinator without being enrolled)
+  - after the fix below: interview resumed on the next wake-up and **completed in
+    ~0.7 s** (EPs → descriptor → CIE write ok → zone type → reporting configured →
+    the device's own Enroll Request answered)
+  - bug found: ZDO callback context carried the 64-bit IEEE in a pointer (32-bit on
+    the C5) → truncated → every Active EP response dropped. Context is now slot+short
+  - battery 100 % / 3.0 V, RSSI −44…−66 dBm at a few metres
 - [x] Web: Devices page (default), `GET /api/zb`, `POST /api/zb/{permit,rename,remove}`;
       the page polls every 1 s. Permit-join round trip verified (open 10 s → 9 s left → closed)
 - [x] OTA health = Zigbee up + web server (Wi-Fi no longer required)
@@ -500,7 +511,7 @@ For long tests without a serial cable: log on the board, download later.
     (reference bug: never initialised → no reports ever arrived)
   - user names the device and assigns a room; persisted to LittleFS
     **including the cluster list** (reference bug: restored devices had none)
-- [ ] **Acceptance test: a cheap no-name reed/contact sensor** (typically Tuya
+- [x] **Acceptance test: a cheap no-name reed/contact sensor** — passed 2026-11-06 (above) (typically Tuya
       TS0203 or similar). Press "Scan", insert the battery, it shows up, gets
       interviewed, and reports open/closed. What that needs, because these devices
       are sleepy end devices that give you seconds, not minutes:

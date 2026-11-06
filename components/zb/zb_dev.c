@@ -70,6 +70,7 @@ typedef struct {
     uint8_t tries;
     int64_t next_try_us;         // 0 = not waiting
     int64_t joined_us;
+    int64_t woke_us;             // when the current interview attempt started
     // live state (not persisted)
     int64_t last_seen_us;
     int8_t rssi;
@@ -113,6 +114,22 @@ static zdev_t *by_ieee(uint64_t ieee)
 static int dev_index(const zdev_t *d)
 {
     return (int)(d - s_dev);
+}
+
+// Callback context for ZDO requests: the table slot plus the device's short
+// address, packed in 32 bits (pointers are 32-bit on this chip — an IEEE address
+// doesn't fit; truncating it made every endpoint response unmatchable).
+static void *slot_ctx(const zdev_t *d)
+{
+    return (void *)(uintptr_t)(((uint32_t)dev_index(d) << 16) | d->short_addr);
+}
+
+static zdev_t *from_ctx(void *ctx)
+{
+    uint32_t v = (uint32_t)(uintptr_t)ctx;
+    int idx = v >> 16;
+    if (idx >= ZB_MAX_DEVICES || !s_dev[idx].used || s_dev[idx].short_addr != (v & 0xFFFF)) return NULL;
+    return &s_dev[idx];
 }
 
 static bool has_server(const zdev_t *d, uint16_t cluster, uint8_t *ep_out)
@@ -172,6 +189,13 @@ static const char *zone_kind(uint16_t t)
     }
 }
 
+// Finished = every step done, and an IAS device's zone type known (it says what the
+// device is: contact, motion, water...).
+static bool complete(const zdev_t *d)
+{
+    return d->done == IV_ALL && (d->zone_type || !has_server(d, EZB_ZCL_CLUSTER_ID_IAS_ZONE, NULL));
+}
+
 // ---- interview: requests --------------------------------------------------------------
 
 static void basic_read(zdev_t *d)
@@ -196,7 +220,7 @@ static void active_ep_req(zdev_t *d)
         .dst_nwk_addr = d->short_addr,
         .field = {.nwk_addr_of_interest = d->short_addr},
         .cb = active_ep_cb,
-        .user_ctx = (void *)(uintptr_t)d->ieee,  // the ieee survives a short-address change
+        .user_ctx = slot_ctx(d),
     };
     ezb_zdo_active_ep_req(&req);
 }
@@ -207,7 +231,7 @@ static void simple_desc_req(zdev_t *d, uint8_t ep)
         .dst_nwk_addr = d->short_addr,
         .field = {.nwk_addr_of_interest = d->short_addr, .endpoint = ep},
         .cb = simple_desc_cb,
-        .user_ctx = (void *)(uintptr_t)d->ieee,
+        .user_ctx = slot_ctx(d),
     };
     ezb_zdo_simple_desc_req(&req);
 }
@@ -319,7 +343,7 @@ static void bind_and_report(zdev_t *d)
 static void interview_step(zdev_t *d)
 {
     int64_t now = esp_timer_get_time();
-    if (d->done == IV_ALL) {
+    if (complete(d)) {
         d->next_try_us = 0;
         return;
     }
@@ -332,12 +356,13 @@ static void interview_step(zdev_t *d)
         }
     } else {
         uint8_t ep;
-        if (!(d->done & IV_IAS)) {
-            if (has_server(d, EZB_ZCL_CLUSTER_ID_IAS_ZONE, &ep)) {
-                ias_setup(d, ep);
-            } else {
-                d->done |= IV_IAS;
-            }
+        bool ias = has_server(d, EZB_ZCL_CLUSTER_ID_IAS_ZONE, &ep);
+        if (!ias) {
+            d->done |= IV_IAS;
+        } else if (!(d->done & IV_IAS) || !d->zone_type) {
+            // Also when notifications already arrive (the device enrolled itself):
+            // the zone type says what it is (contact, motion, water...).
+            ias_setup(d, ep);
         }
         if (!(d->done & IV_REPORT)) {
             bind_and_report(d);
@@ -351,10 +376,10 @@ static void interview_step(zdev_t *d)
 
 static void interview_done_check(zdev_t *d)
 {
-    if (d->done == IV_ALL) {
+    if (complete(d) && d->next_try_us) {  // logged once: on the transition
         d->next_try_us = 0;
-        ESP_LOGI(TAG, "0x%04x %s %s: interview complete in %lld ms", d->short_addr, d->manuf, d->model,
-                 (esp_timer_get_time() - d->joined_us) / 1000);
+        ESP_LOGI(TAG, "0x%04x %s %s: interview complete (%lld ms since it last woke up)", d->short_addr,
+                 d->manuf, d->model, (esp_timer_get_time() - d->woke_us) / 1000);
     }
 }
 
@@ -363,8 +388,9 @@ static void heard(zdev_t *d, int8_t rssi)
 {
     d->last_seen_us = esp_timer_get_time();
     if (rssi) d->rssi = rssi;
-    if (d->done != IV_ALL && d->next_try_us == 0) {
+    if (!complete(d) && d->next_try_us == 0) {
         ESP_LOGI(TAG, "0x%04x awake again: resuming interview", d->short_addr);
+        d->woke_us = esp_timer_get_time();
         d->tries = 0;
         interview_step(d);
     }
@@ -375,7 +401,8 @@ static void heard(zdev_t *d, int8_t rssi)
 static void active_ep_cb(const ezb_zdo_active_ep_req_result_t *r, void *ctx)
 {
     LOCK();
-    zdev_t *d = by_ieee((uint64_t)(uintptr_t)ctx);
+    zdev_t *d = from_ctx(ctx);
+    if (d && (r->error != EZB_ERR_NONE || !r->rsp)) ESP_LOGW(TAG, "0x%04x: active EP request: error 0x%x", d->short_addr, r->error);
     if (d && r->error == EZB_ERR_NONE && r->rsp && r->rsp->status == EZB_ZDP_STATUS_SUCCESS && !(d->done & IV_EPS)) {
         d->n_ep = r->rsp->active_ep_count < ZB_MAX_EPS ? r->rsp->active_ep_count : ZB_MAX_EPS;
         for (int i = 0; i < d->n_ep; i++) d->ep[i].id = r->rsp->active_ep_list[i];
@@ -392,7 +419,8 @@ static void active_ep_cb(const ezb_zdo_active_ep_req_result_t *r, void *ctx)
 static void simple_desc_cb(const ezb_zdo_simple_desc_req_result_t *r, void *ctx)
 {
     LOCK();
-    zdev_t *d = by_ieee((uint64_t)(uintptr_t)ctx);
+    zdev_t *d = from_ctx(ctx);
+    if (d && (r->error != EZB_ERR_NONE || !r->rsp)) ESP_LOGW(TAG, "0x%04x: simple desc request: error 0x%x", d->short_addr, r->error);
     if (d && r->error == EZB_ERR_NONE && r->rsp && r->rsp->status == EZB_ZDP_STATUS_SUCCESS) {
         const ezb_af_simple_desc_t *s = &r->rsp->desc;
         for (int e = 0; e < d->n_ep; e++) {
@@ -608,8 +636,9 @@ void zb_dev_on_announce(uint16_t short_addr, uint64_t ieee, uint8_t capability)
     d->last_seen_us = esp_timer_get_time();
     ESP_LOGI(TAG, "%s 0x%016llx short 0x%04x cap 0x%02x%s", fresh ? "NEW device" : "rejoined",
              (unsigned long long)ieee, short_addr, capability, (capability & 0x08) ? "" : " (sleepy)");
-    if (d->done != IV_ALL) {
+    if (!complete(d)) {
         d->tries = 0;
+        d->woke_us = esp_timer_get_time();
         interview_step(d);  // immediately: a sleepy device is awake only now
     }
     changed(true);
@@ -634,7 +663,7 @@ void zb_dev_tick(void *arg)
     LOCK();
     for (int i = 0; i < ZB_MAX_DEVICES; i++) {
         zdev_t *d = &s_dev[i];
-        if (!d->used || d->done == IV_ALL || !d->next_try_us || now < d->next_try_us) continue;
+        if (!d->used || complete(d) || !d->next_try_us || now < d->next_try_us) continue;
         if (d->tries >= MAX_TRIES) {
             d->next_try_us = 0;  // asleep: resume on its next check-in (heard())
             ESP_LOGW(TAG, "0x%04x: no answer after %d tries (asleep?); interview resumes when it's heard from",
@@ -683,7 +712,7 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
     }
     if (live) {
         int64_t now = esp_timer_get_time();
-        const char *st = d->done == IV_ALL ? "ready" : d->next_try_us ? "interviewing" : "waiting";
+        const char *st = complete(d) ? "ready" : d->next_try_us ? "interviewing" : "waiting";
         cJSON_AddStringToObject(o, "status", st);
         cJSON_AddBoolToObject(o, "sleepy", !(d->cap & 0x08));
         cJSON_AddNumberToObject(o, "seen_s", d->last_seen_us ? (double)((now - d->last_seen_us) / 1000000) : -1);

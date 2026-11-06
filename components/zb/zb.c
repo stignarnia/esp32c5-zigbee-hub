@@ -4,6 +4,7 @@
 #include <inttypes.h>
 
 #include "esp_coexist.h"
+#include "esp_coex_i154.h"
 #include "nvs_flash.h"
 #include "esp_ieee802154.h"
 #include "esp_log.h"
@@ -37,6 +38,12 @@ static int64_t s_start_us;
 static void coex_settle(const char *what)
 {
     esp_ieee802154_set_coex_config(s_coex_default);
+    // set_coex_config() only stores the values: the driver applies a PTI when an
+    // operation starts (enable_rx, transmit, ED). A coordinator sits in one long
+    // receive, so HIGH stayed in force until its first transmit 10-14 s later, and
+    // Wi-Fi couldn't transmit at all until then (measured: probe on air 0 of 5 boots,
+    // PTI log HIGH 0.85 s -> LOW at first TX). Apply it now; the radio is receiving.
+    esp_coex_ieee802154_txrx_pti_set(s_coex_default.txrx);
     ezb_extaddr_t me;
     ezb_get_extended_address(&me);
     zb_dev_set_my_ieee(me.u64);

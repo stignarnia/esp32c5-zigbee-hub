@@ -109,6 +109,7 @@ char *api_status_json(void)
     cJSON_AddNumberToObject(wi, "disconnects", w.disconnects);
     cJSON_AddNumberToObject(wi, "no_ap_found", w.no_ap_found);
     cJSON_AddNumberToObject(wi, "last_reason", w.last_reason);
+    cJSON_AddStringToObject(wi, "last_reason_name", wifi5g_reason_str(w.last_reason));
     cJSON_AddNumberToObject(wi, "failovers", w.failovers);
     cJSON_AddNumberToObject(wi, "driver_restarts", w.driver_restarts);
     cJSON_AddNumberToObject(wi, "watchdog_reboots", w.watchdog_reboots);

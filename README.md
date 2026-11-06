@@ -221,7 +221,7 @@ end)
 | `state.get(key)` / `state.put(key, value)` | small persistent key-value store, survives reboots |
 | `http.request{url=, method=, headers=, body=/json=, retry_for=, on_done=}` | HTTP(S) request; never blocks the script, the result arrives in `on_done(status, body)` |
 | `http.get(url, opts)` / `http.post(url, body, opts)` | shorthands for the above |
-| `secret(name)` | a value stored under **System → Secrets** (tokens, webhook URLs), so it never appears in script text |
+| `secret(name)` | a value stored under **Settings → Secrets** (tokens, webhook URLs), so it never appears in script text |
 | `log(...)` | shows up in the script's live log in the UI |
 | `gpio.write(pin, v)` / `gpio.read(pin)` | drive or read one of the board's pins |
 | `gpio.on(pin, edge, fn)` | call `fn` on a rising/falling edge (debounced) |
@@ -230,7 +230,7 @@ end)
 
 #### Buzzers and other GPIO
 
-Enable a pin under **System → GPIO**, give it a name, and scripts can use it:
+Enable a pin under **Settings → GPIO**, give it a name, and scripts can use it:
 
 ```lua
 -- Door left open for 2 minutes: beep three times, every minute, until it closes
@@ -266,7 +266,7 @@ sounds at once.
 Alexa has no webhook of its own, but third-party skills (routine triggers,
 announcement services) give you an HTTPS URL that runs an Alexa routine when
 called, for example one that plays an alarm on every Echo in the house. Store that
-URL under **System → Secrets** as `alexa_alarm`, then:
+URL under **Settings → Secrets** as `alexa_alarm`, then:
 
 ```lua
 -- Water leak: buzzer here, alarm on the Echos, and keep trying for 10 minutes
@@ -302,7 +302,7 @@ cron jobs show "clock unset" instead of firing at the wrong moment.
 
 ### Home Assistant (optional)
 
-Off by default. Turn it on under **System → Home Assistant integration** (or with
+Off by default. Turn it on under **Settings → Home Assistant integration** (or with
 `flash.sh --ha`), copy the encryption key it shows, and Home Assistant discovers
 the hub on its own (**Settings → Devices & services → ESPHome**). Paste the key
 when asked.
@@ -369,14 +369,21 @@ tailnet is the login.
 run `./flash.sh --prov-only --lan-access`. Zigbee and your automations keep running
 throughout.
 
-### System
+### Status
 
-Uptime, memory (internal and PSRAM, current and lowest since boot), Wi-Fi channel
-and signal, reset reason, firmware version, and firmware updates.
+Everything here is read-only: Wi-Fi (network, channel, signal, IP, time to come
+online after boot), Wi-Fi recovery counters, memory (internal and PSRAM, current
+and lowest since boot), uptime, reset reason, and the running firmware (version,
+build, slot, whether it's still on trial, the last update's result).
+
+### Settings
+
+Everything you can change: the primary and backup Wi-Fi networks, firmware
+updates, restarting the hub, and the diagnostic log download.
 
 **Diagnostic log.** The hub keeps its own log on flash: warnings, errors, Wi-Fi
 events, updates and reboots (with the reason), plus a status sample every 5
-minutes, all with UTC timestamps. **Download log** on the System page gets the
+minutes, all with UTC timestamps. **Download log** in Settings gets the
 last ~500 KB, so you can look into a drop or a crash from last night without
 ever connecting a cable. It survives reboots, and a planned or watchdog reboot
 writes everything out before restarting.
@@ -391,7 +398,7 @@ tailnet.
 ./flash.sh --ota --host 100.x.y.z   # or a specific address
 ```
 
-Or upload a `.bin` under **System → Firmware update** in the UI.
+Or upload a `.bin` under **Settings → Firmware update** in the UI.
 
 What happens:
 
@@ -495,7 +502,7 @@ Automations. Fix and save; it restarts.
 **Home Assistant shows the devices as unavailable.** A script is enabled, so the
 hub is the brain. Disable all scripts on the Automations page and Home Assistant
 reconnects. If it's still unavailable, check that the integration is on under
-System.
+Settings.
 
 **UI not reachable over Tailscale.** The Tailscale page shows the connection
 state. The auth key must be valid and the device approved in the admin console if

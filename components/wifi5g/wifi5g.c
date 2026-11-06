@@ -81,7 +81,7 @@ static struct {
 // Aborting 2 s in and retrying was also ignored and cost another 4 s (IP ~8.5 s), so
 // the driver's own timeout plus the pinned retry is the fastest. Clean boots: 1.7 s.
 
-static const char *reason_str(uint8_t r)
+const char *wifi5g_reason_str(uint8_t r)
 {
     switch (r) {
     case WIFI_REASON_AUTH_EXPIRE:          return "AUTH_EXPIRE";
@@ -219,7 +219,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 
         ESP_LOGW(TAG, "%s (%s): reason %u %s, rssi %d, retry in %lld s",
                  was_connected ? "disconnected" : "connect failed", net_name(net), e->reason,
-                 reason_str(e->reason), e->rssi, backoff / SEC_US);
+                 wifi5g_reason_str(e->reason), e->rssi, backoff / SEC_US);
     }
 }
 

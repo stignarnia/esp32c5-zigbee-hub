@@ -82,3 +82,6 @@ void wifi5g_set_reboot_gate(wifi5g_reboot_gate_t gate);
 
 void wifi5g_get_stats(wifi5g_stats_t *out);
 bool wifi5g_is_connected(void);
+
+// Name of a Wi-Fi disconnect reason code ("AUTH_EXPIRE", "NO_AP_FOUND", ... or "other").
+const char *wifi5g_reason_str(uint8_t reason);

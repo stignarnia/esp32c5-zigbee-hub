@@ -472,7 +472,7 @@ For long tests without a serial cable: log on the board, download later.
       5.5.6) builds and links on IDF 6.1. Stack NVRAM in the NVS `zb_storage` partition
 - [x] **Coex before Wi-Fi connects**: `esp_coex_wifi_i154_enable()` in `zb_start()`,
       before `wifi5g_start()`
-- [~] **Coex priority — measured 2026-11-06** (802.15.4 PTI via `esp_ieee802154_set_coex_config`):
+- [x] **Coex priority — measured 2026-11-06** (802.15.4 PTI via `esp_ieee802154_set_coex_config`):
   - txrx/txrx_at HIGH permanently: Wi-Fi never associates (NO_AP_FOUND after 15 s,
     every attempt). A coordinator is always receiving, so HIGH never yields
   - driver defaults (idle 4, txrx LOW, txrx_at MIDDLE) from boot: network formation
@@ -577,7 +577,7 @@ For long tests without a serial cable: log on the board, download later.
       On/Off, Level, Color Control (CT + XY), Temperature, Humidity, Pressure,
       Illuminance, Occupancy, IAS Zone (contact/motion/water/smoke), Power Config
       (battery), Electrical Measurement, Metering, Window Covering, Thermostat
-- [~] Device page: live state, LQI/RSSI, last seen, availability, rename, remove — done;
+- [x] Device page: live state, LQI/RSSI, last seen, availability, rename, remove — done;
       re-interview (redoes every step; battery devices at their next check-in) — verified
       2026-11-06 on the Door sensor: pressed twice, each time "waiting for it to wake up",
       then on the next open/close the full interview ran and completed in 620 / 639 ms.
@@ -589,6 +589,23 @@ For long tests without a serial cable: log on the board, download later.
       LQI/RSSI/depth)
 - **Zigbee routers (mains devices: plugs, bulbs) are not tested, and this hub is not
   built for them** (user decision 2026-11-06)
+- [~] **Web server stalls (found 2026-11-06, fixed, re-interview not yet re-tested)**:
+  - one WebSocket client that stops reading blocked the server's only task for
+    `send_wait_timeout` (10 s) per push — measured 12 s + 7 s freezes for every page
+    and login. Now WS sockets get `SO_SNDTIMEO` 0.5 s and a failed push closes that
+    client (browser reconnects). Re-measured: one 1.6 s blip (mostly the test
+    client's own 0.9 s login), then 11–32 ms
+  - `zb_network_json` took the Zigbee lock on the HTTP task (up to 200 ms per
+    snapshot); during an interview, every state change queued another snapshot and
+    the server fell behind ("ctrl socket queue full"). Now the Zigbee task refreshes
+    a copy of PAN/channel/neighbours every second and the HTTP task only copies it
+  - the Devices page didn't redraw while anything in the cards had focus, so the
+    clicked Re-interview button froze the cards. Now only a focused text field pauses
+    it; Re-interview shows requested → re-interviewing → done
+- UI: three tabs since 2026-11-06 — Devices, Status (read-only: Wi-Fi, recovery
+  counters with the last disconnect reason in words, memory, system, firmware),
+  Settings (everything that changes something: Wi-Fi networks, firmware update,
+  log download, restart)
 - [x] Zigbee lock around every stack call from other tasks — audited 2026-11-06, none
       missing. All `ezb_*` calls in `zb_dev.c` (interview, enroll, bind/report,
       availability pings) are reached only from the Zigbee task (signal/ZCL/ZDO callbacks,

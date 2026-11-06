@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/socket.h>
 
 #include "cJSON.h"
 #include "esp_heap_caps.h"
@@ -150,6 +151,12 @@ static esp_err_t ws_pre_handshake(httpd_req_t *req)
 static esp_err_t ws_post_handshake(httpd_req_t *req)
 {
     int fd = httpd_req_to_sockfd(req);
+    // Pushes are sent from the server's only task: a client that stops reading (a
+    // frozen tab, a phone asleep) must not hold it for send_wait_timeout (10 s), or
+    // every page and login waits behind it (measured: 12 s + 7 s stalls). A push that
+    // can't be handed over in 0.5 s closes that client; the browser reconnects.
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 500 * 1000};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     for (int i = 0; i < MAX_WS; i++) {
         if (s_ws_fds[i] == -1) {
             s_ws_fds[i] = fd;
@@ -189,9 +196,12 @@ static void ws_push_work(void *arg)
     for (int i = 0; i < MAX_WS; i++) {
         int fd = s_ws_fds[i];
         if (fd < 0) continue;
-        if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET ||
-            httpd_ws_send_frame_async(s_server, fd, &f) != ESP_OK) {
+        if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
             s_ws_fds[i] = -1;
+        } else if (httpd_ws_send_frame_async(s_server, fd, &f) != ESP_OK) {
+            s_ws_fds[i] = -1;
+            ESP_LOGW(TAG, "ws: client fd %d not reading, closed", fd);
+            httpd_sess_trigger_close(s_server, fd);  // a half-sent frame: the stream is unusable
         }
     }
     free(json);

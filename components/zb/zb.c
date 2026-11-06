@@ -2,6 +2,7 @@
 #include "zb_internal.h"
 
 #include <inttypes.h>
+#include <string.h>
 
 #include "esp_coexist.h"
 #include "esp_coex_i154.h"
@@ -35,6 +36,8 @@ static int64_t s_start_us;
 //    never completed (energy/active scans starved), even with Wi-Fi in modem sleep.
 // So: HIGH while forming/restoring, defaults once the network is up. Formation
 // happens once per device life; a restore takes ~1 s and is done before Wi-Fi starts.
+static void net_refresh(void);
+
 static void coex_settle(const char *what)
 {
     esp_ieee802154_set_coex_config(s_coex_default);
@@ -47,6 +50,7 @@ static void coex_settle(const char *what)
     ezb_extaddr_t me;
     ezb_get_extended_address(&me);
     zb_dev_set_my_ieee(me.u64);
+    net_refresh();
     s_up = true;
     ESP_LOGI(TAG, "%s in %lld ms; coex back to defaults (txrx %d, txrx_at %d)", what,
              (esp_timer_get_time() - s_start_us) / 1000, s_coex_default.txrx, s_coex_default.txrx_at);
@@ -223,9 +227,60 @@ fail:
     vTaskDelete(NULL);
 }
 
+// Network info for the UI, refreshed on the Zigbee task (no lock needed there) and
+// copied by the HTTP task under a short critical section. The HTTP task used to take
+// the Zigbee lock itself (up to 200 ms per snapshot): while the stack was busy, e.g.
+// during an interview, every live update blocked the web server behind it.
+typedef struct {
+    uint64_t ieee;
+    uint16_t short_addr;
+    uint8_t type, relationship, depth, lqi;
+    int8_t rssi;
+    bool rx_on;
+} nbr_t;
+static struct {
+    bool valid;
+    uint16_t pan;
+    uint64_t ext_pan;
+    uint8_t channel;
+    int n;
+    nbr_t nbr[ZB_MAX_DEVICES];
+} s_net;
+static portMUX_TYPE s_net_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void net_refresh(void)  // Zigbee task only
+{
+    static nbr_t tmp[ZB_MAX_DEVICES];
+    int n = 0;
+    ezb_nwk_info_iterator_t it = EZB_NWK_INFO_ITERATOR_INIT;
+    ezb_nwk_neighbor_info_t nb;
+    while (n < ZB_MAX_DEVICES && ezb_nwk_get_next_neighbor(&it, &nb) == EZB_ERR_NONE) {
+        tmp[n++] = (nbr_t){nb.ieee_addr.u64, nb.short_addr, nb.device_type, nb.relationship,
+                           nb.depth, nb.lqi, nb.rssi, nb.rx_on_when_idle};
+    }
+    ezb_extpanid_t ext;
+    ezb_nwk_get_extended_panid(&ext);
+    uint16_t pan = ezb_nwk_get_panid();
+    uint8_t ch = ezb_nwk_get_current_channel();
+    taskENTER_CRITICAL(&s_net_lock);
+    s_net.pan = pan;
+    s_net.ext_pan = ext.u64;
+    s_net.channel = ch;
+    s_net.n = n;
+    memcpy(s_net.nbr, tmp, n * sizeof(nbr_t));
+    s_net.valid = true;
+    taskEXIT_CRITICAL(&s_net_lock);
+}
+
+static void tick_on_zb_task(void *arg)
+{
+    net_refresh();
+    zb_dev_tick(arg);
+}
+
 static void tick_cb(TimerHandle_t t)
 {
-    if (s_up) esp_zigbee_task_queue_post(zb_dev_tick, NULL);
+    if (s_up) esp_zigbee_task_queue_post(tick_on_zb_task, NULL);
 }
 
 esp_err_t zb_start(void)
@@ -275,35 +330,33 @@ cJSON *zb_network_json(void)
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "up", s_up);
     cJSON_AddNumberToObject(o, "permit_s", zb_permit_left());
-    if (s_up && esp_zigbee_lock_acquire(pdMS_TO_TICKS(200))) {
-        ezb_extpanid_t ext;
-        ezb_nwk_get_extended_panid(&ext);
+    static typeof(s_net) snap;  // HTTP task only (handlers and WebSocket pushes)
+    taskENTER_CRITICAL(&s_net_lock);
+    snap = s_net;
+    taskEXIT_CRITICAL(&s_net_lock);
+    if (s_up && snap.valid) {
         char buf[20];
-        snprintf(buf, sizeof(buf), "0x%04x", ezb_nwk_get_panid());
+        snprintf(buf, sizeof(buf), "0x%04x", snap.pan);
         cJSON_AddStringToObject(o, "pan", buf);
-        snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)ext.u64);
+        snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)snap.ext_pan);
         cJSON_AddStringToObject(o, "ext_pan", buf);
-        cJSON_AddNumberToObject(o, "channel", ezb_nwk_get_current_channel());
-        // Network map: the coordinator's neighbour table (every directly joined
-        // device and neighbouring router, with link quality). Routers' own tables
-        // (Mgmt_Lqi_req) come when there is a router to test with.
+        cJSON_AddNumberToObject(o, "channel", snap.channel);
+        // Network map: the coordinator's neighbour table (every directly joined device).
         cJSON *nbrs = cJSON_AddArrayToObject(o, "neighbors");
-        ezb_nwk_info_iterator_t it = EZB_NWK_INFO_ITERATOR_INIT;
-        ezb_nwk_neighbor_info_t n;
-        while (ezb_nwk_get_next_neighbor(&it, &n) == EZB_ERR_NONE) {
+        for (int i = 0; i < snap.n; i++) {
+            const nbr_t *n = &snap.nbr[i];
             cJSON *j = cJSON_CreateObject();
-            snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)n.ieee_addr.u64);
+            snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)n->ieee);
             cJSON_AddStringToObject(j, "ieee", buf);
-            cJSON_AddNumberToObject(j, "short", n.short_addr);
-            cJSON_AddNumberToObject(j, "type", n.device_type);      // 0 coordinator, 1 router, 2 end device
-            cJSON_AddNumberToObject(j, "relationship", n.relationship);
-            cJSON_AddNumberToObject(j, "depth", n.depth);
-            cJSON_AddNumberToObject(j, "lqi", n.lqi);
-            cJSON_AddNumberToObject(j, "rssi", n.rssi);
-            cJSON_AddBoolToObject(j, "rx_on", n.rx_on_when_idle);
+            cJSON_AddNumberToObject(j, "short", n->short_addr);
+            cJSON_AddNumberToObject(j, "type", n->type);  // 0 coordinator, 1 router, 2 end device
+            cJSON_AddNumberToObject(j, "relationship", n->relationship);
+            cJSON_AddNumberToObject(j, "depth", n->depth);
+            cJSON_AddNumberToObject(j, "lqi", n->lqi);
+            cJSON_AddNumberToObject(j, "rssi", n->rssi);
+            cJSON_AddBoolToObject(j, "rx_on", n->rx_on);
             cJSON_AddItemToArray(nbrs, j);
         }
-        esp_zigbee_lock_release();
     }
     return o;
 }

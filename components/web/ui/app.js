@@ -1,6 +1,7 @@
 'use strict';
 // Zigbee Hub web UI. No framework: a hash router, one status object refreshed over
-// a WebSocket every 2 s, and four pages (Devices, System, Wi-Fi, Firmware).
+// a WebSocket every 2 s, and three pages: Devices, Status (read-only) and Settings
+// (everything that changes something).
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -117,7 +118,7 @@ window.addEventListener('hashchange', render);
 const ZONE_STATE = { contact: ['closed', 'OPEN'], motion: ['clear', 'MOTION'], water: ['dry', 'LEAK'],
   fire: ['ok', 'FIRE'], co: ['ok', 'CO'], vibration: ['still', 'VIBRATION'] };
 pages.devices = {
-  timer: null, data: null, rev: -1,
+  timer: null, data: null, rev: -1, reiv: {},
   stop() { clearInterval(this.timer); this.timer = null; },
   async render() {
     $('#view').innerHTML = `
@@ -168,7 +169,8 @@ pages.devices = {
   },
   list(devs) {
     const el = $('#zb-devs');
-    if (document.activeElement && el.contains(document.activeElement)) return;  // don't clobber typing
+    const a = document.activeElement;
+    if (a && a.tagName === 'INPUT' && el.contains(a)) return;  // don't clobber typing
     el.innerHTML = devs.length ? devs.map((v) => this.card(v)).join('') : '<div class="card muted">No devices yet. Press “Scan for devices”, then power up the device.</div>';
     el.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', () => this.rename(b.dataset.rename)));
     el.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', () => this.remove(b.dataset.remove)));
@@ -198,12 +200,24 @@ pages.devices = {
     rows.push(['Model', esc([v.manuf, v.model].filter(Boolean).join(' / ') || '—')]);
     rows.push(['IEEE', `<code>${esc(v.ieee)}</code>`]);
     rows.push(['Type', v.sleepy ? 'battery (sleepy)' : 'mains / router']);
+    // Re-interview feedback: requested -> running -> done (shown 15 s).
+    const r = this.reiv[v.ieee];
+    let note = '';
+    if (r) {
+      if (v.status !== 'ready') r.busy = true;
+      if (r.busy && v.status === 'ready' && !r.done) r.done = Date.now();
+      if (r.done && Date.now() - r.done > 15000) delete this.reiv[v.ieee];
+      else if (r.done) note = '<p class="note ok">Re-interview done.</p>';
+      else if (r.busy && v.status === 'interviewing') note = '<p class="note warn">Re-interviewing…</p>';
+      else note = `<p class="note warn">Re-interview requested${v.sleepy ? ' — it starts when the sensor next wakes up: open and close it, or press its button' : '…'}</p>`;
+    }
+    const pending = r && !r.done && this.reiv[v.ieee];
     const clusters = v.eps.map((e) => `ep ${e.id}: ${e.in.map((c) => c.toString(16).padStart(4, '0')).join(' ')}`).join('<br>');
     return `<section class="card"><h2>${esc(title)} ${st}</h2>${dl(rows)}
-      <details><summary class="muted">Clusters</summary><p class="muted"><code>${clusters || '—'}</code></p></details>
+      ${note}<details><summary class="muted">Clusters</summary><p class="muted"><code>${clusters || '—'}</code></p></details>
       <label>Name <input type="text" id="name-${v.ieee}" value="${esc(v.name)}" maxlength="31" placeholder="e.g. Front door"></label>
       <div class="row"><button class="ghost" data-rename="${v.ieee}">Save name</button>
-        <button class="ghost" data-reinterview="${v.ieee}" title="Read its endpoints and clusters again and redo enrollment and reporting${v.sleepy ? '. Battery devices: starts when it next wakes up (open/close it or press its button)' : ''}">Re-interview</button>
+        <button class="ghost" data-reinterview="${v.ieee}"${pending ? ' disabled' : ''} title="Read its endpoints and clusters again and redo enrollment and reporting${v.sleepy ? '. Battery devices: starts when it next wakes up (open/close it or press its button)' : ''}">${pending ? 'Re-interview requested' : 'Re-interview'}</button>
         <button class="danger" data-remove="${v.ieee}">Remove</button></div></section>`;
   },
   async permit() {
@@ -217,7 +231,9 @@ pages.devices = {
     this.poll();
   },
   async reinterview(ieee) {
-    try { await api('/api/zb/reinterview', { method: 'POST', json: { ieee } }); } catch (e) { alert(e.message); }
+    if (document.activeElement) document.activeElement.blur();
+    try { await api('/api/zb/reinterview', { method: 'POST', json: { ieee } }); } catch (e) { alert(`Re-interview failed: ${e.message}`); return; }
+    this.reiv[ieee] = { busy: false, done: 0 };
     this.poll();
   },
   async remove(ieee) {
@@ -228,13 +244,30 @@ pages.devices = {
 };
 
 // System ------------------------------------------------------------------------------
-pages.system = {
+// Wi-Fi disconnect reasons in plain words (the hub sends the driver's name for the code).
+const REASON_TEXT = {
+  AUTH_EXPIRE: "the router didn't answer the login in 4 s (normal after an abrupt restart: it still held the old session)",
+  NO_AP_FOUND: 'router not found',
+  BEACON_TIMEOUT: "lost the router's signal",
+  AUTH_FAIL: 'login refused (wrong password?)',
+  ASSOC_FAIL: 'the router refused the connection',
+  HANDSHAKE_TIMEOUT: 'password handshake timed out',
+  '4WAY_HANDSHAKE_TIMEOUT': 'password handshake timed out (wrong password?)',
+  ASSOC_LEAVE: 'the hub disconnected on purpose (restart or network switch)',
+  CONNECTION_FAIL: 'connection failed',
+};
+
+pages.status = {
   render() { $('#view').innerHTML = '<div class="grid" id="sys"></div>'; this.live(); },
   live() {
     const el = $('#sys');
     if (!el || !status) return;
-    const s = status, w = s.wifi, m = s.memory, f = s.firmware;
+    const s = status, w = s.wifi, m = s.memory, f = s.firmware, u = f.last_update;
     const intTotal = 320 * 1024;
+    const last = u.result === 'updated' ? `<span class="badge ok">installed</span> ${esc(u.to_version)} <span class="muted">${esc(u.to.slice(0, 8))}</span>`
+      : u.result === 'trial' ? `<span class="badge">confirming</span> ${esc(u.to_version)} <span class="muted">${esc(u.to.slice(0, 8))}</span>`
+      : u.result === 'rolled_back' ? `<span class="badge bad">rolled back</span> <span class="muted">${esc(u.to.slice(0, 8))} failed</span>`
+      : '<span class="muted">none yet</span>';
     el.innerHTML = `
       <section class="card"><h2>Wi-Fi</h2>${dl([
         ['Status', w.connected ? '<span class="badge ok">connected</span>' : '<span class="badge bad">down</span>'],
@@ -247,7 +280,7 @@ pages.system = {
       ])}</section>
       <section class="card"><h2>Wi-Fi recovery</h2>${dl([
         ['Connects', w.connects],
-        ['Disconnects', `${w.disconnects}${w.last_reason ? ` <span class="muted">(last reason ${w.last_reason})</span>` : ''}`],
+        ['Disconnects', `${w.disconnects}${w.last_reason ? `<br><span class="muted">last: ${esc(REASON_TEXT[w.last_reason_name] || w.last_reason_name || 'code')} (${w.last_reason})</span>` : ''}`],
         ['AP not found (201)', w.no_ap_found],
         ['Network failovers', w.failovers],
         ['Driver restarts', w.driver_restarts],
@@ -263,27 +296,66 @@ pages.system = {
       <section class="card"><h2>System</h2>${dl([
         ['Uptime', dur(s.uptime_s)],
         ['Last reset', esc(s.boot.reset_reason) + (s.boot.planned_reason ? `<br><span class="muted">${esc(s.boot.planned_reason)}</span>` : '')],
-        ['Firmware', `${esc(f.version)} <span class="muted">${esc(f.build_id.slice(0, 8))}</span>`],
+      ])}</section>
+      <section class="card"><h2>Firmware</h2>${dl([
+        ['Version', esc(f.version)],
+        ['Build', `<code>${esc(f.build_id)}</code>`],
         ['Built', esc(f.built)],
         ['ESP-IDF', esc(f.idf)],
-      ])}</section>
-      <section class="card"><h2>Diagnostic log</h2>
-        <p class="muted">Warnings, errors, Wi-Fi events, updates and reboots, plus a sample every
-        5 minutes, kept on the hub (the last ~500 KB) with UTC timestamps.</p>
-        <div class="row"><a class="button" href="/api/logs" download>Download log</a></div>
-      </section>`;
+        ['Slot', esc(f.partition)],
+        ['State', f.on_trial ? '<span class="badge warn">on trial</span>' : '<span class="badge ok">confirmed</span>'],
+        ['Last update', last],
+      ])}</section>`;
   },
 };
 
-// Wi-Fi ---------------------------------------------------------------------------------
-pages.wifi = {
+// Settings: everything that changes something. Wi-Fi networks, firmware update, restart,
+// diagnostic log download.
+pages.settings = {
+  render() {
+    $('#view').innerHTML = `
+      <div id="wifi-note"></div>
+      <div id="wifi-area"><div class="card">Loading…</div></div>
+      <div class="grid">
+        <section class="card"><h2>Firmware update</h2>
+          <p class="muted">Upload <code>build/esp32c5-zigbee-hub.bin</code>, or run <code>./flash.sh --ota</code>.
+          The new firmware runs on trial and the hub goes back to this version by itself if it fails.</p>
+          <input type="file" id="fw-file" accept=".bin">
+          <div class="row"><button id="fw-upload" disabled>Upload &amp; install</button></div>
+          <div id="fw-progress" class="row" hidden><progress id="fw-bar" max="100" value="0"></progress></div>
+          <p id="fw-msg"></p>
+        </section>
+        <section class="card"><h2>Diagnostic log</h2>
+          <p class="muted">Warnings, errors, Wi-Fi events, updates and reboots, plus a sample every
+          5 minutes, kept on the hub (the last ~500 KB) with UTC timestamps.</p>
+          <div class="row"><a class="button" href="/api/logs" download>Download log</a></div>
+        </section>
+        <section class="card"><h2>Restart</h2>
+          <div class="row"><button class="danger" id="reboot">Restart the hub</button></div>
+        </section>
+      </div>`;
+    $('#fw-file').addEventListener('change', () => { $('#fw-upload').disabled = !$('#fw-file').files.length; });
+    $('#fw-upload').addEventListener('click', () => fw.upload());
+    $('#reboot').addEventListener('click', async () => {
+      if (!confirm('Restart the hub now?')) return;
+      try { await api('/api/reboot', { method: 'POST' }); fw.msg('Restarting…'); fw.waitBack(null); }
+      catch (e) { fw.msg(esc(e.message), 'err'); }
+    });
+    wifi.render();
+  },
+  live() { wifi.live(); },
+};
+
+// Wi-Fi networks (part of Settings) ---------------------------------------------------
+const wifi = {
   data: null,
   async render() {
-    $('#view').innerHTML = '<div class="card">Loading…</div>';
-    try { this.data = await api('/api/wifi'); } catch (e) { $('#view').innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
+    const area = $('#wifi-area');
+    if (!area) return;
+    try { this.data = await api('/api/wifi'); } catch (e) { area.innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
     const d = this.data;
     const netForm = (n, i) => `
-      <section class="card"><h2>${i === 0 ? 'Primary network' : 'Backup network'}
+      <section class="card"><h2>${i === 0 ? 'Primary Wi-Fi network' : 'Backup Wi-Fi network'}
         ${d.current === i && d.connected ? '<span class="badge ok">in use</span>' : ''}</h2>
         <label>SSID <input type="text" id="ssid${i}" value="${esc(n.ssid)}" maxlength="32" autocomplete="off"></label>
         <label>Password <input type="password" id="psk${i}" maxlength="64" autocomplete="new-password"
@@ -293,20 +365,20 @@ pages.wifi = {
           ${n.ssid && d.current !== i ? `<button class="ghost" data-switch="${i}">Switch to it now</button>` : ''}
         </div>
       </section>`;
-    $('#view').innerHTML = `
-      <div id="wifi-note"></div>
-      <div class="grid">${d.networks.map(netForm).join('')}</div>
-      <section class="card">
-        <p class="muted">Only 5 GHz is used: 2.4 GHz belongs to Zigbee. If the network in use is unreachable
-        for 2 minutes the hub tries the other one. Every switch from here is on trial: with no address
-        within ${d.trial_seconds} s it goes back to the previous network. A phone hotspot must be set to 5 GHz.</p>
-        <div class="row">
-          <button class="ghost" id="wifi-reset" ${d.custom ? '' : 'disabled'}>Reset to the networks from flash.sh</button>
-          ${d.custom ? '<span class="muted">Networks edited here are in use.</span>' : '<span class="muted">Using the networks from flash.sh.</span>'}
-        </div>
-      </section>`;
-    $('#view').querySelectorAll('[data-save]').forEach((b) => b.addEventListener('click', () => this.save(+b.dataset.save)));
-    $('#view').querySelectorAll('[data-switch]').forEach((b) => b.addEventListener('click', () => this.switchTo(+b.dataset.switch)));
+    area.innerHTML = `
+      <div class="grid">${d.networks.map(netForm).join('')}
+        <section class="card"><h2>How Wi-Fi switching works</h2>
+          <p class="muted">Only 5 GHz is used: 2.4 GHz belongs to Zigbee. If the network in use is unreachable
+          for 2 minutes the hub tries the other one. Every switch from here is on trial: with no address
+          within ${d.trial_seconds} s it goes back to the previous network. A phone hotspot must be set to 5 GHz.</p>
+          <p class="muted">${d.custom ? 'Networks edited here are in use.' : 'Using the networks from flash.sh.'}</p>
+          <div class="row">
+            <button class="ghost" id="wifi-reset" ${d.custom ? '' : 'disabled'}>Reset to the networks from flash.sh</button>
+          </div>
+        </section>
+      </div>`;
+    area.querySelectorAll('[data-save]').forEach((b) => b.addEventListener('click', () => this.save(+b.dataset.save)));
+    area.querySelectorAll('[data-switch]').forEach((b) => b.addEventListener('click', () => this.switchTo(+b.dataset.switch)));
     $('#wifi-reset').addEventListener('click', () => this.reset());
     this.live();
   },
@@ -334,52 +406,10 @@ pages.wifi = {
   },
 };
 
-// Firmware ------------------------------------------------------------------------------
-pages.firmware = {
+// Firmware update and restart (part of Settings) ---------------------------------------
+const fw = {
   busy: false,
-  render() {
-    $('#view').innerHTML = `
-      <div class="grid">
-        <section class="card"><h2>Running firmware</h2><div id="fw-info"></div></section>
-        <section class="card"><h2>Update</h2>
-          <p class="muted">Upload <code>build/esp32c5-zigbee-hub.bin</code>, or run <code>./flash.sh --ota</code>.
-          The new firmware runs on trial and the hub goes back to this version by itself if it fails.</p>
-          <input type="file" id="fw-file" accept=".bin">
-          <div class="row"><button id="fw-upload" disabled>Upload &amp; install</button></div>
-          <div id="fw-progress" class="row" hidden><progress id="fw-bar" max="100" value="0"></progress></div>
-          <p id="fw-msg"></p>
-        </section>
-        <section class="card"><h2>Restart</h2>
-          <div class="row"><button class="danger" id="reboot">Restart the hub</button></div>
-        </section>
-      </div>`;
-    $('#fw-file').addEventListener('change', () => { $('#fw-upload').disabled = !$('#fw-file').files.length; });
-    $('#fw-upload').addEventListener('click', () => this.upload());
-    $('#reboot').addEventListener('click', async () => {
-      if (!confirm('Restart the hub now?')) return;
-      try { await api('/api/reboot', { method: 'POST' }); this.msg('Restarting…'); this.waitBack(null); }
-      catch (e) { this.msg(esc(e.message), 'err'); }
-    });
-    this.live();
-  },
   msg(html, cls = '') { const m = $('#fw-msg'); if (m) { m.className = cls; m.innerHTML = html; } },
-  live() {
-    const el = $('#fw-info');
-    if (!el || !status) return;
-    const f = status.firmware, u = f.last_update;
-    const last = u.result === 'updated' ? `<span class="badge ok">installed</span> ${esc(u.to_version)} <span class="muted">${esc(u.to.slice(0, 8))}</span>`
-      : u.result === 'trial' ? `<span class="badge">confirming</span> ${esc(u.to_version)} <span class="muted">${esc(u.to.slice(0, 8))}</span>`
-      : u.result === 'rolled_back' ? `<span class="badge bad">rolled back</span> <span class="muted">${esc(u.to.slice(0, 8))} failed</span>`
-      : '<span class="muted">none yet</span>';
-    el.innerHTML = dl([
-      ['Version', esc(f.version)],
-      ['Build', `<code>${esc(f.build_id)}</code>`],
-      ['Built', esc(f.built)],
-      ['Slot', esc(f.partition)],
-      ['State', f.on_trial ? '<span class="badge warn">on trial</span>' : '<span class="badge ok">confirmed</span>'],
-      ['Last update', last],
-    ]);
-  },
   upload() {
     const file = $('#fw-file').files[0];
     if (!file || this.busy) return;
@@ -411,11 +441,13 @@ pages.firmware = {
         const s = await api('/api/status');
         status = s;
         this.busy = false;
-        if (before === null) this.msg('Back online.');
-        else if (s.firmware.build_id !== before && s.firmware.last_update.result === 'updated') this.msg(`Running the new firmware (${esc(s.firmware.build_id.slice(0, 8))}). ${s.firmware.on_trial ? 'Confirming…' : ''}`);
-        else if (s.firmware.last_update.result === 'rolled_back') this.msg('The new firmware failed and the hub rolled back to the previous version.', 'err');
-        else this.msg('Back online, but still on the old firmware.', 'err');
-        this.render();
+        let text, cls = '';
+        if (before === null) text = 'Back online.';
+        else if (s.firmware.build_id !== before && s.firmware.last_update.result === 'updated') text = `Running the new firmware (${esc(s.firmware.build_id.slice(0, 8))}). ${s.firmware.on_trial ? 'Confirming…' : ''}`;
+        else if (s.firmware.last_update.result === 'rolled_back') { text = 'The new firmware failed and the hub rolled back to the previous version.'; cls = 'err'; }
+        else { text = 'Back online, but still on the old firmware.'; cls = 'err'; }
+        if (currentPage() === 'settings') pages.settings.render();
+        this.msg(text, cls);
       } catch (_) { setTimeout(tick, 2000); }
     };
     setTimeout(tick, 4000);

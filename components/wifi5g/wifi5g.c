@@ -426,6 +426,22 @@ static void watchdog_reboot(int64_t down_for, uint32_t strikes)
     esp_restart();
 }
 
+// Live link quality for the UI / samples. RSSI comes from the last beacon; the
+// channel can change under us when the AP moves (DFS radar, auto-channel CSA).
+static void refresh_link(void)
+{
+    int rssi = 0;
+    wifi_ap_record_t ap = {0};
+    bool have_rssi = esp_wifi_sta_get_rssi(&rssi) == ESP_OK && rssi != 0;
+    bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+    taskENTER_CRITICAL(&s_lock);
+    if (s.connected) {
+        if (have_rssi) s.stats.rssi = (int8_t)rssi;
+        if (have_ap && ap.primary) s.stats.channel = ap.primary;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+}
+
 // One task owns every recovery action, ticking once a second. Nothing here is
 // reset by the events it reacts to: downtime is measured from the first
 // disconnect, not the latest one (the reference repo's watchdog never fired
@@ -465,7 +481,10 @@ static void wifi_task(void *arg)
         uint32_t strikes = s.strikes;
         taskEXIT_CRITICAL(&s_lock);
 
-        if (connected) continue;
+        if (connected) {
+            refresh_link();
+            continue;
+        }
 
         if (down_for >= (int64_t)(strikes + 1) * DRIVER_RESTART_US) {
             driver_restart(strikes);

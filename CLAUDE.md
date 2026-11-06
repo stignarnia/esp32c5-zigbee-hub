@@ -270,9 +270,11 @@ Notes from the first boot:
       1 connect.** Router stayed on ch 112 (DFS) throughout. Heap flat at 132 KB free /
       97 KB min (the min is from boot), PSRAM flat — no leak. No WARN/ERROR after boot.
       DFS stays; no need to move the router
-- [ ] **Bug: RSSI is stale.** Read once at connect (`wifi5g.c:244`) and never refreshed,
-      so the UI, status API and every `sample` line show the association-time value
-      (−20 dBm for 42 h). Refresh with `esp_wifi_sta_get_rssi()` in the 1 s tick
+- [x] **Bug: RSSI was stale** — read once at connect and never refreshed, so the UI,
+      status API and `sample` lines showed the association-time value (−20 dBm for
+      42 h). Fixed 2026-11-06: the 1 s tick refreshes RSSI (`esp_wifi_sta_get_rssi`,
+      last beacon) and the channel (follows an AP channel switch). Verified: −22/−23
+      alternating in the status API
 
 #### Phase 1 measurements (2026-11-04, home network, WPA3-SAE, RSSI −30…−43 dBm)
 

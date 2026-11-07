@@ -38,6 +38,8 @@ extern const uint8_t app_js_gz_start[] asm("_binary_app_js_gz_start");
 extern const uint8_t app_js_gz_end[] asm("_binary_app_js_gz_end");
 extern const uint8_t style_css_gz_start[] asm("_binary_style_css_gz_start");
 extern const uint8_t style_css_gz_end[] asm("_binary_style_css_gz_end");
+extern const uint8_t cm_js_gz_start[] asm("_binary_cm_js_gz_start");
+extern const uint8_t cm_js_gz_end[] asm("_binary_cm_js_gz_end");
 
 // ---- helpers ---------------------------------------------------------------------
 
@@ -128,7 +130,7 @@ static esp_err_t asset_handler(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)a->start, a->end - a->start);
 }
 
-static asset_t s_assets[3];
+static asset_t s_assets[4];
 
 // ---- WebSocket ------------------------------------------------------------------------
 
@@ -269,7 +271,7 @@ esp_err_t web_start(const web_config_t *cfg)
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size = 8192;           // PBKDF2 + JSON building
-    hc.max_uri_handlers = 32;     // 25 in use (Phase 4)
+    hc.max_uri_handlers = 40;     // 36 in use (Phase 5)
     hc.lru_purge_enable = true;     // a stuck client can't lock others out
     hc.recv_wait_timeout = 10;      // OTA uploads stream for seconds
     hc.send_wait_timeout = 10;
@@ -285,7 +287,8 @@ esp_err_t web_start(const web_config_t *cfg)
     s_assets[0] = (asset_t){"/", "text/html", index_html_gz_start, index_html_gz_end};
     s_assets[1] = (asset_t){"/app.js", "text/javascript", app_js_gz_start, app_js_gz_end};
     s_assets[2] = (asset_t){"/style.css", "text/css", style_css_gz_start, style_css_gz_end};
-    for (int i = 0; i < 3; i++) {
+    s_assets[3] = (asset_t){"/cm.js", "text/javascript", cm_js_gz_start, cm_js_gz_end};  // editor, loaded on demand
+    for (size_t i = 0; i < sizeof(s_assets) / sizeof(s_assets[0]); i++) {
         httpd_uri_t u = {.uri = s_assets[i].uri, .method = HTTP_GET, .handler = asset_handler,
                          .user_ctx = &s_assets[i]};
         httpd_register_uri_handler(s_server, &u);
@@ -298,9 +301,10 @@ esp_err_t web_start(const web_config_t *cfg)
     ESP_ERROR_CHECK(api_register(s_server));
 
     xTaskCreate(ws_push_task, "ws_push", 2560, NULL, 4, NULL);  // only queues work: small stack
-    ESP_LOGI(TAG, "web UI on port %d (UI %u B gzipped)", hc.server_port,
+    ESP_LOGI(TAG, "web UI on port %d (UI %u B gzipped, editor %u B)", hc.server_port,
              (unsigned)((index_html_gz_end - index_html_gz_start) + (app_js_gz_end - app_js_gz_start) +
-                        (style_css_gz_end - style_css_gz_start)));
+                        (style_css_gz_end - style_css_gz_start)),
+             (unsigned)(cm_js_gz_end - cm_js_gz_start));
     return ESP_OK;
 }
 

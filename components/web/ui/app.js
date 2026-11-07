@@ -1,7 +1,7 @@
 'use strict';
 // Zigbee Hub web UI. No framework: a hash router, one status object refreshed over
-// a WebSocket every 2 s, and three pages: Devices, Status (read-only) and Settings
-// (everything that changes something).
+// a WebSocket every 2 s, and four pages: Devices, Automations (Lua scripts), Status
+// (read-only) and Settings (everything that changes something).
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -108,6 +108,7 @@ function render() {
   document.querySelectorAll('nav a').forEach((a) =>
     a.classList.toggle('active', a.getAttribute('href') === `#${name}`));
   if (name !== 'devices') pages.devices.stop();
+  if (name !== 'automations') pages.automations.stop();
   (pages[name] || pages.devices).render();
 }
 window.addEventListener('hashchange', render);
@@ -243,6 +244,397 @@ pages.devices = {
   },
 };
 
+// Automations ----------------------------------------------------------------------------
+// Lua scripts stored on the hub: list with live status, an editor (syntax-checked on save),
+// the script log, and the state of the GPIO pins scripts use.
+const EXAMPLES = {
+  'Door alarm': `-- Door alarm: when a door opens, sound both buzzers and call an Alexa routine.
+-- Automations -> GPIO: "buzzer1" and "buzzer2" as outputs (and a "ground" pin if a
+-- buzzer's second leg sits on a GPIO). Automations -> Secrets: "alexa_alarm_url".
+local DOORS = { "Front door", "Back door" }   -- names from the Devices page
+gpio.claim("buzzer1", "buzzer2")   -- pins used later, in the handler: claimed now, at Save
+
+-- 2 s per round: buzzers alternating, both stuttering, both on (they beat), pause
+local ALARM = {}
+for i = 1, 10 do ALARM[#ALARM + 1] = {1, 40}; ALARM[#ALARM + 1] = {2, 40} end
+for i = 1, 10 do ALARM[#ALARM + 1] = {3, 30}; ALARM[#ALARM + 1] = {0, 30} end
+ALARM[#ALARM + 1] = {3, 500}; ALARM[#ALARM + 1] = {0, 100}
+
+local function alarm(door)
+  log(door .. " opened")
+  gpio.pattern({"buzzer1", "buzzer2"}, ALARM, {rounds = 5})   -- starts now, never waits
+  local url = secret("alexa_alarm_url")
+  if url then
+    -- queued; if the network is down it is sent once it's back (for up to 10 min)
+    http.get(url, {retry_for = 600, on_done = function(status, body)
+      if status > 0 then log("Alexa: HTTP " .. status) else log("Alexa not reached: " .. body) end
+    end})
+  end
+end
+
+for _, door in ipairs(DOORS) do
+  zb.on(door, "open", function(open) if open then alarm(door) end end)
+end
+`,
+  'Morning check': `-- Weekday mornings at 7:00: log which doors are still open.
+-- cron needs the clock (from the network) and the time zone (Settings -> Time zone).
+cron("0 7 * * 1-5", function()
+  local open = {}
+  for _, d in ipairs(zb.devices()) do
+    if d.kind == "contact" and zb.get(d.name, "open") then open[#open + 1] = d.name end
+  end
+  if #open > 0 then log("still open: " .. table.concat(open, ", ")) else log("all doors closed") end
+end)
+`,
+  'Template': `-- zb.on(device, attr, function(value, device, attr) end)   attr: "open", "motion",
+--   "water", "smoke", "alarm", "tamper", "battery", "temperature", "humidity",
+--   "occupied", "available"; device "*" / attr "*" = any
+-- zb.get(device, attr)  zb.devices()
+-- timer.after(s, fn) / timer.every(s, fn) -> id; timer.cancel(id)
+--   (a global function's name instead of fn survives a restart)
+-- cron("min hour day month weekday", fn)
+-- state.get(key) / state.put(key, value)   kept on flash
+-- secret(name)   http.get(url, opts) / http.post(url, body, opts) / http.request{...}
+--   opts: headers, timeout, retry_for, on_done = function(status, body) end
+-- gpio.write/read/on/beep/pattern/stop/tone   (pins from Automations -> GPIO)
+--   gpio.claim(pin, ...) at the top for pins only used in handlers: a pin belongs
+--   to one script, and claims happen only while the script loads (so at Save)
+-- net.online()  net.on("up"|"down", fn)   json.encode/decode   log(...)
+
+log("hello from", "the hub")
+`,
+};
+
+// Script editor ------------------------------------------------------------------------
+// Both editors give the same handle: get(), set(text), selectLine(n), focus().
+
+// Textarea with a line-number gutter: shown at once, and kept if cm.js can't load.
+function textEditor(box, src) {
+  box.innerHTML = '<pre aria-hidden="true"></pre><textarea spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"></textarea>';
+  const gut = box.querySelector('pre'), ta = box.querySelector('textarea');
+  const gutter = () => {
+    gut.textContent = Array.from({ length: ta.value.split('\n').length }, (_, i) => i + 1).join('\n');
+    gut.scrollTop = ta.scrollTop;
+  };
+  ta.value = src;
+  ta.addEventListener('input', gutter);
+  ta.addEventListener('scroll', () => { gut.scrollTop = ta.scrollTop; });
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab' && !e.shiftKey) {
+      e.preventDefault();
+      ta.setRangeText('  ', ta.selectionStart, ta.selectionEnd, 'end');
+      gutter();
+    }
+  });
+  gutter();
+  return {
+    get: () => ta.value,
+    set(text) { ta.value = text; gutter(); },
+    selectLine(line) {
+      const lines = ta.value.split('\n');
+      let start = 0;
+      for (let i = 0; i < line - 1 && i < lines.length; i++) start += lines[i].length + 1;
+      ta.focus();
+      ta.setSelectionRange(start, start + (lines[line - 1] || '').length);
+      ta.scrollTop = Math.max(0, (line - 5) * parseFloat(getComputedStyle(ta).lineHeight));
+    },
+    focus: () => ta.focus(),
+  };
+}
+
+// CodeMirror (syntax highlighting, search, completion of the hub's API), loaded only
+// when the editor is first opened. Resolves false if it can't be loaded.
+let cmLoading = null;
+function loadCodeMirror() {
+  if (window.HubEditor) return Promise.resolve(true);
+  if (!cmLoading) {
+    cmLoading = new Promise((resolve) => {
+      const el = document.createElement('script');
+      el.src = '/cm.js';
+      el.onload = () => resolve(!!window.HubEditor);
+      el.onerror = () => { cmLoading = null; el.remove(); resolve(false); };
+      document.head.appendChild(el);
+    });
+  }
+  return cmLoading;
+}
+
+pages.automations = {
+  timer: null, logTimer: null, data: null, editing: null, logLast: 0, logLines: [],
+  stop() { clearInterval(this.timer); clearInterval(this.logTimer); this.timer = this.logTimer = null; },
+  async render() {
+    $('#view').innerHTML = `
+      <div class="grid">
+        <section class="card"><h2>Scripts</h2><div id="au-clock" class="muted"></div><div id="au-list" class="muted">Loading…</div>
+          <div class="row"><button id="au-new">New script</button></div></section>
+        <section class="card" id="au-pins-card"><h2>Pins</h2><div id="au-pins" class="muted">—</div></section>
+      </div>
+      <section class="card" id="au-editor" hidden></section>
+      <div class="grid" id="auto-settings"></div>
+      <section class="card"><h2>Script log</h2>
+        <div class="row"><select id="au-filter"><option value="">All scripts</option></select>
+          <button class="ghost" id="au-clear">Clear view</button></div>
+        <pre id="au-log" class="log"></pre></section>`;
+    autoset.render();
+    $('#au-new').addEventListener('click', () => this.edit(null));
+    $('#au-clear').addEventListener('click', () => { this.logLines = []; this.drawLog(); });
+    $('#au-filter').addEventListener('change', () => this.drawLog());
+    this.logLast = 0; this.logLines = []; this.editing = null;
+    await this.poll();
+    await this.pollLog();
+    this.stop();
+    this.timer = setInterval(() => this.poll(), 3000);
+    this.logTimer = setInterval(() => this.pollLog(), 1500);
+  },
+  async poll() {
+    try { this.data = await api('/api/auto'); } catch (e) { return; }
+    if (!$('#au-list')) { this.stop(); return; }
+    this.drawList();
+    this.drawPins();
+    const sel = $('#au-filter');
+    const have = new Set([...sel.options].map((o) => o.value));
+    this.data.scripts.forEach((s) => { if (!have.has(s.name)) sel.add(new Option(s.name, s.name)); });
+  },
+  drawList() {
+    const d = this.data;
+    $('#au-clock').innerHTML = d.clock_set ? `Clock: ${esc(d.local_time)}`
+      : '<span class="badge warn">clock not set</span> cron jobs wait until the hub gets the time from the network';
+    const el = $('#au-list');
+    if (!d.scripts.length) { el.innerHTML = '<p class="muted">No scripts yet.</p>'; return; }
+    const badge = (s) => !s.enabled ? '<span class="badge">off</span>'
+      : s.status === 'running' ? '<span class="badge ok">running</span>'
+      : s.status === 'error' ? '<span class="badge bad">stopped by an error</span>' : '<span class="badge warn">stopped</span>';
+    const meta = (s) => [s.status === 'running' ? kb(s.mem) : '', `${s.calls} run(s), ${s.busy_ms} ms`,
+      s.timers ? `${s.timers} timer(s)` : '', s.cron ? `${s.cron} cron` : ''].filter(Boolean).join(' · ');
+    el.innerHTML = d.scripts.map((s) => `
+      <div class="srow">
+        <div class="srow-main"><b>${esc(s.name)}</b> ${badge(s)}<div class="muted small">${meta(s)}</div>
+          ${s.error ? `<div class="err small">${esc(s.error)}</div>` : ''}</div>
+        <div class="srow-actions"><label class="switch"><input type="checkbox" data-en="${esc(s.name)}" ${s.enabled ? 'checked' : ''}> on</label>
+          <button class="ghost" data-edit="${esc(s.name)}">Edit</button>
+          ${s.status === 'error' && s.enabled ? `<button class="ghost" data-restart="${esc(s.name)}">Restart</button>` : ''}
+          <button class="danger" data-del="${esc(s.name)}">Delete</button></div>
+      </div>`).join('');
+    el.querySelectorAll('[data-en]').forEach((c) => c.addEventListener('change', () => this.enable(c.dataset.en, c.checked)));
+    el.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => this.edit(b.dataset.edit)));
+    el.querySelectorAll('[data-restart]').forEach((b) => b.addEventListener('click', () => this.act('/api/auto/restart', b.dataset.restart)));
+    el.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
+      if (confirm(`Delete the script "${b.dataset.del}" and its saved state?`)) this.act('/api/auto/delete', b.dataset.del);
+    }));
+  },
+  drawPins() {
+    const pins = this.data.gpio;
+    $('#au-pins').innerHTML = pins.length ? `<table><tr><th>Pin</th><th>Mode</th><th>Level</th><th>Used by</th></tr>${pins.map((p) => `
+      <tr><td>${esc(p.name || '—')} <span class="muted">GPIO ${p.pin}</span></td><td>${esc(p.mode)}</td>
+        <td>${p.playing ? '<span class="badge warn">playing</span>' : p.level ? '<span class="badge ok">high</span>' : 'low'}</td>
+        <td>${esc(p.owner || '—')}</td></tr>`).join('')}</table>`
+      : 'No pins enabled yet (GPIO, below).';
+  },
+  async enable(name, on) {
+    try { await api('/api/auto/enable', { method: 'POST', json: { name, enabled: on } }); } catch (e) { alert(e.message); }
+    this.poll();
+  },
+  async act(path, name) {
+    try { await api(path, { method: 'POST', json: { name } }); } catch (e) { alert(e.message); }
+    if (path.endsWith('delete') && this.editing === name) this.closeEditor();
+    this.poll();
+  },
+  async edit(name) {
+    let src = EXAMPLES.Template;
+    if (name) {
+      try {
+        const r = await fetch(`/api/auto/script?name=${encodeURIComponent(name)}`, { credentials: 'same-origin' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        src = await r.text();
+      } catch (e) { alert(e.message); return; }
+    }
+    this.editing = name;
+    const s = name && this.data.scripts.find((x) => x.name === name);
+    const ed = $('#au-editor');
+    ed.hidden = false;
+    ed.innerHTML = `<h2>${name ? `Edit <code>${esc(name)}</code>` : 'New script'}</h2>
+      <div class="row">${name ? '' : '<label class="inline">Name <input type="text" id="au-name" maxlength="24" placeholder="door-alarm" pattern="[a-z0-9_-]+"></label>'}
+        <label class="switch"><input type="checkbox" id="au-enabled" ${!s || s.enabled ? 'checked' : ''}> enabled</label>
+        <select id="au-example"><option value="">Insert an example…</option>${Object.keys(EXAMPLES).map((k) => `<option>${esc(k)}</option>`).join('')}</select></div>
+      <div class="editor" id="au-box"></div>
+      <p id="au-msg"></p>
+      <div class="row"><button id="au-save">Save</button><button class="ghost" id="au-cancel">Close</button>
+        <span class="muted">Saving checks the syntax first; nothing is stored if it fails.</span></div>`;
+    // Plain textarea at once; CodeMirror (cm.js, ~120 KB, cached) replaces it when loaded.
+    const session = this.session = (this.session || 0) + 1;
+    this.ed = textEditor($('#au-box'), src);
+    loadCodeMirror().then((ok) => {
+      if (!ok || this.session !== session || !$('#au-box')) return;
+      const text = this.ed.get();
+      $('#au-box').textContent = '';
+      this.ed = window.HubEditor.create($('#au-box'), text);
+    });
+    $('#au-example').addEventListener('change', (e) => {
+      const k = e.target.value, cur = this.ed.get();
+      if (k && (cur.trim() === '' || cur === EXAMPLES.Template || confirm('Replace the editor content with the example?'))) {
+        this.ed.set(EXAMPLES[k]);
+      }
+      e.target.value = '';
+    });
+    $('#au-save').addEventListener('click', () => this.save());
+    $('#au-cancel').addEventListener('click', () => this.closeEditor());
+    ed.scrollIntoView({ behavior: 'smooth' });
+  },
+  closeEditor() {
+    this.editing = null;
+    this.session = (this.session || 0) + 1;
+    if (this.ed && this.ed.destroy) this.ed.destroy();
+    this.ed = null;
+    const ed = $('#au-editor');
+    if (ed) { ed.hidden = true; ed.innerHTML = ''; }
+  },
+  async save() {
+    const name = this.editing || $('#au-name').value.trim();
+    const msg = $('#au-msg');
+    if (!/^[a-z0-9_-]{1,24}$/.test(name)) { msg.className = 'err'; msg.textContent = 'Name: 1–24 characters, a–z 0–9 _ -'; return; }
+    const ed = this.ed;
+    const en = $('#au-enabled').checked ? 1 : 0;
+    msg.className = 'muted'; msg.textContent = 'Saving…';
+    try {
+      const r = await fetch(`/api/auto/script?name=${encodeURIComponent(name)}&enabled=${en}`, {
+        method: 'POST', credentials: 'same-origin', headers: { 'X-Hub': '1', 'Content-Type': 'text/plain' }, body: ed.get() });
+      const body = await r.json().catch(() => ({}));
+      if (r.status === 401) { showLogin(); return; }
+      if (!r.ok) {
+        msg.className = 'err';
+        msg.textContent = body.error || `HTTP ${r.status}`;
+        if (body.line) ed.selectLine(body.line);
+        return;
+      }
+      this.editing = name;
+      if (body.started === false) {
+        msg.className = 'err';
+        msg.textContent = `Saved, but it stopped while starting: ${body.error.split('\n')[0]}`;
+        if (body.line) ed.selectLine(body.line);
+      } else {
+        msg.className = 'good'; msg.textContent = en ? 'Saved and started (see the log below).' : 'Saved (disabled).';
+      }
+      this.poll();
+    } catch (e) { msg.className = 'err'; msg.textContent = e.message; }
+  },
+  async pollLog() {
+    let d;
+    try { d = await api(`/api/auto/log?after=${this.logLast}`); } catch (e) { return; }
+    if (!$('#au-log')) return;
+    if (d.lines.length) {
+      this.logLines.push(...d.lines);
+      if (this.logLines.length > 500) this.logLines.splice(0, this.logLines.length - 500);
+      this.drawLog();
+    }
+    this.logLast = d.last;
+  },
+  drawLog() {
+    const f = $('#au-filter').value;
+    const el = $('#au-log');
+    const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    const t = (s) => (s >= 0 ? new Date(s * 1000).toLocaleTimeString() : `+${-s}s`);
+    el.innerHTML = this.logLines.filter((l) => !f || l.script === f).map((l) =>
+      `<span class="${l.level === 'E' ? 'err' : ''}">${esc(t(l.t))} ${esc(l.script)}: ${esc(l.msg)}</span>`).join('\n') || '<span class="muted">Nothing yet.</span>';
+    if (stick) el.scrollTop = el.scrollHeight;
+  },
+};
+
+// Secrets and GPIO (Automations page) and time zone (Settings page) ---------------------
+const TZ_PRESETS = [
+  ['UTC', 'UTC0'], ['Central Europe (Rome, Berlin, Paris)', 'CET-1CEST,M3.5.0,M10.5.0/3'],
+  ['UK, Ireland, Portugal', 'GMT0BST,M3.5.0/1,M10.5.0'], ['Eastern Europe (Athens, Helsinki)', 'EET-2EEST,M3.5.0/3,M10.5.0/4'],
+  ['US Eastern', 'EST5EDT,M3.2.0,M11.1.0'], ['US Central', 'CST6CDT,M3.2.0,M11.1.0'],
+  ['US Mountain', 'MST7MDT,M3.2.0,M11.1.0'], ['US Pacific', 'PST8PDT,M3.2.0,M11.1.0'],
+];
+const GPIO_PINS = [3, 4, 5, 6, 8, 9, 10, 15, 23, 24, 26];
+const GPIO_MODES = [['out', 'output'], ['in', 'input'], ['in_pullup', 'input, pull-up'], ['in_pulldown', 'input, pull-down'], ['ground', 'ground (always low)']];
+
+const autoset = {
+  data: null,
+  // Secrets + GPIO live on the Automations page (#auto-settings), the time zone on the
+  // Settings page (#tz-settings); each page has one of the two areas.
+  async render() {
+    const area = $('#auto-settings'), tzArea = $('#tz-settings');
+    if (!area && !tzArea) return;
+    try { this.data = await api('/api/auto'); } catch (e) { (area || tzArea).innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
+    const d = this.data;
+    if (tzArea) this.renderTz(tzArea, d);
+    if (!area) return;
+    area.innerHTML = `
+      <section class="card"><h2>Secrets</h2>
+        <p class="muted">Values scripts read with <code>secret("name")</code>, e.g. a URL with a token. Write-only:
+        they never leave the hub, and the script log masks them.</p>
+        ${d.secrets.length ? `<table>${d.secrets.map((n) => `<tr><td><code>${esc(n)}</code></td>
+          <td class="actions"><button class="danger" data-sdel="${esc(n)}">Delete</button></td></tr>`).join('')}</table>` : '<p class="muted">None yet.</p>'}
+        <label>Name <input type="text" id="sec-name" maxlength="15" placeholder="alexa_alarm_url" autocomplete="off"></label>
+        <label>Value <input type="password" id="sec-val" maxlength="512" autocomplete="new-password" placeholder="saved as is; replaces the old value"></label>
+        <div class="row"><button id="sec-save">Save secret</button><span id="sec-msg"></span></div>
+      </section>
+      <section class="card"><h2>GPIO</h2>
+        <p class="muted">Pins scripts may use, by name or number. Outputs start low, drive strength 3; a
+        stopped script's outputs go low. “Ground” holds a pin low for a buzzer's second leg.</p>
+        <div id="gp-table"><div class="gp gp-head"><span>Name</span><span>Pin</span><span>Mode</span><span></span></div></div>
+        <div class="row"><button class="ghost" id="gp-add">Add pin</button><button id="gp-save">Save pins</button><span id="gp-msg"></span></div>
+      </section>`;
+    this.rows = d.gpio.map((p) => ({ name: p.name, pin: p.pin, mode: p.mode }));
+    this.drawRows();
+    $('#gp-add').addEventListener('click', () => { this.readRows(); this.rows.push({ name: '', pin: GPIO_PINS.find((p) => !this.rows.some((r) => r.pin === p)) || 3, mode: 'out' }); this.drawRows(); });
+    $('#gp-save').addEventListener('click', () => this.saveGpio());
+    $('#sec-save').addEventListener('click', () => this.saveSecret());
+    area.querySelectorAll('[data-sdel]').forEach((b) => b.addEventListener('click', () => this.delSecret(b.dataset.sdel)));
+  },
+  renderTz(tzArea, d) {
+    const preset = TZ_PRESETS.find((p) => p[1] === d.tz);
+    tzArea.innerHTML = `
+      <section class="card"><h2>Time zone</h2>
+        <p class="muted">For <code>cron</code> and <code>os.date</code>. ${d.clock_set ? `Local time now: ${esc(d.local_time)}` : 'The clock is not set yet (it comes from the network).'}</p>
+        <label>Preset <select id="tz-preset"><option value="">Custom…</option>${TZ_PRESETS.map(([n, v]) => `<option value="${esc(v)}" ${preset && preset[1] === v ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
+        <label>POSIX TZ string <input type="text" id="tz-val" value="${esc(d.tz)}" maxlength="63"></label>
+        <div class="row"><button id="tz-save">Save time zone</button><span id="tz-msg"></span></div>
+      </section>`;
+    $('#tz-preset').addEventListener('change', (e) => { if (e.target.value) $('#tz-val').value = e.target.value; });
+    $('#tz-save').addEventListener('click', () => this.saveTz());
+  },
+  drawRows() {
+    const t = $('#gp-table');
+    t.querySelectorAll('.gp.row-pin').forEach((r) => r.remove());
+    this.rows.forEach((r, i) => {
+      const row = document.createElement('div');
+      row.className = 'gp row-pin';
+      row.innerHTML = `<input type="text" class="gp-name" data-k="name" value="${esc(r.name)}" maxlength="15" placeholder="name, e.g. buzzer1" aria-label="Name">
+        <select data-k="pin" aria-label="Pin">${GPIO_PINS.map((p) => `<option value="${p}" ${p === r.pin ? 'selected' : ''}>GPIO ${p}</option>`).join('')}</select>
+        <select data-k="mode" aria-label="Mode">${GPIO_MODES.map(([v, n]) => `<option value="${v}" ${v === r.mode ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        <button class="danger" data-rm="${i}" aria-label="Remove">×</button>`;
+      t.appendChild(row);
+    });
+    t.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', () => { this.readRows(); this.rows.splice(+b.dataset.rm, 1); this.drawRows(); }));
+  },
+  readRows() {
+    this.rows = [...$('#gp-table').querySelectorAll('.gp.row-pin')].map((tr) => ({
+      name: tr.querySelector('[data-k=name]').value.trim(),
+      pin: +tr.querySelector('[data-k=pin]').value,
+      mode: tr.querySelector('[data-k=mode]').value,
+    }));
+  },
+  async post(path, json, msgSel) {
+    const m = $(msgSel);
+    try { await api(path, { method: 'POST', json }); m.className = 'good'; m.textContent = 'Saved.'; return true; }
+    catch (e) { m.className = 'err'; m.textContent = e.message; return false; }
+  },
+  async saveGpio() { this.readRows(); if (await this.post('/api/auto/gpio', { pins: this.rows }, '#gp-msg')) setTimeout(() => this.render(), 800); },
+  async saveSecret() {
+    const name = $('#sec-name').value.trim(), value = $('#sec-val').value;
+    if (!value) { $('#sec-msg').className = 'err'; $('#sec-msg').textContent = 'Value required'; return; }
+    if (await this.post('/api/auto/secret', { name, value }, '#sec-msg')) setTimeout(() => this.render(), 800);
+  },
+  async delSecret(name) {
+    if (!confirm(`Delete the secret "${name}"? Scripts reading it get nil.`)) return;
+    try { await api('/api/auto/secret', { method: 'POST', json: { name, value: null } }); } catch (e) { alert(e.message); }
+    this.render();
+  },
+  async saveTz() { if (await this.post('/api/auto/tz', { tz: $('#tz-val').value.trim() }, '#tz-msg')) setTimeout(() => this.render(), 800); },
+};
+
 // System ------------------------------------------------------------------------------
 // Wi-Fi disconnect reasons in plain words (the hub sends the driver's name for the code).
 const REASON_TEXT = {
@@ -311,8 +703,8 @@ pages.status = {
   },
 };
 
-// Settings: everything that changes something. Wi-Fi networks, firmware update, restart,
-// diagnostic log download.
+// Settings: everything that changes something. Wi-Fi networks, Tailscale, firmware update,
+// restart, diagnostic log download, and the time zone (secrets and GPIO are on Automations).
 pages.settings = {
   render() {
     $('#view').innerHTML = `
@@ -336,7 +728,8 @@ pages.settings = {
         <section class="card"><h2>Restart</h2>
           <div class="row"><button class="danger" id="reboot">Restart the hub</button></div>
         </section>
-      </div>`;
+      </div>
+      <div class="grid" id="tz-settings"></div>`;
     $('#fw-file').addEventListener('change', () => { $('#fw-upload').disabled = !$('#fw-file').files.length; });
     $('#fw-upload').addEventListener('click', () => fw.upload());
     $('#reboot').addEventListener('click', async () => {
@@ -346,6 +739,7 @@ pages.settings = {
     });
     wifi.render();
     tsui.renderSettings();
+    autoset.render();
   },
   live() { wifi.live(); tsui.liveSettings(); },
 };

@@ -2,11 +2,11 @@
 
 > **Work in progress.** This README describes the finished product. Working today:
 > 5 GHz-only Wi-Fi with backup network and recovery, provisioning via `flash.sh`,
-> the web UI (login, live status, Wi-Fi settings, devices), over-the-air updates
-> with rollback, the Zigbee coordinator with enrollment of battery sensors
-> (tested with contact sensors), and Tailscale (direct paths, relays, the
-> "tailnet only, no password" mode). Automations and Home Assistant are next.
-> [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
+> the web UI, over-the-air updates with rollback, the Zigbee coordinator with
+> enrollment of battery sensors (tested with contact sensors), Tailscale (direct
+> paths, relays, the "tailnet only, no password" mode), and Lua automations with
+> buzzers and HTTP calls. Home Assistant, network backup and signed updates are
+> next. [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
 
 A Zigbee 3.0 coordinator, automation engine and web UI on a single ESP32-C5,
 reachable from anywhere over your tailnet. No cloud, no Home Assistant, no MQTT
@@ -44,9 +44,10 @@ Tailscale are conveniences on top:
 
 ## Hardware
 
-**ESP32-C5 with 16 MB flash and 8 MB PSRAM** (e.g. a C5 module with PSRAM on any
-USB-UART dev board). No wiring needed, except for optional buzzers or other
-GPIO devices your scripts drive.
+**ESP32-C5 with 16 MB flash and 8 MB PSRAM** (developed on a Waveshare
+ESP32-C5-WIFI6-KIT with the N16R8 module; any C5 board with PSRAM and a USB-UART
+works). No wiring needed, except for optional buzzers or other GPIO devices your
+scripts drive.
 
 | | why |
 |---|---|
@@ -129,16 +130,25 @@ can't strand it. The hotspot must be on **5 GHz** (iPhone: turn off
 
 ## The web UI
 
-Log in with the admin password. The UI updates live over a WebSocket.
+Log in with the admin password (or not at all, in *tailnet only* mode). The UI
+updates live over a WebSocket and works on a phone. Four tabs: **Devices**,
+**Automations**, **Status** (read-only) and **Settings** (everything that changes
+something).
 
 ### Devices
 
 Every paired sensor with its live state: contact, motion, water leak, smoke,
 temperature, humidity and battery. Each device shows signal strength, last seen
 and availability. Rename, re-interview or remove them. The UI only shows state;
-there are no switches in it.
+there are no switches in it, and the hub never sends commands to devices.
 
-### Enroll
+The last known state of each sensor is kept across restarts, so a door that was
+open before a reboot still reads open after it.
+
+Below the list: the Zigbee network (channel, PAN ID) and a network map of the hub's
+direct links, with each device's link quality and signal strength.
+
+#### Adding a device
 
 Click **Scan for devices** and the hub opens the Zigbee network for two minutes
 (adjustable), with a countdown. Put your device in pairing mode. For most
@@ -155,32 +165,36 @@ the sensor checks in.
 
 New devices appear in the list as soon as they announce themselves, marked
 "interviewing" until the interview is done. Give it a name and it's ready, both in
-the Devices page and in your scripts.
+the Devices page and in your scripts (which refer to devices by that name).
 
 ### Automations
 
-Paste Lua, press **Save**. The script is syntax-checked before it's stored, then
-starts immediately and again after every boot.
+Write or paste Lua, press **Save**. The script is syntax-checked before it's
+stored, then starts immediately and again after every boot, before Wi-Fi is up.
+Scripts refer to devices by the names you gave them on the Devices page.
 
 ```lua
 -- Front door left open for 5 minutes: beep and send a notification
+gpio.claim("buzzer")          -- pins used later, in handlers, are claimed up front
 local door_timer
 
-zb.on("front_door", "contact", function(open)
+zb.on("Front door", "open", function(open)
   if open then
     door_timer = timer.after(300, function()
       gpio.beep("buzzer", {on = 200, off = 200, times = 5})
       http.post(secret("ntfy_url"), "The front door has been open for 5 minutes")
     end)
   elseif door_timer then
-    door_timer:cancel()
+    timer.cancel(door_timer)
+    door_timer = nil
   end
 end)
 ```
 
 ```lua
 -- Leak sensor: sound the buzzer at once, then notify (retried until Wi-Fi is back)
-zb.on("laundry_leak", "water_leak", function(wet)
+gpio.claim("buzzer")
+zb.on("Laundry leak", "water", function(wet)
   if wet then
     gpio.beep("buzzer", {on = 500, off = 500, times = 20})
     http.post(secret("ntfy_url"), "Water leak in the laundry room!", {retry_for = 3600})
@@ -191,41 +205,71 @@ end)
 ```lua
 -- Weekday mornings at 7: report sensors with a low battery
 cron("0 7 * * 1-5", function()
-  for _, name in ipairs({"front_door", "laundry_leak"}) do
-    local b = zb.get(name, "battery")
-    if b and b < 20 then http.post(secret("ntfy_url"), name .. " battery at " .. b .. "%") end
+  for _, d in ipairs(zb.devices()) do
+    local b = zb.get(d.name, "battery")
+    if b and b < 20 then http.post(secret("ntfy_url"), d.name .. " battery at " .. b .. "%") end
   end
 end)
 ```
+
+The Automations page has everything scripts need, top to bottom:
+
+- **Scripts**: each with its state (running, off, stopped by an error and why),
+  memory, how often it ran, its timers and cron jobs; switch on/off, edit, restart,
+  delete. With the Home Assistant integration on, it also shows which mode is active.
+- **Pins**: every enabled GPIO, its level, and the script that owns it.
+- **Editor**: syntax highlighting, search, bracket matching, and completion of the
+  hub's own functions (CodeMirror). Built-in examples to start from. If a script
+  fails to load (a syntax error, a pin another script owns), the error is shown
+  right there and its line is selected.
+- **Secrets** and **GPIO** settings (below).
+- **Script log**: what scripts `log()`, plus starts, stops and errors, live.
 
 #### Script API
 
 | | |
 |---|---|
-| `zb.on(device, attribute, fn)` | call `fn(value, old_value)` when an attribute changes |
-| `zb.get(device, attribute)` | current value |
-| `timer.after(s, fn)` / `timer.every(s, fn)` | one-shot / repeating timers, return a handle with `:cancel()` |
-| `cron(expr, fn)` | standard 5-field cron, local time |
-| `state.get(key)` / `state.put(key, value)` | small persistent key-value store, survives reboots |
-| `http.request{url=, method=, headers=, body=/json=, retry_for=, on_done=}` | HTTP(S) request; never blocks the script, the result arrives in `on_done(status, body)` |
+| `zb.on(device, attribute, fn)` | call `fn(value, device, attribute)` when it changes. `"*"` as device or attribute matches any |
+| `zb.get(device, attribute)` | current value, `nil` if not known yet |
+| `zb.devices()` | list of `{name, ieee, model, manuf, kind, available}` |
+| `timer.after(s, fn)` / `timer.every(s, fn)` | one-shot / repeating timer, returns an id. Pass a global function's *name* instead of `fn` and the timer survives a restart |
+| `timer.cancel(id)` | stop a timer or cron job |
+| `cron(expr, fn)` | standard 5-field cron (`"min hour day month weekday"`), local time; returns an id |
+| `state.get(key)` / `state.put(key, value)` | small key-value store kept on flash (strings, numbers, booleans) |
+| `http.request{url=, method=, headers=, body= or json=, timeout=, retry_for=, on_done=}` | HTTP(S) request; never blocks, the result arrives in `on_done(status, body)` |
 | `http.get(url, opts)` / `http.post(url, body, opts)` | shorthands for the above |
-| `secret(name)` | a value stored under **Settings → Secrets** (tokens, webhook URLs), so it never appears in script text |
-| `log(...)` | shows up in the script's live log in the UI |
-| `gpio.write(pin, v)` / `gpio.read(pin)` | drive or read one of the board's pins |
-| `gpio.on(pin, edge, fn)` | call `fn` on a rising/falling edge (debounced) |
-| `gpio.beep(pin, ms)` / `gpio.beep(pin, {on=, off=, times=})` | sound an **active** buzzer, without blocking the script |
-| `gpio.tone(pin, hz, ms)` | play a tone on a **passive** buzzer |
+| `secret(name)` | a value stored under **Automations → Secrets**, so it never appears in script text |
+| `net.online()` / `net.on("up" or "down", fn)` | whether the hub has Wi-Fi with an address now / be told when that changes |
+| `json.encode(v)` / `json.decode(s)` | |
+| `log(...)` (or `print`) | to the script log |
+| `gpio.claim(pin, ...)` | take pins for this script when it loads (needed for pins only used in handlers) |
+| `gpio.write(pin, v)` / `gpio.read(pin)` | drive / read a pin |
+| `gpio.on(pin, "rising" or "falling" or "both", fn)` | call `fn(level, pin)` on an edge (debounced) |
+| `gpio.beep(pin, ms)` / `gpio.beep(pin, {on=, off=, times=})` | sound an **active** buzzer |
+| `gpio.pattern(pins, steps, {rounds = n})` | play several buzzers in step: `steps = {{mask, ms}, …}`, bit *i* of `mask` turns `pins[i]` on |
+| `gpio.tone(pin, hz, ms)` | a tone on a **passive** buzzer |
+| `gpio.stop(pins)` | end a beep, pattern or tone |
+
+Device attributes: `open` (contact sensors), `motion`, `water`, `smoke`, `co`,
+`vibration` (or `alarm` for any of these), `tamper`, `battery_low`, `battery` (%),
+`battery_v`, `temperature` (°C), `humidity` (%), `occupied`, `available`.
+
+Everything that waits (timers, cron, HTTP, buzzer patterns) happens in the
+background: a script's code runs, returns, and is called again when something
+happens. Patterns and beeps are timed by the hub, not by Lua, so 30 ms steps stay
+exact.
 
 #### Buzzers and other GPIO
 
-Enable a pin under **Settings → GPIO**, give it a name, and scripts can use it:
+Enable a pin under **Automations → GPIO**, give it a name, and scripts can use it:
 
 ```lua
 -- Door left open for 2 minutes: beep three times, every minute, until it closes
+gpio.claim("buzzer")
 local nag
-zb.on("front_door", "contact", function(closed)
-  if closed then
-    if nag then nag:cancel(); nag = nil end
+zb.on("Front door", "open", function(open)
+  if not open then
+    if nag then timer.cancel(nag); nag = nil end
   else
     nag = timer.after(120, function()
       nag = timer.every(60, function() gpio.beep("buzzer", {on = 150, off = 100, times = 3}) end)
@@ -234,59 +278,96 @@ zb.on("front_door", "contact", function(closed)
 end)
 ```
 
-Only pins you've enabled are usable. Pins the board needs for itself (flash, PSRAM,
-USB, the serial console, boot-mode pins) can't be enabled at all. Each pin
-belongs to one script at a time. If a script stops for any reason (disabled,
+Only pins you've enabled are usable: GPIO 3, 4, 5, 6, 8, 9, 10, 15, 23, 24 and 26.
+The rest are taken by the board itself (flash, PSRAM, USB, the serial console,
+boot-mode pins, the 32 kHz crystal) and can't be enabled at all. Outputs start
+low. A pin set to **ground** stays low, for a buzzer whose second leg sits on a
+GPIO instead of GND.
+
+Each pin belongs to one script at a time, and a script takes its pins when it
+loads: any `gpio` call at the top of the script claims that pin, and
+`gpio.claim(...)` claims pins it only uses later, in handlers. A handler can't take
+a new pin. So if two scripts want the same buzzer, you find out when you press
+**Save**, not when the door opens. If a script stops for any reason (disabled,
 error, out of memory), its pins go low and any beep stops, so a crashed script
 never leaves a buzzer sounding.
 
-**Wiring:** a pin can safely supply about 20 mA at 3.3 V. Many 3 V buzzers draw
-around that, or more. Drive them through a small NPN transistor or logic-level
-MOSFET, and add a flyback diode across magnetic buzzers.
+**Wiring:** outputs run at full drive strength. The common 12 mm "3 V active"
+buzzers (they're magnetic, ~20 mA average, short peaks around 50 mA) worked
+connected straight to a pin and GND, measured at 3.0 V under load. **Solder them
+or seat them firmly**: a buzzer that makes and breaks contact throws voltage
+spikes big enough to reset the chip (seen with one sitting loose in the header).
+One beep pulse is limited to 2 s. Anything bigger than such a buzzer needs a small
+NPN transistor or logic-level MOSFET, and a flyback diode across anything
+magnetic.
 
 #### Calling other services: Alexa, webhooks
 
 Scripts can make HTTP and HTTPS requests. Certificates are verified against the
-usual public authorities. The request goes out in the background, so a slow or
-offline service never delays the rest of the script; the local buzzer still
-sounds at once.
+usual public authorities; plain `http://` only goes to addresses on your LAN or
+tailnet. The request goes out in the background, so a slow or offline service
+never delays the rest of the script; the local buzzer still sounds at once.
 
 Alexa has no webhook of its own, but third-party skills (routine triggers,
 announcement services) give you an HTTPS URL that runs an Alexa routine when
 called, for example one that plays an alarm on every Echo in the house. Store that
-URL under **Settings → Secrets** as `alexa_alarm`, then:
+URL under **Automations → Secrets** as `alexa_alarm`, then:
 
 ```lua
 -- Water leak: buzzer here, alarm on the Echos, and keep trying for 10 minutes
 -- if the internet happens to be down
-zb.on("laundry_leak", "water_leak", function(wet)
+gpio.claim("buzzer")
+zb.on("Laundry leak", "water", function(wet)
   if not wet then return end
-  gpio.beep("buzzer", { on = 500, off = 300, times = 20 })
+  gpio.beep("buzzer", {on = 500, off = 300, times = 20})
   http.get(secret("alexa_alarm"), {
     retry_for = 600,
-    on_done = function(status)
-      if status ~= 200 then log("Alexa alarm failed, status " .. status) end
+    on_done = function(status, body)
+      if status ~= 200 then log("Alexa alarm failed: " .. status .. " " .. body) end
     end,
   })
 end)
 ```
 
 `retry_for` is what makes it dependable: without it a request made while offline
-is dropped; with it, the hub keeps retrying with backoff until the deadline.
-Requests are limited to 10 per minute per script, and responses are capped at
-16 KB.
+is dropped; with it, the hub keeps retrying (offline, timeouts, 5xx and 429) with
+backoff until the deadline. Status `0` means the request never got an answer; then
+`body` says why. A `200` means the service accepted the call, not that an Echo
+actually played: no public API tells you that.
+
+Secrets are write-only: the UI shows their names, never their values, and if a
+script logs one, the log shows `***` instead.
 
 #### Safety and limits
 
-Each script runs in its own sandbox with a memory cap (256 KB by default) and an
-instruction limit. A script that crashes, loops forever or runs out of memory is
+Each script runs in its own sandbox: no files, no loading code from strings or
+bytecode, no `os.execute`. A script that errors, runs for more than 1 s without
+returning (an endless loop), runs out of memory or nests calls too deeply is
 stopped and its error is shown with the line number; the other scripts keep
-running. Scripts have no filesystem access and can't load modules or bytecode.
+running. If a script ever manages to crash the hub itself, the hub restarts with
+that script switched off and says why, instead of crashing again on every boot.
 
-**Without Wi-Fi**: device triggers and timers always work. Cron needs the time of
-day: it is synced over the internet when online and kept by the chip's clock
-through outages. If the board boots with no uplink and has never known the time,
-cron jobs show "clock unset" instead of firing at the wrong moment.
+| Limit | |
+|---|---|
+| scripts | 16, up to 32 KB of source each |
+| memory | 256 KB per script |
+| run time | 1 s per call into a script |
+| timers | 16 per script, 64 on the hub; cron jobs 32 |
+| `state` | 64 keys per script, strings up to 1 KB |
+| HTTP | 10 requests per minute per script, 16 queued, one at a time; responses cut at 16 KB, request bodies up to 8 KB |
+| secrets | 16, up to 512 characters each |
+
+**Without Wi-Fi**: device triggers, timers and buzzers always work. Cron needs the
+time of day: it comes from the internet and the chip's clock keeps it through
+outages and restarts. Only after a power cut with no internet does the hub not
+know the time; then cron jobs wait (the Automations page says "clock not set")
+instead of firing at the wrong moment.
+
+**Time zone**: cron and `os.date` use local time, set under **Settings → Time
+zone** (presets for common zones). It's a POSIX rule, which works without a time
+zone database: `CET-1CEST,M3.5.0,M10.5.0/3` reads "standard time *CET*, 1 hour
+ahead of UTC (the sign is inverted), summer time *CEST* (one more hour) from the
+last (5) Sunday (0) of March (3) until the last Sunday of October at 03:00".
 
 ### Home Assistant (optional)
 
@@ -326,18 +407,12 @@ The connection is encrypted (ESPHome's Noise protocol, no plaintext fallback). I
 Home Assistant runs somewhere else on your tailnet, add the hub manually as
 `zigbee-hub.<tailnet>.ts.net`, port 6053; LAN discovery doesn't cross Tailscale.
 
-### Network
-
-The Zigbee network's channel, PAN ID, and the hub's direct links: every paired
-device with its link quality and signal strength to the hub. Download a network backup
-(keys, PAN, device table) and restore it onto a replacement board.
-
 ### Tailscale
 
-Connection state, tailnet IP, MagicDNS name, the home relay (DERP region), and
-peers with whether each path is direct or relayed. Under Settings: paste or
-replace the auth key, turn Tailscale off, or log out of the tailnet. The hub's name
-on the tailnet is its hostname (`./flash.sh --hostname`).
+On the Status page: connection state, tailnet IP, MagicDNS name, the home relay
+(DERP region), and peers with whether each path is direct or relayed. Under
+Settings: paste or replace the auth key, turn Tailscale off, or log out of the
+tailnet. The hub's name on the tailnet is its hostname (`./flash.sh --hostname`).
 
 #### Tailnet only, no password
 
@@ -363,15 +438,18 @@ throughout.
 ### Status
 
 Everything here is read-only: Wi-Fi (network, channel, signal, IP, time to come
-online after boot), Wi-Fi recovery counters, memory (internal and PSRAM, current
-and lowest since boot), uptime, reset reason, and the running firmware (version,
-build, slot, whether it's still on trial, the last update's result).
+online after boot), Wi-Fi recovery counters with the last disconnect reason in
+words, Tailscale, memory (internal and PSRAM, current and lowest since boot),
+uptime, reset reason, and the running firmware (version, build, slot, whether it's
+still on trial, the last update's result).
 
 ### Settings
 
-Everything you can change: the primary and backup Wi-Fi networks, Tailscale (auth
-key, on/off, log out, tailnet-only access), firmware updates, restarting the hub,
-and the diagnostic log download.
+Everything you can change that isn't about scripts: the primary and backup Wi-Fi
+networks, Tailscale (auth key, on/off, log out, tailnet-only access), the Home
+Assistant integration, firmware updates, the Zigbee network backup (download, and
+restore onto a replacement board), the time zone, restarting the hub, and the
+diagnostic log download. Script secrets and GPIO pins are on the Automations page.
 
 **Diagnostic log.** The hub keeps its own log on flash: warnings, errors, Wi-Fi
 events, updates and reboots (with the reason), plus a status sample every 5
@@ -434,8 +512,10 @@ USB flashing always works either way.
   fallback. WPA2 minimum, WPA3 when the router offers it. If the access point
   disappears, a watchdog reconnects, then restarts the Wi-Fi driver, and after 20
   minutes of downtime reboots the board (again at 30 and 60 minutes if it's still
-  down), but only at a safe moment (no timer due soon, nothing pairing or updating). The
-  System page shows how many times it has done so.
+  down), but only at a safe moment (no timer or cron job due within 2 minutes, no
+  script running, no buzzer playing, nothing pairing or updating), with script
+  state and named timers saved first. The Status page shows how many times it has
+  done so.
 - **Tailscale**: a native client (Tailscale's control protocol, WireGuard, DERP,
   DISCO, STUN) based on [microlink](https://github.com/CamM2325/microlink). The
   WireGuard interface sits in the network stack next to Wi-Fi, so the same web
@@ -444,25 +524,29 @@ USB flashing always works either way.
   router for a port mapping (NAT-PMP) so peers behind the same ISP can connect
   directly. It only probes paths when they're in use or the UI is open, so an idle
   hub stays quiet on the network.
-- **Automations**: Lua 5.5. All scripts run on one dedicated task, fed events
-  through a queue; Lua never runs on the Zigbee or web server task.
+- **Automations**: Lua 5.5, unmodified. Each script has its own Lua state with a
+  capped heap in PSRAM; all of them run on one task (its 160 KB stack in PSRAM), fed
+  events through a queue. Lua never runs on the Zigbee or web server task, and
+  Zigbee never waits for a script: if the queue is ever full, events are dropped
+  and counted rather than blocking. HTTP requests run on their own task, one at a
+  time.
 - **Home Assistant**: ESPHome native API on TCP 6053 with Noise encryption, Zigbee
   devices as ESPHome sub-devices (needs Home Assistant 2025.7 or newer). It uses
   no memory unless the integration is on and active.
-- **One command path**: a command from a Lua script or from Home Assistant goes
-  through the same code to the Zigbee stack.
+- **Read-only towards devices**: the hub reads its sensors and never commands
+  Zigbee devices, neither from scripts nor from Home Assistant.
 
 ### Flash layout (16 MB)
 
 | Partition | Size | Holds |
 |---|---|---|
-| `nvs` | 16 KB | settings, Wi-Fi driver state, Tailscale node keys |
+| `nvs` | 16 KB | settings, Wi-Fi driver state, Tailscale node keys, script secrets |
 | `otadata` | 8 KB | which firmware slot boots |
 | `prov` | 12 KB | Wi-Fi credentials, admin password, optional Home Assistant key (written by `flash.sh`) |
 | `zb_storage` | 120 KB | Zigbee network state (keys, PAN, children) |
 | `coredump` | 64 KB | crash dump of the last panic |
 | `ota_0` / `ota_1` | 4 MB each | firmware, A/B updates |
-| `storage` | ~7.75 MB | device registry, scripts, diagnostic log |
+| `storage` | ~7.75 MB | device registry (with each sensor's last state), scripts and their `state`, GPIO config, diagnostic log |
 
 ## Development
 
@@ -475,11 +559,18 @@ idf.py -p "$ESPPORT" flash monitor
 `env.sh` points ESP-IDF, its tools, Python (uv-managed) and every cache at `.esp/`.
 Delete `.esp/` and the toolchain is gone without a trace.
 
+The web UI (`components/web/ui/`) is plain HTML, CSS and JavaScript with no build
+step; CMake gzips it into the firmware. The one exception is the script editor,
+`cm.js`: a prebuilt CodeMirror bundle, committed. To change or update it, edit
+`tools/codemirror/` (pinned versions in `package.json`) and run
+`tools/codemirror/build.sh`; it needs Node and keeps npm's files in `.esp/`.
+
 | | |
 |---|---|
 | ESP-IDF | v6.1 |
 | Compiler | riscv32-esp-elf-gcc 15.2 |
 | Python | 3.14, uv-managed, used only by ESP-IDF's build scripts |
+| Node | only to rebuild the editor bundle (`tools/codemirror/build.sh`) |
 
 ## Troubleshooting
 
@@ -493,8 +584,23 @@ or 48.
 cycle sequence), start a scan, and keep it close to the hub for the interview.
 Sleepy battery devices may need a button press to wake up during the interview.
 
-**Script stopped.** Its last error and line number are on its card in
-Automations. Fix and save; it restarts.
+**Script stopped.** Its last error and line number are next to it on the
+Automations page, and in the script log. Fix and save; it restarts.
+
+**Script switched off by itself, "the hub crashed while this script was running".**
+The script made the hub crash or hang, so the hub turned it off to avoid crashing
+again on every boot. Fix it and switch it back on. Seeing this means the hub has a
+bug worth reporting, with the script that triggers it.
+
+**"is used by script …" when saving.** Another script owns that GPIO pin. Each pin
+belongs to one script; move the buzzer to another pin, or the code into one script.
+
+**"is not claimed by this script".** A handler used a pin the script didn't take
+when it loaded. Add `gpio.claim("name")` at the top of the script.
+
+**Cron jobs don't fire.** Check the time zone under Settings, and the clock line on
+the Automations page: after a power cut, cron waits until the hub has the time from
+the internet.
 
 **Home Assistant shows one hub device instead of my sensors.** A script is
 enabled, so the hub is the brain and Home Assistant sees the hub as one device.
@@ -525,6 +631,8 @@ it.
 - [wireguard-lwip](https://github.com/smartalock/wireguard-lwip) (BSD-3): the
   WireGuard interface
 - [Lua](https://www.lua.org/) (MIT, PUC-Rio)
+- [CodeMirror](https://codemirror.net/) (MIT, Marijn Haverbeke and others): the
+  script editor
 - [zigbee2esphome](https://github.com/moag1000/zigbee2esphome): hard-won,
   measured lessons about Zigbee and Wi-Fi on the ESP32-C5
 - [ESPHome](https://github.com/esphome/esphome): the native API's wire format

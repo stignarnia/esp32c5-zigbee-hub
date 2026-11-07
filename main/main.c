@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "automation.h"
 #include "esp_app_desc.h"
 #include "esp_netif.h"
 #include "mdns.h"
@@ -210,16 +211,17 @@ static void log_boot_summary(void)
 }
 
 // Wi-Fi watchdog's last resort (a reboot after a long outage) waits for a safe moment:
-// nothing pairing, no device mid-interview, no firmware upload being written. Asked
-// every second while the reboot is due; the registry is flushed before saying yes.
-// (Script timers join this check with the automation engine, Phase 5.)
+// nothing pairing, no device mid-interview, no firmware upload being written, no script
+// running, no script timer or cron job due within 2 min, no buzzer pattern playing.
+// Asked every second while the reboot is due; the registry, script state and named
+// script timers are saved before saying yes.
 static bool reboot_gate(void)
 {
     static const char *last;
     const char *why = zb_permit_left() > 0 ? "pairing window open"
                     : zb_interviewing()    ? "a device is being interviewed"
                     : hubsys_ota_in_progress() ? "firmware upload in progress"
-                    : NULL;
+                    : automation_reboot_blocker();
     if (why) {
         if (why != last) ESP_LOGW(TAG, "watchdog reboot deferred: %s", why);
         last = why;
@@ -245,6 +247,8 @@ void app_main(void)
 
     // Zigbee first, before Wi-Fi: it must never wait for the uplink.
     if (zb_start() != ESP_OK) ESP_LOGE(TAG, "zigbee failed to start");
+    // Scripts next (the device registry is loaded): they don't wait for Wi-Fi either.
+    if (automation_start() != ESP_OK) ESP_LOGE(TAG, "automation engine failed to start");
 
     static prov_t prov;  // static: holds secrets, keep it off the small main stack
     bool have_prov = prov_load(&prov) == ESP_OK;

@@ -148,23 +148,29 @@ The HTTP server binds to all interfaces. microlink adds its WireGuard interface 
 lwIP's netif list, so the same server answers on the LAN IP and on the `100.x`
 tailnet IP without extra code (to verify in Phase 4).
 
-### Source layout (to create)
+### Source layout (as built, 2026-11-07)
 
 ```
 CMakeLists.txt  sdkconfig.defaults  partitions.csv  flash.sh  env.sh
-main/            app_main, boot order
+main/            app_main, boot order, Wi-Fi watchdog's reboot gate
 components/
   prov/          read provisioning NVS partition
   wifi5g/        STA manager, 5 GHz only, watchdog
-  zb/            coordinator, enrollment, interview, ZCL helpers
-  devices/       registry, capabilities, persistence
-  web/           http server, REST, WebSocket, embedded assets
-  web/ui/        index.html, app.js, style.css (no build step, gzipped by CMake)
-  automation/    Lua engine, bindings, script store
-  lua/           Lua 5.5 source (MIT), vendored
+  hubsys/        planned reboots, OTA bookkeeping, core-dump summary
+  hublog/        on-board diagnostic log (LittleFS)
+  zb/            coordinator, enrollment, interview, ZCL helpers, and the device
+                 registry with persistence (zb_dev.c; no separate devices/ component)
+  web/           http server, REST (web_api.c, web_auto.c), WebSocket, auth, access mode
+  web/ui/        index.html, app.js, style.css (no build step, gzipped by CMake), and
+                 cm.js (CodeMirror editor, prebuilt by tools/codemirror, committed)
+  automation/    Lua engine (auto_engine.c), store, GPIO, HTTP
+  lua/           Lua 5.5.1 source (MIT), vendored unmodified
   tailscale/     microlink (MIT) ported to IDF v6, wrapped
-  esphome_api/   ESPHome native API server (Noise), HA mode
-tools/           host helpers (provisioning image generation)
+  esphome_api/   (Phase 6, not yet) ESPHome native API server (Noise), HA mode
+tools/
+  mkprov.py      provisioning image for flash.sh
+  gpio_probe/    Phase 1b buzzer/GPIO probe firmware
+  codemirror/    editor bundle: pinned package.json + lockfile, entry.js, build.sh, LICENSE
 ```
 
 ### Partition table (16 MB)
@@ -260,8 +266,11 @@ Notes from the first boot:
   - [x] watchdog reboot logged on the next boot; [x] shown in the UI (Status → Wi-Fi recovery)
   - [~] gate implemented 2026-11-06 (`reboot_gate` in `main.c`): defers while the pairing
     window is open, a device is actively being interviewed, or a firmware upload is
-    being written; flushes the device registry before allowing it. Script timers and
-    `state` join with Phase 5. Not yet observed deferring (needs a 20+ min outage)
+    being written; flushes the device registry before allowing it. Since Phase 5
+    (`automation_reboot_blocker`) also: a script running, a timer or cron job due within
+    2 min, a buzzer pattern playing; script `state` and named timers saved first (timers
+    with a global function name survive in RTC memory; anonymous ones are lost). Not yet
+    observed deferring (needs a 20+ min outage)
   - [ ] **not yet observed firing** — needs the AP gone for 5+ / 20+ min
   - the cost being guarded: a reboot takes a few seconds until Zigbee is back
     (network restored from `zb_storage`, no re-pairing), and reports sent in that
@@ -421,7 +430,7 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
   - < 2.5 V → too much current for a pin: needs a transistor (BC547/2N2222 + 1 kΩ)
   - applied (2026-11-07): 3.00 V average at drive 3, sticker off → direct drive, drive 3.
     The peaks (dips to 2.42 V) were the open question; 50/50 clean rounds settled it
-- [ ] Result becomes Phase 5's defaults: allowed pin list, drive strength, and any
+- [x] Result became Phase 5's defaults (`auto_gpio.c`): allowed pin list, drive strength, and any
       on-time/duty limits `gpio.beep` enforces for this buzzer type. From the
       measurements: pins 3, 4, 5, 6, 8, 9, 10, 15, 23, 24, 26; drive strength 3 for
       outputs; a second GPIO driven low works as a buzzer's ground (IO6 + IO8). Tested
@@ -850,7 +859,21 @@ Offered in the UI (Settings → Tailscale) once Tailscale is connected. Code:
     without password, upload 22.8 s over the tunnel, confirmed; mode kept after reboot
   - `flash.sh --prov-only --lan-access`: mode off, LAN + password and mDNS back
 
-### Phase 5 — Automation (Lua 5.5)
+### Phase 5 — Automation (Lua 5.5) (built and mostly verified 2026-11-07; door trigger and router-off test pending)
+
+**Tests still to do** (user: "tests are last"), in one place:
+- `zb.on` firing on a real door change (`t_door` test script is loaded on the hub), then
+  a restart: the door's last state must come back (`devices.json` persistence)
+- router off for an hour: triggers, timers, cron and buzzers keep working; `net.on("down")`
+  fires; a `retry_for` request made offline goes out when the router is back
+- `gpio.on` with an input; buzzers audible with `gpio.pattern` (the user listens)
+- UI on the phone: Automations layout (Secrets/GPIO moved there, wrapping rows), the
+  CodeMirror editor (typing, completion, error line on Save), Settings → Time zone
+- the Wi-Fi watchdog's reboot gate deferring for a script (needs a 20+ min outage)
+
+Built in addition to the list below: `zb.devices()`, `timer.cancel(id)` (also cancels
+cron), timers by global function name (survive a restart), `json.encode/decode`,
+`print` = `log`.
 
 **Decided (user, 2026-11-04): Lua.** Why: most pasted scripts will be written by
 the user or an AI, and Lua is widely known; the C API gives per-script memory caps
@@ -859,13 +882,21 @@ MIT. Rejected: Berry (Tasmota; lean but niche), QuickJS (full JS, viable but
 heavier), mJS/Elk/Espruino (JS subsets — pasted normal JS often fails). ESPHome
 has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
 
-- [ ] Vendor Lua 5.5.1 (latest at time of writing; MIT) into `components/lua/`; allocator into PSRAM with a
-      per-script memory cap (default 256 KB)
-- [ ] One `lua_State` per script, all run on one automation task (events are
+- [x] Vendor Lua 5.5.1 (latest at time of writing; MIT) into `components/lua/`; allocator into PSRAM with a
+      per-script memory cap (default 256 KB). Unmodified sources; `LUAI_MAXCCALLS=100`
+- [x] One `lua_State` per script, all run on one automation task (events are
       queued to it — Lua never runs on the Zigbee or HTTP task)
-- [ ] Sandbox: no `io`, `os.execute`, `require`, `load` of bytecode; instruction
+- [x] Sandbox: no `io`, `os.execute`, `require`, `load` of bytecode; instruction
       count hook aborts runaway scripts; errors reported to the UI with line numbers
-- [ ] API:
+- [~] API — verified on hardware: `timer.*`, `cron`, `state` (kept across reboots),
+  `json`, `http` (HTTPS, POST + headers, LAN plain HTTP, bad host → 0), `secret` + masking,
+  `gpio.*`, `net.online`/`net.on("up")`, `zb.devices`/`zb.get`. **Not yet observed:**
+  `zb.on` firing (needs a door opened), `net.on("down")`, `retry_for` across an outage,
+  `gpio.on`. Last known device state (zone status, on/off, occupancy within 2 s of a
+  change; battery/temperature/humidity at most every 5 min) is saved in `devices.json` and
+  restored at boot, so `zb.get` and the UI have it right after a restart (built
+  2026-11-07, verification pending: needs a sensor report, then a restart). Side effect:
+  the first report after a boot no longer counts as a change unless the value differs
   - `zb.on(device, attr, fn)` — state change triggers
   - `zb.get(device, attr)`. No `zb.set` (user decision 2026-11-07): the hub reads its
     sensors, it doesn't command devices
@@ -882,19 +913,21 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       comes back later through `on_done` on the automation task (status 0 =
       network error / gave up)
     - **HTTPS** with the ESP-IDF certificate bundle (public CAs), certificates
-      verified; plain HTTP allowed for LAN targets
+      verified; plain HTTP only to LAN / tailnet addresses (private, link-local, 100.64/10)
     - **`retry_for = seconds`**: while offline or on errors (5xx, timeouts),
       retried with backoff until that deadline — for alarms that must arrive
       once Wi-Fi is back. Default 0 = one attempt, dropped when offline
     - limits: response bodies truncated at 16 KB; queue of 16 requests;
       per-script rate limit (default 10/min); one TLS connection at a time
-      (~40 KB internal RAM while it runs — measure in Phase 7)
+      (mbedTLS buffers in PSRAM since Phase 4; no visible change in the internal
+      low-water mark when a script made HTTPS calls)
   - **Secrets**: `secret("alexa_alarm_url")` reads a value stored under
-    Settings → Secrets (write-only in the UI, kept in NVS, never shown in script
+    Automations → Secrets (write-only in the UI, kept in NVS, never shown in script
     text or logs). URLs with tokens belong there, not pasted into scripts;
     `log()` masks secret values if a script prints one
   - `log(...)` → UI log stream
   - **GPIO** (user request: 3 V buzzers on the board's pins):
+    - `gpio.claim(pin, ...)` — top level only (2026-11-07, see GPIO safety)
     - `gpio.write(pin, 0|1)`, `gpio.read(pin)`, `gpio.on(pin, "rising"|"falling"|"both", fn)`
       (debounced, delivered through the automation queue — never from the ISR)
     - `gpio.beep(pin, ms)` / `gpio.beep(pin, {on=100, off=100, times=3})` for
@@ -904,38 +937,89 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       buzzers in step: `steps` = `{{mask, ms}, …}`, bit *i* of `mask` = `pins[i]` on.
       Played by C on a precise timer (30–40 ms steps would jitter if Lua timed them),
       non-blocking; `gpio.stop(pins)` ends it. The alarm from Phase 1b is the built-in
-      example. A buzzer's ground may be a second pin driven low (Settings → GPIO:
+      example. A buzzer's ground may be a second pin driven low (Automations → GPIO:
       "ground for …"). Defaults from Phase 1b: drive strength 3, 2 s cap per pulse
   - **Network state** (user request 2026-11-07): `net.online()` (Wi-Fi associated with
     an IP, now) and `net.on("up"|"down", fn)`, so a script can change what it does
     when the uplink is gone (e.g. a longer local alarm when Alexa can't be reached)
-- [ ] GPIO safety:
-  - only pins enabled in the UI (Settings → GPIO: name, direction) are usable;
+- [x] GPIO safety — verified 2026-11-07 (buzzer1 IO5, buzzer2 IO6 + ground IO8, config
+      left on the hub): pins 28 and 11 refused; a second script using an owned pin stops
+      with "GPIO 5 is used by script …"; a script that errored 0.3 s into a 5-round
+      pattern left both pins low, the pattern stopped and no owner (checked 1 s after the error)
+  - only pins enabled in the UI (Automations → GPIO: name, direction) are usable;
     scripts may refer to them by name (`gpio.write("buzzer", 1)`)
   - pins that are never allowed: SPI flash / PSRAM bus, USB D−/D+, UART0 console
     (GPIO 11/12), strapping pins, 32 kHz crystal pins. Exact list from the C5
     datasheet + this board's pinout when implementing — don't guess
-  - one script owns a pin at a time (claim on first use; conflict = load error)
+  - one script owns a pin at a time. **Claims only while the script loads** (user decision
+    2026-11-07): any gpio call at top level claims, `gpio.claim(...)` for pins used only in
+    handlers; a handler using an unclaimed pin gets an error. So a conflict is reported at
+    Save (the save response carries it: `started: false`), never when the trigger fires
   - **fail-safe**: when a script stops (disabled, error, timeout, OOM, deleted),
     every output it owned goes low and any beep/tone stops — a crashed script
     must never leave a buzzer screaming
   - the UI GPIO page shows each enabled pin's state and owning script
-- [ ] **Time without Wi-Fi**: event triggers and `timer.*` need no clock and always
+- [x] **Time without Wi-Fi** — the RTC keeps the time through soft resets, panics and
+      watchdog reboots, so the clock is valid at once after them (seen: after the panic
+      reset on 2026-11-07, cron fired at 15:25 before Wi-Fi was up). Only a power-off loses
+      it; then cron waits for SNTP and the Automations page says "clock not set". **The
+      last-known-time-in-NVS idea is dropped**: after a power-off it would be wrong by the
+      time the hub was off, which is exactly the "fires at the wrong time" this rule forbids.
+      Original text: event triggers and `timer.*` need no clock and always
       work. `cron` needs wall time: SNTP when online; the RTC keeps counting through
       Wi-Fi outages; last known time saved to RTC memory + NVS so a soft reset
       with no uplink keeps an approximate clock. Cron jobs report "clock unset"
       in the UI rather than firing at wrong times
-- [ ] Engine survives a script crash: one script's error/timeout/OOM disables that
-      script only; the engine task and other scripts keep running
+- [x] Engine survives a script crash: one script's error/timeout/OOM disables that
+      script only; the engine task and other scripts keep running. Verified: endless loop
+      stopped at 1000 ms, OOM at 256 KB, C-stack overflow as a Lua error, others unaffected.
+      **And if the hub itself crashes while a script runs** (RTC marker `s_rtc_run`), the
+      next boot disables that script (persisted, reason shown) — verified with a deliberate
+      32 KB-stack build: one panic, next boot disabled it, the other script ran normally
 - [ ] Test: unplug the router for an hour — every trigger and timer still fires,
       verified from the serial log
-- [ ] UI editor: paste/edit (textarea with line numbers; no heavy editor),
+- [~] UI editor (built; the user checks it in the browser): paste/edit,
       Save → syntax check (`luaL_loadbuffer`) before storing, enable/disable,
-      live log, last error
-- [ ] Scripts persisted in LittleFS (`/storage/scripts/*.lua`), started at boot
-      after the device registry is loaded
-- [ ] Built-in examples (door opens → buzzer + Alexa URL with `retry_for`; weekday-morning
+      live log, last error; a load error (e.g. GPIO conflict) is shown at Save with its line.
+      Automations page = scripts, pins, editor, script log, **Secrets, GPIO** (moved from
+      Settings 2026-11-07; Time zone stays in Settings)
+  - **Editor = CodeMirror 6** (user decision 2026-11-07; Monaco rejected: no mobile support,
+    MBs). Lua highlighting, search, bracket matching, completion of the hub's API, colours
+    from the page's CSS variables (dark mode). Sources + pinned versions in
+    `tools/codemirror/` (`build.sh` → `components/web/ui/cm.js`, committed; npm cache and
+    `node_modules` under `.esp/`), so the firmware build needs no Node. **120 KB gzipped**
+    (view 177 KB + state 46 KB minified are most of it; search + autocomplete ~15 KB gz).
+    Loaded only when the editor opens; the textarea is shown at once and stays if `cm.js`
+    can't load. Measured over the tailnet: 0.71 s for the 120 KB, then 304 (ETag = build
+    id, so once per firmware update). App image 2.0 → 2.2 MB
+- [x] Scripts persisted in LittleFS (`/storage/scripts/*.lua`), started at boot
+      after the device registry is loaded (before Wi-Fi: `net.online()` false at start,
+      then `net up`)
+- [~] Built-in examples (in the UI, not run) (door opens → buzzer + Alexa URL with `retry_for`; weekday-morning
       `cron` that logs which doors are still open)
+
+#### Phase 5 findings (2026-11-07)
+- **A script crashed the hub into a boot loop.** The engine task had 32 KB of stack "sized
+  for `LUAI_MAXCCALLS=100`" — but Lua bounds the *number* of nested C levels, not their
+  size. A `string.gsub` callback level costs ~1.15 KB (gsub's frame alone is 880 B), so a
+  script nesting pcall/gsub/sort overflowed the stack (`Stack protection fault`, task
+  `auto`); the script was saved as enabled, so every boot crashed ~2 s in, before Wi-Fi
+  (USB reflash needed). Measured worst case at 160 KB: **116.4 KB** (gsub nested to the
+  limit, uncaught, traceback at the deepest point); mixed pcall/gsub/sort 73 KB; also tried:
+  `__tostring`, `string.format`, `__index`, `table.sort`, coroutines, deep patterns — all
+  end in a clean "C stack overflow" error. Stack now **160 KB in PSRAM**
+- **Pre-auth crash in the web server (fixed)**: cJSON recurses 64 B per nesting level up
+  to `CJSON_NESTING_LIMIT` (default 1000). A 255-byte login body of `[` (LAN mode, before
+  the password) needed ~16 KB on the 8 KB httpd stack. `CONFIG_CJSON_NESTING_LIMIT=32`
+  (Kconfig of the managed component) bounds every parse site: web bodies, `json.decode`
+  of HTTP responses, microlink (netmap still parses). Verified: 4000 `[` to
+  `/api/auto/tz` → 400, hub up
+- A firmware that crashes on its trial boot is rolled back before it can be tested —
+  test builds that are meant to crash must go over USB (or expect the rollback)
+- Internal heap with the engine (no scripts): **74 KB free, lowest 37–40 KB** (Phase 4:
+  78.5 / 41.5); the engine and HTTP task stacks are in PSRAM. HTTPS from a script: no
+  visible change in the low-water mark (mbedTLS in PSRAM)
+- App image 2.0 MB (50 % of a slot); UI 19.1 KB gzipped
 
 ### Phase 5b — The user's own alarm script (user request 2026-11-07)
 Built on Phase 5, before Home Assistant: it runs entirely on the hub, so it needs
@@ -1035,7 +1119,8 @@ with Tailscale (Phase 4, 2026-11-07: Zigbee + Wi-Fi + web + Tailscale with 3 DER
 connections, a UI WebSocket client, IPv6 off) **78.5 KB free, lowest 41.5 KB** (the
 lowest is early in boot). Pulled so far: lever 3 (mbedTLS in PSRAM) and lever 4 for
 microlink's four tasks and the two Phase 4 watcher tasks (none of them writes flash).
-Next expected: Lua engine task ~8–16 KB (Phase 5).
+With the Lua engine (Phase 5, 2026-11-07, no scripts): **74 KB free, lowest 37–40 KB** —
+the engine's 160 KB stack is in PSRAM, so it cost ~4 KB internal, not the 8–16 KB expected.
 
 Levers, roughly cheapest first — pull only what's needed:
 1. Wi-Fi code out of IRAM (`CONFIG_ESP_WIFI_IRAM_OPT`, `_RX_IRAM_OPT`,
@@ -1078,7 +1163,7 @@ All measured there on the same chip; re-verify, don't assume.
 12. **`esp_log_level_set("wifi", ...)` hides the diagnostics** — go VERBOSE when
     Wi-Fi misbehaves.
 
-## Decisions (user, 2026-11-04)
+## Decisions (user; 2026-11-04 unless dated)
 
 - **Tailscale = [microlink](https://github.com/CamM2325/microlink)**, and we're free
   to modernise it: port to IDF v6.1 / mbedTLS 4 / PSA, newer deps, drop what we
@@ -1089,6 +1174,13 @@ All measured there on the same chip; re-verify, don't assume.
   every Zigbee device as its own HA device; scripts enabled → the hub as one smarter
   HA device. Disabled scripts don't count.
 - **Lua** for automations (see Phase 5).
+- **Script editor = CodeMirror 6**, prebuilt and committed (2026-11-07; Monaco rejected:
+  no mobile support, several MB).
+- **GPIO pins are claimed only while a script loads** (2026-11-07), so conflicts show at
+  Save. Secrets and GPIO settings live on the Automations page (2026-11-07).
+- **The hub never commands Zigbee devices** (2026-11-07): no `zb.set`, nothing from HA.
+- **No last-known clock in NVS** (2026-11-07): after a power-off it would be wrong; cron
+  waits for SNTP instead. Soft resets keep the RTC time.
 - **Router**: test on DFS channel 52 first; move to 36–48 only if measurements are bad.
 - **Tailnet-only access**: once Tailscale works, an option to drop the password
   and listen only on the Tailscale interface (Phase 4, "Access mode").

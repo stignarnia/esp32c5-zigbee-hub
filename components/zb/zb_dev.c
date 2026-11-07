@@ -18,6 +18,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 #include "cJSON.h"
@@ -80,7 +81,9 @@ typedef struct {
     int64_t next_try_us;         // 0 = not waiting
     int64_t joined_us;
     int64_t woke_us;             // when the current interview attempt started
-    // live state (not persisted)
+    // live state. Persisted (last known values, so zb.get and the UI have them right
+    // after a reboot): zone status, on/off, occupancy, battery, temperature, humidity.
+    // Not persisted: when it was last heard, availability, RSSI
     int64_t last_seen_us;        // 0 = not heard since boot (availability counts from boot)
     bool offline;
     uint8_t pings;               // unanswered availability pings (mains devices)
@@ -99,6 +102,8 @@ typedef struct {
 static zdev_t *s_dev;                    // PSRAM, ZB_MAX_DEVICES
 static SemaphoreHandle_t s_mtx;
 static volatile bool s_dirty;
+static volatile bool s_state_dirty;      // only slow-changing values: saved within STATE_SAVE_US
+#define STATE_SAVE_US (5LL * 60 * 1000000)
 static uint32_t s_rev;                  // bumped on every change the UI should see
 static uint64_t s_my_ieee;
 
@@ -206,6 +211,95 @@ static const char *zone_kind(uint16_t t)
 static bool complete(const zdev_t *d)
 {
     return d->done == IV_ALL && (d->zone_type || !has_server(d, EZB_ZCL_CLUSTER_ID_IAS_ZONE, NULL));
+}
+
+// ---- state changes for consumers (zb_set_event_cb) --------------------------------------
+// Each handler that can change live state takes a snapshot first and emits the
+// differences after. The callback only copies (see zb.h): nothing here can block.
+
+typedef struct {
+    bool offline;
+    uint16_t zone_status; bool has_zone_status;
+    int16_t temp;         bool has_temp;
+    uint16_t hum;         bool has_hum;
+    uint8_t batt;         bool has_batt;
+    uint8_t batt_v;       bool has_batt_v;
+    bool on;              bool has_on;
+    uint8_t occ;          bool has_occ;
+} live_t;
+
+static zb_event_cb_t s_event_cb;
+
+void zb_set_event_cb(zb_event_cb_t cb)
+{
+    s_event_cb = cb;
+}
+
+static void live_of(const zdev_t *d, live_t *l)
+{
+    *l = (live_t){
+        .offline = d->offline,
+        .zone_status = d->zone_status, .has_zone_status = d->has_zone_status,
+        .temp = d->temp, .has_temp = d->has_temp, .hum = d->hum, .has_hum = d->has_hum,
+        .batt = d->batt, .has_batt = d->has_batt, .batt_v = d->batt_v, .has_batt_v = d->has_batt_v,
+        .on = d->on, .has_on = d->has_on, .occ = d->occ, .has_occ = d->has_occ,
+    };
+}
+
+// The IAS alarm bit under the name a script would use for this kind of sensor.
+static const char *alarm_attr(uint16_t zone_type)
+{
+    switch (zone_type) {
+    case 0x000D: return "motion";
+    case 0x0015: return "open";
+    case 0x0028: return "smoke";
+    case 0x002A: return "water";
+    case 0x002B: return "co";
+    case 0x002D: return "vibration";
+    default:     return "alarm";
+    }
+}
+
+static void emit(const zdev_t *d, const char *attr, const char *alias, bool is_bool, double v)
+{
+    zb_event_t e = {.attr = attr, .alias = alias, .is_bool = is_bool, .value = v};
+    snprintf(e.ieee, sizeof(e.ieee), "%016llx", (unsigned long long)d->ieee);
+    strlcpy(e.device, d->name[0] ? d->name : d->model[0] ? d->model : e.ieee, sizeof(e.device));
+    s_event_cb(&e);
+}
+
+// What changed decides how soon the registry file is written: zone status, on/off and
+// occupancy within 2 s (a door that was open before a reboot must read open after it);
+// battery/temperature/humidity report often and can wait a few minutes.
+static void persist_diff(const zdev_t *d, const live_t *b)
+{
+    if (d->zone_status != b->zone_status || d->has_zone_status != b->has_zone_status || d->on != b->on ||
+        d->has_on != b->has_on || (d->occ & 1) != (b->occ & 1) || d->has_occ != b->has_occ) {
+        s_dirty = true;
+    } else if (d->batt != b->batt || d->batt_v != b->batt_v || d->temp != b->temp || d->hum != b->hum ||
+               d->has_batt != b->has_batt || d->has_batt_v != b->has_batt_v || d->has_temp != b->has_temp ||
+               d->has_hum != b->has_hum) {
+        s_state_dirty = true;
+    }
+}
+
+static void emit_diff(const zdev_t *d, const live_t *b)
+{
+    persist_diff(d, b);
+    if (!s_event_cb) return;
+    if (d->offline != b->offline) emit(d, "available", NULL, true, !d->offline);
+    if (d->has_zone_status && (!b->has_zone_status || d->zone_status != b->zone_status)) {
+        uint16_t now = d->zone_status, was = b->has_zone_status ? b->zone_status : (uint16_t)~now;
+        if ((now ^ was) & 1) emit(d, alarm_attr(d->zone_type), "alarm", true, now & 1);
+        if ((now ^ was) & 4) emit(d, "tamper", NULL, true, (now >> 2) & 1);
+        if ((now ^ was) & 8) emit(d, "battery_low", NULL, true, (now >> 3) & 1);
+    }
+    if (d->has_batt && (!b->has_batt || d->batt != b->batt)) emit(d, "battery", NULL, false, d->batt / 2.0);
+    if (d->has_batt_v && (!b->has_batt_v || d->batt_v != b->batt_v)) emit(d, "battery_v", NULL, false, d->batt_v / 10.0);
+    if (d->has_temp && (!b->has_temp || d->temp != b->temp)) emit(d, "temperature", NULL, false, d->temp / 100.0);
+    if (d->has_hum && (!b->has_hum || d->hum != b->hum)) emit(d, "humidity", NULL, false, d->hum / 100.0);
+    if (d->has_on && (!b->has_on || d->on != b->on)) emit(d, "on", NULL, true, d->on);
+    if (d->has_occ && (!b->has_occ || (d->occ & 1) != (b->occ & 1))) emit(d, "occupied", NULL, true, d->occ & 1);
 }
 
 // ---- interview: requests --------------------------------------------------------------
@@ -533,6 +627,8 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
         ezb_zcl_cmd_read_attr_rsp_message_t *m = message;
         zdev_t *d = from_header(m->in.header);
         if (!d) break;
+        live_t before;
+        live_of(d, &before);
         heard(d, m->in.header->rssi);
         uint16_t cl = m->info.cluster_id;
         for (ezb_zcl_read_attr_rsp_variable_t *v = m->in.variables; v; v = v->next) {
@@ -548,6 +644,7 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
         }
         interview_done_check(d);
         changed(true);
+        emit_diff(d, &before);
         m->out.result = EZB_ZCL_STATUS_SUCCESS;
         break;
     }
@@ -555,11 +652,14 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
         ezb_zcl_cmd_report_attr_message_t *m = message;
         zdev_t *d = from_header(m->in.header);
         if (!d) break;
+        live_t before;
+        live_of(d, &before);
         heard(d, m->in.header->rssi);
         for (ezb_zcl_report_attr_variable_t *v = m->in.variables; v; v = v->next) {
             apply_attr(d, m->info.cluster_id, v->attr_id, v->attr_type, v->attr_value);
         }
         changed(false);
+        emit_diff(d, &before);
         m->out.result = EZB_ZCL_STATUS_SUCCESS;
         break;
     }
@@ -605,6 +705,8 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
         ezb_zcl_ias_zone_status_change_notif_message_t *m = message;
         zdev_t *d = from_header(m->in.header);
         if (!d) break;
+        live_t before;
+        live_of(d, &before);
         heard(d, m->in.header->rssi);
         d->zone_status = m->in.payload.zone_status;
         d->has_zone_status = true;
@@ -614,6 +716,7 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
                  (d->zone_status & 4) ? " tamper" : "");
         interview_done_check(d);
         changed(false);
+        emit_diff(d, &before);
         m->out.result = EZB_ZCL_STATUS_SUCCESS;
         break;
     }
@@ -717,7 +820,12 @@ void zb_dev_tick(void *arg)
     LOCK();
     for (int i = 0; i < ZB_MAX_DEVICES; i++) {
         zdev_t *d = &s_dev[i];
-        if (d->used) availability(d, now);
+        if (d->used) {
+            live_t before;
+            live_of(d, &before);
+            availability(d, now);
+            emit_diff(d, &before);
+        }
         if (!d->used || complete(d) || !d->next_try_us || now < d->next_try_us) continue;
         if (d->tries >= MAX_TRIES) {
             d->next_try_us = 0;  // asleep: resume on its next check-in (heard())
@@ -765,6 +873,17 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
         for (int c = 0; c < ep->n_out; c++) cJSON_AddItemToArray(out, cJSON_CreateNumber(ep->out[c]));
         cJSON_AddItemToArray(eps, j);
     }
+    if (!live) {
+        // Last known state (restored at boot; see zdev_t)
+        cJSON *st = cJSON_AddObjectToObject(o, "state");
+        if (d->has_zone_status) cJSON_AddNumberToObject(st, "zone", d->zone_status);
+        if (d->has_temp) cJSON_AddNumberToObject(st, "temp", d->temp);
+        if (d->has_hum) cJSON_AddNumberToObject(st, "hum", d->hum);
+        if (d->has_batt) cJSON_AddNumberToObject(st, "batt", d->batt);
+        if (d->has_batt_v) cJSON_AddNumberToObject(st, "batt_v", d->batt_v);
+        if (d->has_on) cJSON_AddBoolToObject(st, "on", d->on);
+        if (d->has_occ) cJSON_AddNumberToObject(st, "occ", d->occ);
+    }
     if (live) {
         int64_t now = esp_timer_get_time();
         const char *st = complete(d) ? "ready" : d->next_try_us ? "interviewing" : "waiting";
@@ -799,6 +918,7 @@ static void save_now(void)
     xSemaphoreTake(s_save_mtx, portMAX_DELAY);
     LOCK();
     s_dirty = false;
+    s_state_dirty = false;
     cJSON *arr = cJSON_CreateArray();
     for (int i = 0; i < ZB_MAX_DEVICES; i++) {
         if (s_dev[i].used) cJSON_AddItemToArray(arr, dev_to_json(&s_dev[i], false));
@@ -853,15 +973,17 @@ bool zb_interviewing(void)
 
 static void saver_task(void *arg)
 {
+    int64_t last_save = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(2000));
-        if (!s_dirty) continue;
+        if (!s_dirty && !(s_state_dirty && esp_timer_get_time() - last_save >= STATE_SAVE_US)) continue;
         if (s_save_fails) {
             int shift = s_save_fails < 5 ? s_save_fails : 5;  // waits 4, 8, 16, 32, then 60 s
             int wait_s = (2 << shift) > 60 ? 60 : (2 << shift);
             vTaskDelay(pdMS_TO_TICKS((wait_s - 2) * 1000));
         }
         save_now();
+        last_save = esp_timer_get_time();
     }
 }
 
@@ -921,6 +1043,21 @@ static void load(void)
             }
         }
         d->desc_ok = (1 << d->n_ep) - 1;
+        const cJSON *st = cJSON_GetObjectItem(o, "state");
+#define RESTORE(k, field, has)                                                 \
+        do {                                                                   \
+            const cJSON *v_ = cJSON_GetObjectItem(st, k);                      \
+            if (cJSON_IsNumber(v_)) { d->field = v_->valueint; d->has = true; } \
+        } while (0)
+        RESTORE("zone", zone_status, has_zone_status);
+        RESTORE("temp", temp, has_temp);
+        RESTORE("hum", hum, has_hum);
+        RESTORE("batt", batt, has_batt);
+        RESTORE("batt_v", batt_v, has_batt_v);
+        RESTORE("occ", occ, has_occ);
+#undef RESTORE
+        const cJSON *on = cJSON_GetObjectItem(st, "on");
+        if (cJSON_IsBool(on)) { d->on = cJSON_IsTrue(on); d->has_on = true; }
         count++;
     }
     cJSON_Delete(arr);
@@ -1018,4 +1155,53 @@ void zb_dev_reinterview(uint64_t ieee)
         changed(true);
     }
     UNLOCK();
+}
+
+// ---- values for scripts ---------------------------------------------------------------------
+
+static zdev_t *by_name_or_ieee(const char *device)
+{
+    for (int i = 0; i < ZB_MAX_DEVICES; i++) {
+        zdev_t *d = &s_dev[i];
+        if (!d->used) continue;
+        char hex[17];
+        ieee_hex(d->ieee, hex);
+        if ((d->name[0] && strcasecmp(d->name, device) == 0) || strcasecmp(hex, device) == 0 ||
+            (!d->name[0] && d->model[0] && strcasecmp(d->model, device) == 0)) {
+            return d;
+        }
+    }
+    return NULL;
+}
+
+esp_err_t zb_get_attr(const char *device, const char *attr, double *value, bool *is_bool)
+{
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    LOCK();
+    zdev_t *d = by_name_or_ieee(device);
+    if (!d) {
+        UNLOCK();
+        return ESP_ERR_NOT_FOUND;
+    }
+    bool b = true;
+    double v = 0;
+    if (strcmp(attr, "available") == 0) { v = !d->offline; err = ESP_OK; }
+    else if (d->has_zone_status && (strcmp(attr, "alarm") == 0 || strcmp(attr, alarm_attr(d->zone_type)) == 0)) {
+        v = d->zone_status & 1; err = ESP_OK;
+    }
+    else if (d->has_zone_status && strcmp(attr, "tamper") == 0) { v = (d->zone_status >> 2) & 1; err = ESP_OK; }
+    else if (d->has_zone_status && strcmp(attr, "battery_low") == 0) { v = (d->zone_status >> 3) & 1; err = ESP_OK; }
+    else if (d->has_on && strcmp(attr, "on") == 0) { v = d->on; err = ESP_OK; }
+    else if (d->has_occ && strcmp(attr, "occupied") == 0) { v = d->occ & 1; err = ESP_OK; }
+    else {
+        b = false;
+        if (d->has_batt && strcmp(attr, "battery") == 0) { v = d->batt / 2.0; err = ESP_OK; }
+        else if (d->has_batt_v && strcmp(attr, "battery_v") == 0) { v = d->batt_v / 10.0; err = ESP_OK; }
+        else if (d->has_temp && strcmp(attr, "temperature") == 0) { v = d->temp / 100.0; err = ESP_OK; }
+        else if (d->has_hum && strcmp(attr, "humidity") == 0) { v = d->hum / 100.0; err = ESP_OK; }
+    }
+    UNLOCK();
+    *value = v;
+    *is_bool = b;
+    return err;
 }

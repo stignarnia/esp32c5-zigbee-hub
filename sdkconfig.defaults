@@ -89,3 +89,8 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # the direct path to a same-ISP peer came from NAT-PMP instead). Measured cost when on: 43.6 KB
 # flash, 2.0 KB static internal RAM. Turning it back on also needs IPv6 in microlink.
 CONFIG_LWIP_IPV6=n
+
+# cJSON recurses once per nesting level (64 B of stack each). The default limit of 1000
+# let a 255-byte login body of '[' overflow the 8 KB web server stack before any
+# authentication. Everything we parse is a few levels deep (Tailscale netmap included).
+CONFIG_CJSON_NESTING_LIMIT=32

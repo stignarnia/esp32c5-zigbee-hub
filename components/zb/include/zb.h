@@ -30,3 +30,27 @@ esp_err_t zb_remove(const char *ieee_hex);  // asks the device to leave, then fo
 esp_err_t zb_reinterview(const char *ieee_hex);  // sleepy devices: at their next check-in
 bool zb_interviewing(void);  // a device is being interviewed right now (awake, retrying)
 void zb_save_now(void);      // write the device registry to flash now (before a reboot)
+
+// ---- state changes for consumers (automation engine; later the HA API) ---------------
+// Attribute names: "open" / "motion" / "water" / "smoke" / "co" / "vibration" / "alarm"
+// (IAS zone alarm bit; `alias` is always "alarm" for those), "tamper", "battery_low",
+// "battery" (%), "battery_v" (V), "temperature" (°C), "humidity" (%), "occupied", "on",
+// "available".
+typedef struct {
+    char ieee[17];
+    char device[ZB_NAME_LEN];    // the user's name, else the model, else the IEEE
+    const char *attr;            // static string
+    const char *alias;           // static string or NULL
+    bool is_bool;
+    double value;                // 0/1 for booleans
+} zb_event_t;
+
+// Called on the Zigbee task for every value that changed, while the registry is
+// locked: it must only copy the event and return (never block, never call zb_*).
+typedef void (*zb_event_cb_t)(const zb_event_t *e);
+void zb_set_event_cb(zb_event_cb_t cb);
+
+// Current value of `attr` on the device named `device` (name, case-insensitive, or
+// IEEE hex). Last known value, kept across restarts (zb_dev.c persists it).
+// ESP_ERR_NOT_FOUND: no such device; ESP_ERR_INVALID_STATE: never reported.
+esp_err_t zb_get_attr(const char *device, const char *attr, double *value, bool *is_bool);

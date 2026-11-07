@@ -474,7 +474,7 @@ For long tests without a serial cable: log on the board, download later.
 - Internal heap with web server + a logged-in WebSocket client: ~139 KB free
   (min ~111 KB)
 
-### Phase 3 — Zigbee coordinator + enrollment (in progress 2026-11-06)
+### Phase 3 — Zigbee coordinator + enrollment (done 2026-11-06; availability tracking not yet observed firing)
 - [x] `espressif/esp-zigbee-lib` **2.1.0** (released 2026-10-30, built against IDF
       5.5.6) builds and links on IDF 6.1. Stack NVRAM in the NVS `zb_storage` partition
 - [x] **Coex before Wi-Fi connects**: `esp_coex_wifi_i154_enable()` in `zb_start()`,
@@ -619,10 +619,10 @@ For long tests without a serial cable: log on the board, download later.
       posts the Mgmt_Leave to the Zigbee task; rename/list/lookup touch only the registry
       (`s_mtx`). Lock order is always Zigbee lock → `s_mtx` (web never nests them), and the
       saver copies under `s_mtx` and writes the file after releasing it.
-      Minor: a failed registry save clears `s_dirty` first, so it isn't retried until the
-      next change
+      A failed registry save sets `s_dirty` again and is retried (fixed 2026-11-06, `e0997a7`);
+      since 2026-11-07 the retries back off (4 s doubling to 60 s) and log every 10th failure
 
-### Phase 4 — Tailscale (done 2026-11-07, except two checks that need a person: the BOOT-button press and the UI from a phone on cellular)
+### Phase 4 — Tailscale (done 2026-11-07)
 - [x] **Spike**: microlink builds and runs on IDF v6.1 / mbedTLS 4: ChaCha20-Poly1305
       through PSA (the chachapoly module is private in mbedTLS 4), randomness from
       PSA (no entropy/CTR-DRBG contexts), DERP TLS verified against the IDF CA bundle
@@ -644,9 +644,9 @@ For long tests without a serial cable: log on the board, download later.
       the hub is decided by Tailscale ACLs
 - [x] UI: state, tailnet IP, MagicDNS name, home relay region, peers with
       offline / direct / "relay (DERP fra)" (Status page)
-- [~] Verified: `tailscale ping zigbee-hub` from the dev machine (direct, 4–5 ms);
+- [x] Verified: `tailscale ping zigbee-hub` from the dev machine (direct, 4–5 ms);
       from peer A (another house, same ISP) direct via the NAT-PMP endpoint, 10–27 ms,
-      15/15. A phone on cellular: not tested by Claude (no such device available)
+      15/15. UI from a phone on cellular: works (user, 2026-11-07)
 
 #### What the port needed (measured 2026-11-06/07)
 - **Online state**: microlink's "online" meant "has a slot in my table"; it now uses
@@ -772,11 +772,11 @@ Offered in the UI (Settings → Tailscale) once Tailscale is connected. Code:
 - [x] mDNS stopped in this mode (`mdns_free`), restarted when the LAN opens again
 - [x] Switching on: `POST /api/access` needs the password once more, a connected
       Tailscale, and the request itself coming over Tailscale (LAN → 409)
-- [~] Lockout recovery: BOOT (GPIO28, the C5's download-mode strap) held 10 s →
+- [x] Lockout recovery: BOOT (GPIO28, the C5's download-mode strap) held 10 s →
       LAN with password for 15 min; `flash.sh --prov-only --lan-access` writes a fresh
       nonce into `prov` (`lanreset`), a nonce not seen before turns the mode off at
-      boot. USB path verified; **the button press is not verified** (needs someone at
-      the board; GPIO28 reads 1 = released at boot, as expected)
+      boot. USB path verified by Claude; BOOT press verified by the user (2026-11-07).
+      GPIO28 reads 1 = released at boot
 - [x] Who on the tailnet can reach it is decided by Tailscale ACLs (README says so)
 - [x] Verified 2026-11-07:
   - forged TCP SYNs from a LAN host (scapy, Ethernet frames straight to the hub's MAC)

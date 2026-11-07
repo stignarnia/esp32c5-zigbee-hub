@@ -792,6 +792,7 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
 }
 
 static SemaphoreHandle_t s_save_mtx;  // one writer of the registry file at a time
+static int s_save_fails;              // failed saves in a row (saver backs off)
 
 static void save_now(void)
 {
@@ -815,11 +816,19 @@ static void save_now(void)
         cJSON_free(txt);
     }
     if (!ok) {
-        // Still unsaved: the saver task tries again on its next pass (2 s).
-        ESP_LOGE(TAG, "saving the device registry failed, retrying");
+        // Still unsaved: the saver task tries again, backing off (4 s doubling to 60 s)
+        // so a full or failing flash isn't hammered. Logged on the first failure and
+        // every 10th: ERRORs go to the on-board log, on the same flash.
+        if (s_save_fails % 10 == 0) {
+            ESP_LOGE(TAG, "saving the device registry failed (%d in a row), retrying", s_save_fails + 1);
+        }
+        s_save_fails++;
         LOCK();
         s_dirty = true;
         UNLOCK();
+    } else if (s_save_fails) {
+        ESP_LOGW(TAG, "device registry saved again after %d failed attempts", s_save_fails);
+        s_save_fails = 0;
     }
     xSemaphoreGive(s_save_mtx);
 }
@@ -846,7 +855,13 @@ static void saver_task(void *arg)
 {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(2000));
-        if (s_dirty) save_now();
+        if (!s_dirty) continue;
+        if (s_save_fails) {
+            int shift = s_save_fails < 5 ? s_save_fails : 5;  // waits 4, 8, 16, 32, then 60 s
+            int wait_s = (2 << shift) > 60 ? 60 : (2 << shift);
+            vTaskDelay(pdMS_TO_TICKS((wait_s - 2) * 1000));
+        }
+        save_now();
     }
 }
 

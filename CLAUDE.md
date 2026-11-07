@@ -17,11 +17,10 @@ One ESP32-C5 board that is, on its own:
 4. **A Tailscale node** on the user's tailnet, so the UI is reachable from anywhere.
 5. **A local automation engine** — scripts in an interpreted language (Lua),
    pasted into the UI and run on the board, with no cloud and no Home Assistant.
-6. **Optional Home Assistant mode when there are no automations** — an opt-in
-   setting (off by default). When it's on and no script is enabled, the board
-   speaks the **ESPHome native API** and every Zigbee device appears in Home
-   Assistant as a native sub-device of the hub. Either the hub is the brain
-   (scripts) or Home Assistant is; never both at once.
+6. **Optional Home Assistant integration** — an opt-in setting (off by default).
+   When it's on, the board speaks the **ESPHome native API**: with no script
+   enabled, every Zigbee device appears in Home Assistant as a native sub-device of
+   the hub; with scripts enabled, the hub appears as one smarter device (see Phase 6).
 
 ## Priorities (user decision, 2026-11-04)
 
@@ -46,10 +45,10 @@ Everything below follows from that ordering:
    HTTP requests are queued to their own task; results come back as callbacks.
    A dead uplink delays them (or, with `retry_for`, holds them until it's back) but
    can't stall a trigger or timer — the local buzzer still sounds at once.
-6. **HA mode doesn't change the priority.** The ESPHome API server is a consumer
-   of the device registry like the UI; it must never block Zigbee. With HA as the
-   brain, automations depend on Wi-Fi by definition — that's the user's choice by
-   having no local scripts.
+6. **The HA integration doesn't change the priority.** The ESPHome API server is a
+   consumer of the device registry like the UI; it must never block Zigbee. In devices
+   mode (no local scripts) automations live in HA and depend on Wi-Fi by definition —
+   the user's choice; with local scripts, they run on the hub whatever HA does.
 
 ## Ground rules
 
@@ -137,7 +136,7 @@ The user's personal tailnet (not a work account). The board will be
             ├──────────────┬────────────────┬─────────────────┬────────────────────┤
             │  Zigbee      │  Device        │  Automation     │  Tailscale         │
             │  coordinator │  registry      │  engine (Lua)   │  (microlink port)  │
-            │  zb_*        │  + persistence │  ── or ──       │  WireGuard netif   │
+            │  zb_*        │  + persistence │  ── and ──      │  WireGuard netif   │
             │              │  (LittleFS)    │  ESPHome API    │  in lwIP           │
             │              │                │  (HA, :6053)    │                    │
             ├──────────────┴────────────────┴─────────────────┴────────────────────┤
@@ -343,15 +342,32 @@ in such listings is often wrong — they may be 12 mm electromagnetic types
 
 Independent of the other phases; its results feed Phase 5's `gpio.*` API.
 
-- [ ] **Inputs from the user**: photo of a buzzer (side + bottom: piezo vs magnetic,
-      leg spacing) and of the board (pin labels)
-- [ ] **Pin choice**, from the ESP32-C5 datasheet + this board's pinout (not memory):
-  - not flash/PSRAM, USB D−/D+, UART0 (GPIO 11/12), 32 kHz crystal, or strapping pins
-  - **stays low through reset and boot** — otherwise the buzzer chirps on every
-    reboot (and a stuck-high pin during a crash would be a fail-safe hole)
-  - ADC-capable (for the self-measurement below)
-  - a GND pin at a spacing the buzzer legs can reach without wires
-- [ ] **Probe firmware** as a separate tiny project (`tools/gpio_probe/`), flashed
+- [x] **Inputs from the user** (photos, 2026-11-07):
+  - buzzer: 12 mm black sealed cylinder, ~9–10 mm tall, "+" on the seal sticker, two
+    legs ~7.6 mm apart by eye (= 3 header holes). The usual "12 mm active buzzer"
+    package, typically electromagnetic (~20–30 mA at 3 V) despite "piezo" in the
+    listing; the probe measures it instead of guessing
+  - board: **Waveshare ESP32-C5-WIFI6-KIT-NXRX** (ESP32-C5-WROOM-1, N16R8). Headers:
+    top `G TX RX 24 23 N/15 27 4 5 NC 28 G 14 13 G VBAT`, bottom
+    `3V3 RST 2 3 0 1 6 7 8 9 10 26 25 5V G VBAT`. On board: RGB LED on IO27, BOOT on
+    IO28, two USB-C ports ("UART" = CH343, "USB" = native USB on GPIO13/14)
+- [~] **Pin choice** (ESP-IDF's C5 GPIO table, not memory): strapping 2, 7, 25, 27, 28;
+      USB-JTAG 13, 14; UART0 11/12 (TX/RX); flash/PSRAM 16–22 (not on the header);
+      32 kHz crystal pads 0/1 (`io_mux_reg.h`: `PAD_XTAL_32K_P/N`); ADC only on GPIO1–6.
+      Usable on the header: 3, 4, 5, 6, 8, 9, 10, 15, 23, 24, 26. With GND 3 holes away (legs at 7.62 mm): IO24, **IO5**, IO26 — and only
+      **IO5 is ADC-capable** (ADC1_CH4). Candidate: **IO5 + the GND three holes to its
+      right on the top row** (5 · NC · 28 · G). Reset state: the datasheet's pad default
+      table isn't in the repo; an internal pull-up (~45 kΩ, < 0.1 mA) can't sound the
+      buzzer, so the check that matters is by ear: no chirp across several resets and
+      boots with the buzzer plugged in. GPIO5 is the JTAG MTDO pad by default (not
+      driven while JTAG is unused). To confirm: the legs fit IO5/G, and the reboot test
+  - the criteria:
+    - not flash/PSRAM, USB D−/D+, UART0 (GPIO 11/12), 32 kHz crystal, or strapping pins
+    - **stays low through reset and boot** — otherwise the buzzer chirps on every
+      reboot (and a stuck-high pin during a crash would be a fail-safe hole)
+    - ADC-capable (for the self-measurement below)
+    - a GND pin at a spacing the buzzer legs can reach without wires
+- [x] **Probe firmware** as a separate tiny project (`tools/gpio_probe/`), flashed
       app-only and replaced by the hub firmware afterwards (`prov`, `zb_storage`
       untouched):
   1. sanity-check the trick first, with no load: drive the pin high/low and read
@@ -362,13 +378,56 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
   3. classify: active vs passive (continuous tone on DC = active); estimate current
      from the voltage drop and the datasheet's output characteristics (±30 %)
   4. user reports loudness at each setting
-- [ ] **Decision rule** (recorded here with the numbers):
+- [x] **Measured 2026-11-07** (probe in `ota_1`, hub in `ota_0` untouched; commands
+      `r`/`m`/`b`/`p` over UART0):
+  - method works: IO5 driven high with nothing attached reads 3355–3365 mV at drive
+    strengths 0–3, 0 mV driven low
+  - buzzer 1 on IO5 → GND: **active, electromagnetic** (continuous tone on DC; the
+    loaded pad voltage swings between ~0.4 and 3.35 V at random sample phases = coil
+    switched at audio rate). Average loaded voltage at drive 0/1/2/3: 2.03/2.37/2.70/
+    2.95 V (sticker on), 3.00 V at drive 3 with the sticker off (lowest sample 2.42 V).
+    Estimated against the ESP family figure (40 mA at VOH 2.64 V, drive 3): ~20 mA
+    average, ~50 mA short peaks (±30 %). Loudness rises with drive strength; one beep
+    is useless as an alarm, a 10 s pattern (5 × [1 s of 50/50 ms stutter + 0.4 s on,
+    0.6 s off]) at drive 3, sticker off, was "much better" (user)
+  - **driving it directly resets the chip**: `rst:0x19 RTC_PWR_GLITCH` /
+    `esp_reset_reason()` 14, 4 times in ~20 drives at drive 2–3 (never at 0), and once
+    with buzzer 2 (IO8 high, IO6 low, drive 2) within 0.3 s. The C5 bootloader always
+    arms the power-glitch reset on **VDDPST**, the I/O pad supply
+    (`bootloader_esp32c5.c:96` → `bootloader_power_glitch_reset_config(true)`, no
+    Kconfig): the coil's current pulses and turn-off spikes (no flyback diode) dip the
+    pad supply. Disabling it needs a custom bootloader (USB only) and would only hide
+    a real supply dip
+  - buzzer 2 on IO6(+)/IO8(−): no load at first (IO6 stays at 3.36 V driven) — it
+    wasn't seated properly (user). The reset with it reversed happened in that state
+  - **reseated firmly, both buzzers at drive 3: 10 runs of 10 s, no reset** (user, 2026-11-07,
+    observed by ear: every run played to the end). So the resets most likely came from
+    loose contacts: an inductive load making and breaking contact throws much larger
+    spikes than one switched cleanly. **Confirmed with serial capture**: the same 10 runs
+    (50 rounds of the pattern below, back to back, ~103 s), 50/50 rounds completed,
+    **0 resets**. Buzzer 1 (bent legs) had reset 4 times alone earlier — its seating
+    then is unknown
+  - the alarm the user picked ("perfect"), both buzzers, drive 3, 5 rounds of 2 s:
+    ping-pong A/B 40 ms each × 10 (0.8 s) → both 30 ms on / 30 ms off × 10 (0.6 s) →
+    both on 0.5 s (the two units' slightly different pitches beat) → 0.1 s off
+  - **consequence for the hub**: direct drive at drive strength 3 works for these
+    buzzers, but they must be soldered or firmly fixed (a loose one can reset the
+    chip, taking Zigbee down). The hub logs the reset reason at boot, so a
+    `RTC_PWR_GLITCH` reset shows up in `hublog`
+- [x] **Decision rule** (recorded here with the numbers):
   - loaded voltage ≥ 3.0 V → direct drive OK, any drive strength that's loud enough
   - 2.5–3.0 V → direct drive OK at max drive strength, beeps only (no long tones),
     duty-cycle limited in `gpio.beep`
   - < 2.5 V → too much current for a pin: needs a transistor (BC547/2N2222 + 1 kΩ)
+  - applied (2026-11-07): 3.00 V average at drive 3, sticker off → direct drive, drive 3.
+    The peaks (dips to 2.42 V) were the open question; 50/50 clean rounds settled it
 - [ ] Result becomes Phase 5's defaults: allowed pin list, drive strength, and any
-      on-time/duty limits `gpio.beep` enforces for this buzzer type
+      on-time/duty limits `gpio.beep` enforces for this buzzer type. From the
+      measurements: pins 3, 4, 5, 6, 8, 9, 10, 15, 23, 24, 26; drive strength 3 for
+      outputs; a second GPIO driven low works as a buzzer's ground (IO6 + IO8). Tested
+      continuous on-times up to 1 s and the 10 s pattern above, nothing longer — so the
+      first `gpio.beep` cap is 2 s per pulse (the probe's limit) until longer tones are
+      measured
 
 ### Phase 2 — Web UI foundation (done 2026-11-04, verified from the dev machine)
 Components: `web` (server, auth, API, UI in `web/ui/`), `hubsys` (planned reboot,
@@ -586,8 +645,8 @@ For long tests without a serial cable: log on the board, download later.
       re-interview (redoes every step; battery devices at their next check-in) — verified
       2026-11-06 on the Door sensor: pressed twice, each time "waiting for it to wake up",
       then on the next open/close the full interview ran and completed in 620 / 639 ms.
-      **No controls in the UI (user decision 2026-11-06)**: switching is done by Lua
-      (`zb.set`) or Home Assistant
+      **No controls in the UI (user decision 2026-11-06)**; since 2026-11-07 nothing
+      commands devices at all (no `zb.set` in Lua, no commands from Home Assistant)
 - [~] Availability tracking — built: battery devices offline after 25 h of silence.
       **Not yet observed firing** (needs a sensor silent for 25 h)
 - [x] Network map from the coordinator's neighbour table (both sensors listed with
@@ -808,7 +867,8 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       count hook aborts runaway scripts; errors reported to the UI with line numbers
 - [ ] API:
   - `zb.on(device, attr, fn)` — state change triggers
-  - `zb.set(device, {state="on", brightness=128})`, `zb.get(device, attr)`
+  - `zb.get(device, attr)`. No `zb.set` (user decision 2026-11-07): the hub reads its
+    sensors, it doesn't command devices
   - `timer.after(s, fn)`, `timer.every(s, fn)`, `cron("0 7 * * 1-5", fn)`
   - `state.get/put(key, value)` — small persistent KV for scripts
   - **HTTP requests** (user request: call an Alexa skill URL that sounds the
@@ -830,7 +890,7 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       per-script rate limit (default 10/min); one TLS connection at a time
       (~40 KB internal RAM while it runs — measure in Phase 7)
   - **Secrets**: `secret("alexa_alarm_url")` reads a value stored under
-    System → Secrets (write-only in the UI, kept in NVS, never shown in script
+    Settings → Secrets (write-only in the UI, kept in NVS, never shown in script
     text or logs). URLs with tokens belong there, not pasted into scripts;
     `log()` masks secret values if a script prints one
   - `log(...)` → UI log stream
@@ -841,7 +901,7 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       **active** buzzers (on/off), non-blocking, driven by a timer not the script
     - `gpio.tone(pin, hz, ms)` for **passive** buzzers (LEDC PWM)
 - [ ] GPIO safety:
-  - only pins enabled in the UI (System → GPIO: name, direction) are usable;
+  - only pins enabled in the UI (Settings → GPIO: name, direction) are usable;
     scripts may refer to them by name (`gpio.write("buzzer", 1)`)
   - pins that are never allowed: SPI flash / PSRAM bus, USB D−/D+, UART0 console
     (GPIO 11/12), strapping pins, 32 kHz crystal pins. Exact list from the C5
@@ -865,55 +925,70 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       live log, last error
 - [ ] Scripts persisted in LittleFS (`/storage/scripts/*.lua`), started at boot
       after the device registry is loaded
-- [ ] Built-in examples (motion → light with timeout; sunset-ish schedule)
+- [ ] Built-in examples (door opens → buzzer + Alexa URL with `retry_for`; weekday-morning
+      `cron` that logs which doors are still open)
 
 ### Phase 6 — Home Assistant mode (ESPHome native API)
+**Two modes, not either/or (user decision 2026-11-07).** With the integration on, the
+hub always speaks to Home Assistant; what it shows depends on whether any Lua script
+is enabled:
+- **Devices mode** — setting on, **no script enabled**: every Zigbee device appears
+  in HA as its own ESPHome sub-device of the hub (HA is the brain)
+- **Smart-device mode** — setting on, **scripts enabled**: the hub appears in HA as
+  **one smarter device** (the hub is the brain); the Zigbee devices aren't exposed
+  individually
+
 - [ ] **Setting** "Home Assistant integration", **off by default**, in the UI
-      (System page) and as `flash.sh --ha` at provisioning. Off → the API server
+      (Settings) and as `flash.sh --ha` at provisioning. Off → the API server
       never starts, port 6053 closed, nothing advertised
-- [ ] **Rule** when the setting is on: API server runs iff the number of
-      *enabled* scripts is 0. Disabled scripts don't count, so "disable all" hands
-      control to HA without deleting anything. Evaluated at boot, on every script
-      enable/disable/delete, and when the setting changes
-- [ ] Turning the setting on with scripts enabled: allowed, UI shows
-      "HA integration waiting: N scripts enabled"
-- [ ] Switching modes from the UI:
-  - enabling the first script → confirm dialog ("Home Assistant will lose access
-    to N devices"), then close API clients (each client task closes its own
-    socket — lesson 8), stop the server, withdraw the mDNS service
-  - disabling the last script → start the server, advertise again; HA reconnects
-    on its own
-  - entity keys are derived from IEEE address + attribute, so HA entity IDs and
-    history are identical every time the hub comes back into HA mode
+- [ ] **Mode rule** when the setting is on: devices mode iff the number of *enabled*
+      scripts is 0, else smart-device mode. Disabled scripts don't count, so
+      "disable all" hands HA the individual devices without deleting anything.
+      Evaluated at boot, on every script enable/disable/delete, and when the setting
+      changes
+- [ ] Switching modes: the API server keeps running; the entity set changes, so the
+      hub closes its API clients (each client task closes its own socket — lesson 8)
+      and HA reconnects and lists the new entities by itself. Enabling the first
+      script asks first ("Home Assistant will see the hub as one device instead of
+      N devices"). Entity keys are derived from IEEE address + attribute (devices
+      mode) and script name + entity name (smart-device mode), so HA entity IDs and
+      history are identical every time a mode comes back
+- [ ] **Smart-device mode entities (user decision 2026-11-07)**: the gateway
+      entities below; one switch per script (enable/disable);
+      entities a script publishes through a small Lua API (e.g. `ha.sensor(name,
+      value)`, `ha.binary(name, on)`, `ha.event(name)`), so a script can expose
+      "alarm armed", "doors open: 2", "alarm triggered" instead of raw devices
 - [ ] ESPHome native API on TCP 6053, **Noise encryption mandatory** (no plaintext).
       Key generated by the board the first time the setting is turned on (or by
       `flash.sh --ha`, stored in `.esp/secrets/` and written to `prov`); shown
       in the UI for pasting into HA, regenerable
 - [ ] mDNS `_esphomelib._tcp` so HA discovers the hub automatically on the LAN.
       Over the tailnet (HA elsewhere) mDNS doesn't cross: add it in HA by
-      MagicDNS name, `zigbee-hub.<tailnet>.ts.net:6053`
-- [ ] **Sub-devices** (HA/ESPHome 2025.7+): hub = main device, each Zigbee device
-      = sub-device with its own name/area/manufacturer/model from the interview.
-      `device_id` field numbers per entity type are in the reference repo's
-      CLAUDE.md ("Protobuf device_id Field Numbers") — verify against the current
-      `api.proto` before relying on them
-- [ ] Capability → entity mapping (same capabilities as the UI uses):
+      MagicDNS name, `zigbee-hub.<tailnet>.ts.net:6053`. In tailnet-only access mode
+      the API accepts only tailnet connections (same check as the web server) and
+      nothing is advertised
+- [ ] **Sub-devices** (devices mode; HA/ESPHome 2025.7+): hub = main device, each
+      Zigbee device = sub-device with its own name/area/manufacturer/model from the
+      interview. `device_id` field numbers per entity type are in the reference
+      repo's CLAUDE.md ("Protobuf device_id Field Numbers") — verify against the
+      current `api.proto` before relying on them
+- [ ] Capability → entity mapping (devices mode; same capabilities as the UI uses):
       sensors → sensor with device_class, IAS zone → binary_sensor,
-      battery/LQI/last seen → diagnostic entities
-- [ ] Commands from HA go through the same device command path as Lua
-      (one path, two callers)
-- [ ] Gateway entities: permit-join button (pairing works from HA too), Zigbee
-      channel, device count, Wi-Fi RSSI, uptime
+      battery/LQI/last seen → diagnostic entities. Read-only: the hub doesn't command
+      Zigbee devices (no `zb.set`, user decision 2026-11-07)
+- [ ] Gateway entities (both modes): permit-join button (pairing works from HA too),
+      Zigbee channel, device count, Wi-Fi RSSI, uptime
 - [ ] Wire-format safety: every length off the socket bounded before use
       (reference had a pre-auth overflow on the hello frame — lesson 9)
 - [ ] Entity table in PSRAM (reference: 54 KB, moving it freed half the internal heap)
-- [ ] The web UI keeps working in HA mode (devices, enrollment, network, system);
+- [ ] The web UI keeps working in both modes (devices, enrollment, network, status);
       the Automations page shows which mode is active and why
 - [ ] When the setting is off, the ESPHome API code costs no runtime RAM (server
-      task and entity table only allocated when the mode activates)
-- [ ] Verified: HA discovers the hub, adopts with the key, shows each paired
-      device as a sub-device; toggling a light from HA works; enabling a script
-      makes HA show them unavailable; disabling it brings them back with history intact
+      task and entity table only allocated when it's on)
+- [ ] Verified: HA discovers the hub, adopts with the key, shows each paired device as
+      a sub-device (no script enabled); enabling a script turns it into one device
+      with the smart-device entities; disabling all scripts brings the individual
+      devices back with history intact
 
 ### Phase 7 — Hardening
 - [ ] Soak test 24 h+ (reference repo's worst bugs needed 9 h of uptime)
@@ -985,8 +1060,9 @@ All measured there on the same chip; re-verify, don't assume.
   don't need. It's our fork once copied into `components/tailscale/`.
 - **"Scanning" = discovery, not QR.** Success criterion: *put the battery in a
   random cheap reed sensor and the hub finds it.* No camera, no install codes.
-- **HA mode trigger** (opt-in setting on) = zero *enabled* scripts; disabled
-  scripts don't count.
+- **HA modes** (opt-in setting on; updated 2026-11-07): zero *enabled* scripts →
+  every Zigbee device as its own HA device; scripts enabled → the hub as one smarter
+  HA device. Disabled scripts don't count.
 - **Lua** for automations (see Phase 5).
 - **Router**: test on DFS channel 52 first; move to 36–48 only if measurements are bad.
 - **Tailnet-only access**: once Tailscale works, an option to drop the password

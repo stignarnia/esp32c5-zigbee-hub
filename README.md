@@ -24,9 +24,9 @@ broker, no Raspberry Pi.
   humidity sensors. Mains-powered Zigbee devices (plugs, bulbs, other routers) are
   untested and not what this hub is built for.
 - **Optionally, native Home Assistant devices.** Turn on the Home Assistant
-  integration, and whenever no local automation is enabled, every Zigbee device
-  appears in Home Assistant as a native ESPHome device. No MQTT, no ZHA, no
-  zigbee2mqtt.
+  integration: with no local automation enabled, every Zigbee device appears in Home
+  Assistant as a native ESPHome device; with automations enabled, the hub appears as
+  one smarter device. No MQTT, no ZHA, no zigbee2mqtt.
 
 ## Design priority
 
@@ -203,7 +203,6 @@ end)
 | | |
 |---|---|
 | `zb.on(device, attribute, fn)` | call `fn(value, old_value)` when an attribute changes |
-| `zb.set(device, table)` | send a command to a device that accepts one |
 | `zb.get(device, attribute)` | current value |
 | `timer.after(s, fn)` / `timer.every(s, fn)` | one-shot / repeating timers, return a handle with `:cancel()` |
 | `cron(expr, fn)` | standard 5-field cron, local time |
@@ -308,17 +307,20 @@ as its own device, with its name, area, manufacturer and model:
 The hub itself adds a **Permit join** button, so you can pair new devices from
 Home Assistant too.
 
-**One brain at a time.** The integration is active only while **no automation
-script is enabled**:
+**Two modes, depending on your automations:**
 
-- Enable a script, and the hub becomes the brain: it confirms first, then
-  disconnects Home Assistant, where the devices show as unavailable.
-- Disable all scripts, and Home Assistant reconnects by itself. Entity IDs and
-  history are unchanged, because they're derived from each device's hardware
-  address.
+- **No script enabled**: Home Assistant is the brain and sees every Zigbee device
+  on its own, as described above.
+- **Scripts enabled**: the hub is the brain and appears in Home Assistant as **one
+  smarter device**: its own entities (pairing, Zigbee channel, signal, uptime) and
+  the state of your automations, instead of one device per sensor. Enabling the
+  first script asks first.
 
-Disabled scripts don't count, so you can switch back and forth without deleting
-anything. The Automations page always shows which mode is active.
+Switching is automatic: Home Assistant reconnects by itself and picks up the new
+set. Entity IDs and history are unchanged when a mode comes back, because they're
+derived from each device's hardware address (or the script's name). Disabled
+scripts don't count, so you can switch without deleting anything. The Automations
+page always shows which mode is active.
 
 The connection is encrypted (ESPHome's Noise protocol, no plaintext fallback). If
 Home Assistant runs somewhere else on your tailnet, add the hub manually as
@@ -417,7 +419,7 @@ USB flashing always works either way.
  ─────────────────────────────────────────────────────────────
  Zigbee        │ Device registry │ Automation     │ Tailscale
  coordinator   │ + persistence   │ engine (Lua)   │ WireGuard
- (2.4 GHz)     │ (LittleFS)      │  ── or ──      │ in lwIP
+ (2.4 GHz)     │ (LittleFS)      │  ── and ──     │ in lwIP
                │                 │ ESPHome API    │
                │                 │ (HA, optional) │
  ─────────────────────────────────────────────────────────────
@@ -494,10 +496,10 @@ Sleepy battery devices may need a button press to wake up during the interview.
 **Script stopped.** Its last error and line number are on its card in
 Automations. Fix and save; it restarts.
 
-**Home Assistant shows the devices as unavailable.** A script is enabled, so the
-hub is the brain. Disable all scripts on the Automations page and Home Assistant
-reconnects. If it's still unavailable, check that the integration is on under
-Settings.
+**Home Assistant shows one hub device instead of my sensors.** A script is
+enabled, so the hub is the brain and Home Assistant sees the hub as one device.
+Disable all scripts on the Automations page to get the individual devices back. If
+nothing shows up at all, check that the integration is on under Settings.
 
 **UI not reachable over Tailscale.** The Tailscale page shows the connection
 state. The auth key must be valid and the device approved in the admin console if

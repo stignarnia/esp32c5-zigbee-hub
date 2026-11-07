@@ -333,7 +333,7 @@ runs). We had no 802.15.4 yet. Re-run with Zigbee up (Phase 3, 2026-11-06):
 | reports lost under Wi-Fi load | not measured | 0 of 32 (14 idle + 18 loaded) |
 | ping while associated | not reported | 19 ms avg, no power save (was ~60 ms with modem sleep, which turned out unnecessary) vs 7–10 ms without Zigbee |
 
-### Phase 1b — Buzzer & GPIO hardware validation (user request)
+### Phase 1b — Buzzer & GPIO hardware validation (user request; done 2026-11-07)
 The user's buzzers: **RUNCCI-YUN "DC 3V active piezo, continuous sound"**, 20 pcs
 (Amazon B0FMXS7H4N; specs hidden behind the cart, no datasheet found). "Piezo"
 in such listings is often wrong — they may be 12 mm electromagnetic types
@@ -900,6 +900,15 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
     - `gpio.beep(pin, ms)` / `gpio.beep(pin, {on=100, off=100, times=3})` for
       **active** buzzers (on/off), non-blocking, driven by a timer not the script
     - `gpio.tone(pin, hz, ms)` for **passive** buzzers (LEDC PWM)
+    - **`gpio.pattern(pins, steps, {rounds=N})`** (user request 2026-11-07) for several
+      buzzers in step: `steps` = `{{mask, ms}, …}`, bit *i* of `mask` = `pins[i]` on.
+      Played by C on a precise timer (30–40 ms steps would jitter if Lua timed them),
+      non-blocking; `gpio.stop(pins)` ends it. The alarm from Phase 1b is the built-in
+      example. A buzzer's ground may be a second pin driven low (Settings → GPIO:
+      "ground for …"). Defaults from Phase 1b: drive strength 3, 2 s cap per pulse
+  - **Network state** (user request 2026-11-07): `net.online()` (Wi-Fi associated with
+    an IP, now) and `net.on("up"|"down", fn)`, so a script can change what it does
+    when the uplink is gone (e.g. a longer local alarm when Alexa can't be reached)
 - [ ] GPIO safety:
   - only pins enabled in the UI (Settings → GPIO: name, direction) are usable;
     scripts may refer to them by name (`gpio.write("buzzer", 1)`)
@@ -927,6 +936,22 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       after the device registry is loaded
 - [ ] Built-in examples (door opens → buzzer + Alexa URL with `retry_for`; weekday-morning
       `cron` that logs which doors are still open)
+
+### Phase 5b — The user's own alarm script (user request 2026-11-07)
+Built on Phase 5, before Home Assistant: it runs entirely on the hub, so it needs
+nothing from Phase 6.
+- [ ] Door sensors (the two contact sensors) → the Phase 1b alarm on both buzzers
+      (`gpio.pattern`) and the Alexa routine URL (`secret(...)`, `retry_for`)
+- [ ] Decide when writing it (user, 2026-11-07): buzzer always + Alexa as an addition,
+      or buzzer only when Alexa can't be reached. What the hub can know: network down /
+      timeout / error = certainly not delivered; HTTP 200 = Amazon's service accepted
+      it, **not** that an Echo played (no public API reports that). Option to research:
+      the routine's last step switches a smart-home device the hub can see, confirming
+      the routine ran (still not that sound came out — a muted Echo completes it too)
+- [ ] Arm / disarm (how: decided with the script — e.g. a schedule, or a state
+      the UI sets)
+- [ ] Verified on hardware: door opens → buzzers within a second, Alexa plays; same
+      with the router unplugged (buzzers immediately, Alexa once it's back)
 
 ### Phase 6 — Home Assistant mode (ESPHome native API)
 **Two modes, not either/or (user decision 2026-11-07).** With the integration on, the

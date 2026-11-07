@@ -219,7 +219,8 @@ The Automations page has everything scripts need, top to bottom:
   delete. With the Home Assistant integration on, it also shows which mode is active.
 - **Pins**: every enabled GPIO, its level, and the script that owns it.
 - **Editor**: syntax highlighting, search, bracket matching, and completion of the
-  hub's own functions (CodeMirror). Built-in examples to start from. If a script
+  hub's own functions (CodeMirror). Built-in examples to start from (the files in
+  [`examples/`](examples/), offered in the editor; none is installed until you save it). If a script
   fails to load (a syntax error, a pin another script owns), the error is shown
   right there and its line is selected.
 - **Secrets** and **GPIO** settings (below).
@@ -560,7 +561,10 @@ idf.py -p "$ESPPORT" flash monitor
 Delete `.esp/` and the toolchain is gone without a trace.
 
 The web UI (`components/web/ui/`) is plain HTML, CSS and JavaScript with no build
-step; CMake gzips it into the firmware. The one exception is the script editor,
+step; CMake gzips it into the firmware. The editor's example scripts are the
+`examples/*.lua` files: at build time `components/web/gen_app_js.py` puts them into
+`app.js`, named after the file (`door-alarm.lua` → "Door alarm"). Add or edit a file
+there and rebuild; `template.lua` is what a new script starts from. The one exception is the script editor,
 `cm.js`: a prebuilt CodeMirror bundle, committed. To change or update it, edit
 `tools/codemirror/` (pinned versions in `package.json`) and run
 `tools/codemirror/build.sh`; it needs Node and keeps npm's files in `.esp/`.

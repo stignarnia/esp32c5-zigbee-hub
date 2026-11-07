@@ -247,63 +247,9 @@ pages.devices = {
 // Automations ----------------------------------------------------------------------------
 // Lua scripts stored on the hub: list with live status, an editor (syntax-checked on save),
 // the script log, and the state of the GPIO pins scripts use.
-const EXAMPLES = {
-  'Door alarm': `-- Door alarm: when a door opens, sound both buzzers and call an Alexa routine.
--- Automations -> GPIO: "buzzer1" and "buzzer2" as outputs (and a "ground" pin if a
--- buzzer's second leg sits on a GPIO). Automations -> Secrets: "alexa_alarm_url".
-local DOORS = { "Front door", "Back door" }   -- names from the Devices page
-gpio.claim("buzzer1", "buzzer2")   -- pins used later, in the handler: claimed now, at Save
-
--- 2 s per round: buzzers alternating, both stuttering, both on (they beat), pause
-local ALARM = {}
-for i = 1, 10 do ALARM[#ALARM + 1] = {1, 40}; ALARM[#ALARM + 1] = {2, 40} end
-for i = 1, 10 do ALARM[#ALARM + 1] = {3, 30}; ALARM[#ALARM + 1] = {0, 30} end
-ALARM[#ALARM + 1] = {3, 500}; ALARM[#ALARM + 1] = {0, 100}
-
-local function alarm(door)
-  log(door .. " opened")
-  gpio.pattern({"buzzer1", "buzzer2"}, ALARM, {rounds = 5})   -- starts now, never waits
-  local url = secret("alexa_alarm_url")
-  if url then
-    -- queued; if the network is down it is sent once it's back (for up to 10 min)
-    http.get(url, {retry_for = 600, on_done = function(status, body)
-      if status > 0 then log("Alexa: HTTP " .. status) else log("Alexa not reached: " .. body) end
-    end})
-  end
-end
-
-for _, door in ipairs(DOORS) do
-  zb.on(door, "open", function(open) if open then alarm(door) end end)
-end
-`,
-  'Morning check': `-- Weekday mornings at 7:00: log which doors are still open.
--- cron needs the clock (from the network) and the time zone (Settings -> Time zone).
-cron("0 7 * * 1-5", function()
-  local open = {}
-  for _, d in ipairs(zb.devices()) do
-    if d.kind == "contact" and zb.get(d.name, "open") then open[#open + 1] = d.name end
-  end
-  if #open > 0 then log("still open: " .. table.concat(open, ", ")) else log("all doors closed") end
-end)
-`,
-  'Template': `-- zb.on(device, attr, function(value, device, attr) end)   attr: "open", "motion",
---   "water", "smoke", "alarm", "tamper", "battery", "temperature", "humidity",
---   "occupied", "available"; device "*" / attr "*" = any
--- zb.get(device, attr)  zb.devices()
--- timer.after(s, fn) / timer.every(s, fn) -> id; timer.cancel(id)
---   (a global function's name instead of fn survives a restart)
--- cron("min hour day month weekday", fn)
--- state.get(key) / state.put(key, value)   kept on flash
--- secret(name)   http.get(url, opts) / http.post(url, body, opts) / http.request{...}
---   opts: headers, timeout, retry_for, on_done = function(status, body) end
--- gpio.write/read/on/beep/pattern/stop/tone   (pins from Automations -> GPIO)
---   gpio.claim(pin, ...) at the top for pins only used in handlers: a pin belongs
---   to one script, and claims happen only while the script loads (so at Save)
--- net.online()  net.on("up"|"down", fn)   json.encode/decode   log(...)
-
-log("hello from", "the hub")
-`,
-};
+// The example scripts: examples/*.lua at the top of the repo, put here at build time by
+// components/web/gen_app_js.py (it replaces the marker). Offered in the editor only.
+const EXAMPLES = /*@EXAMPLES@*/ {};
 
 // Script editor ------------------------------------------------------------------------
 // Both editors give the same handle: get(), set(text), selectLine(n), focus().

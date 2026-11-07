@@ -167,6 +167,8 @@ components/
   lua/           Lua 5.5.1 source (MIT), vendored unmodified
   tailscale/     microlink (MIT) ported to IDF v6, wrapped
   esphome_api/   (Phase 6, not yet) ESPHome native API server (Noise), HA mode
+examples/        example Lua scripts offered in the editor (*.lua; put into app.js at
+                 build time by components/web/gen_app_js.py; template.lua = new-script text)
 tools/
   mkprov.py      provisioning image for flash.sh
   gpio_probe/    Phase 1b buzzer/GPIO probe firmware
@@ -859,6 +861,31 @@ Offered in the UI (Settings → Tailscale) once Tailscale is connected. Code:
     without password, upload 22.8 s over the tunnel, confirmed; mode kept after reboot
   - `flash.sh --prov-only --lan-access`: mode off, LAN + password and mDNS back
 
+### Phase 4b — Subnet router for a remote Home Assistant (not doing, user decision 2026-11-07)
+Asked: could the hub advertise the home LAN on the tailnet so a remote HA finds devices
+like Ariston and hOn? **Not needed**: both are cloud integrations, so a remote HA reaches
+them already. hOn = pyhOn → Haier's hOn cloud. Ariston NET water heaters/boilers = Ariston
+cloud (HACS integration). The only local Ariston path is Ariston *air conditioners* via HA's
+Midea integration (HA 2026.8, local polling); revisit only if one of those shows up.
+The user's Ariston is a water heater (cloud only). Typing device IPs by hand in HA would be
+fine for the user, so missing discovery is no blocker if a local-only device comes along.
+
+Findings, in case it comes back:
+- **Feasible**: microlink sends `Hostinfo` (4 places in `ml_coord.c`), where
+  `RoutableIPs` advertises routes (verify against tailscaled before relying on it). lwIP has
+  `CONFIG_LWIP_IP_FORWARD` + `CONFIG_LWIP_IPV4_NAPT` with `ip_napt_enable_netif()` on the
+  WireGuard netif; that netif is a /10, so replies route back; wireguard-lwip only checks a
+  peer's *source* address
+- **Doesn't give discovery**: mDNS/SSDP/broadcast don't cross Tailscale, so the remote HA
+  could reach devices by IP but never auto-discover them
+- To handle if built: route approval in the admin console (or `autoApprovers`); HA
+  Tailscale add-on needs `accept_routes: true` (off by default); prefer per-device /32
+  routes (least access, and a /24 clashes if the remote LAN uses the same subnet); drop
+  packets arriving on Wi-Fi that aren't for the hub, or LAN hosts could reach the tailnet
+  through it; esp-lwip NAPT has no MSS clamping (WireGuard MTU 1280); NAPT table defaults
+  to 512 entries (~16 KB); forwarding costs CPU on the lwIP/WireGuard path, so Zigbee
+  first: rate-limit
+
 ### Phase 5 — Automation (Lua 5.5) (built and mostly verified 2026-11-07; door trigger and router-off test pending)
 
 **Tests still to do** (user: "tests are last"), in one place:
@@ -995,7 +1022,9 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
 - [x] Scripts persisted in LittleFS (`/storage/scripts/*.lua`), started at boot
       after the device registry is loaded (before Wi-Fi: `net.online()` false at start,
       then `net up`)
-- [~] Built-in examples (in the UI, not run) (door opens → buzzer + Alexa URL with `retry_for`; weekday-morning
+- [~] Built-in examples (not run yet): `examples/*.lua` in the repo (since 2026-11-07, user
+      request: a clear location), compiled into `app.js` at build time, offered in the editor;
+      none is stored on the hub until saved (door opens → buzzer + Alexa URL with `retry_for`; weekday-morning
       `cron` that logs which doors are still open)
 
 #### Phase 5 findings (2026-11-07)

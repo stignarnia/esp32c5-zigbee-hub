@@ -50,8 +50,8 @@ esp_err_t prov_load(prov_t *out)
     read_str(h, "psk2", out->psk2, sizeof(out->psk2));
     read_str(h, "hostname", out->hostname, sizeof(out->hostname));
     read_str(h, "country", out->country, sizeof(out->country));
+    read_str(h, "lanreset", out->lan_reset, sizeof(out->lan_reset));
     read_str(h, "admin_hash", out->admin_hash, sizeof(out->admin_hash));
-    read_str(h, "ts_authkey", out->ts_authkey, sizeof(out->ts_authkey));
     nvs_close(h);
 
     out->has_wifi = out->ssid[0] != '\0';
@@ -59,9 +59,9 @@ esp_err_t prov_load(prov_t *out)
         strcpy(out->hostname, "zigbee-hub");
     }
 
-    ESP_LOGI(TAG, "ssid='%s' psk=%s backup='%s' hostname='%s' country='%s' admin=%s tailscale_key=%s",
+    ESP_LOGI(TAG, "ssid='%s' psk=%s backup='%s' hostname='%s' country='%s' admin=%s",
              out->ssid, out->psk[0] ? "set" : "empty", out->ssid2, out->hostname,
              out->country[0] ? out->country : "default",
-             out->admin_hash[0] ? "set" : "missing", out->ts_authkey[0] ? "set" : "none");
+             out->admin_hash[0] ? "set" : "missing");
     return ESP_OK;
 }

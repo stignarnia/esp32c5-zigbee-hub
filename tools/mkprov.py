@@ -4,8 +4,8 @@ Secrets come from environment variables (never argv, which `ps` shows):
   PROV_SSID, PROV_PSK            primary Wi-Fi (required)
   PROV_SSID2, PROV_PSK2          backup Wi-Fi (optional)
   PROV_HOSTNAME, PROV_COUNTRY    optional
+  PROV_LANRESET                  optional nonce: turns tailnet-only access off once
   PROV_ADMIN_PW                  admin password (stored only as a PBKDF2 hash)
-  PROV_TS_AUTHKEY                Tailscale auth key (optional)
 
 Usage: python -I mkprov.py <idf_path> <out.bin> <size>
 """
@@ -29,7 +29,7 @@ FIELDS = [
     ("psk2", "PROV_PSK2", 64),
     ("hostname", "PROV_HOSTNAME", 32),
     ("country", "PROV_COUNTRY", 2),
-    ("ts_authkey", "PROV_TS_AUTHKEY", 127),
+    ("lanreset", "PROV_LANRESET", 32),
 ]
 
 

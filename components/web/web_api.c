@@ -17,7 +17,9 @@
 #include "esp_timer.h"
 #include "hublog.h"
 #include "hubsys.h"
+#include "tailscale.h"
 #include "web_internal.h"
+#include "access.h"
 #include "wifi5g.h"
 
 static const char *TAG = "web.api";
@@ -55,6 +57,28 @@ static const char *trial_str(uint8_t t)
 }
 
 // ---- status (also pushed over the WebSocket every 2 s) ------------------------------
+
+static void add_ts_status(cJSON *o, const ts_status_t *t)
+{
+    char ip[16] = "";
+    if (t->ip) {
+        snprintf(ip, sizeof(ip), "%u.%u.%u.%u", (unsigned)(t->ip >> 24), (unsigned)(t->ip >> 16 & 0xff),
+                 (unsigned)(t->ip >> 8 & 0xff), (unsigned)(t->ip & 0xff));
+    }
+    cJSON_AddBoolToObject(o, "enabled", t->enabled);
+    cJSON_AddBoolToObject(o, "suspended", t->suspended);
+    cJSON_AddBoolToObject(o, "registered", t->registered);
+    cJSON_AddBoolToObject(o, "key_pending", t->key_pending);
+    cJSON_AddStringToObject(o, "state", t->state);
+    cJSON_AddStringToObject(o, "error", t->error);
+    cJSON_AddStringToObject(o, "name", t->name);
+    cJSON_AddStringToObject(o, "ip", ip);
+    cJSON_AddNumberToObject(o, "key_expiry", (double)t->key_expiry);
+    cJSON_AddBoolToObject(o, "key_expired", t->key_expired);
+    cJSON_AddNumberToObject(o, "connected_ms", (double)t->connected_ms);
+    cJSON_AddNumberToObject(o, "peers", t->peer_count);
+    cJSON_AddStringToObject(o, "home_derp", t->home_derp);
+}
 
 char *api_status_json(void)
 {
@@ -121,6 +145,11 @@ char *api_status_json(void)
     snprintf(macs, sizeof(macs), MACSTR, MAC2STR(mac));
     cJSON_AddStringToObject(wi, "mac", macs);
 
+    ts_status_t t;
+    ts_get_status(&t);
+    cJSON *ts = cJSON_AddObjectToObject(o, "tailscale");
+    add_ts_status(ts, &t);
+
     char *s = cJSON_PrintUnformatted(o);
     cJSON_Delete(o);
     return s;
@@ -141,7 +170,7 @@ static esp_err_t h_session(httpd_req_t *req)
 {
     char buf[96];
     snprintf(buf, sizeof(buf), "{\"authed\":%s,\"hostname\":\"%s\"}",
-             auth_check_request(req) ? "true" : "false", web_hostname());
+             (access_passwordless(req) || auth_check_request(req)) ? "true" : "false", web_hostname());
     return web_send_json(req, "200 OK", buf);
 }
 
@@ -151,6 +180,8 @@ static esp_err_t h_login(httpd_req_t *req)
     if (httpd_req_get_hdr_value_str(req, "X-Hub", v, sizeof(v)) != ESP_OK) {
         return web_send_error(req, "403 Forbidden", "missing X-Hub header");
     }
+    // Tailnet-only mode: being on the tailnet is the login (flash.sh --ota still posts one).
+    if (access_passwordless(req)) return web_send_json(req, "200 OK", "{\"ok\":true}");
     char body[256];
     if (web_read_body(req, body, sizeof(body)) != ESP_OK) {
         return web_send_error(req, "400 Bad Request", "bad body");
@@ -293,6 +324,162 @@ static esp_err_t h_wifi_reset(httpd_req_t *req)
 {
     if (!web_guard(req)) return ESP_OK;
     return trial_response(req, wifi5g_reset_to_defaults(WIFI_TRIAL_S));
+}
+
+// ---- Tailscale ----------------------------------------------------------------------------------
+
+static esp_err_t h_ts_get(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    ts_status_t t;
+    ts_get_status(&t);
+    cJSON *o = cJSON_CreateObject();
+    add_ts_status(o, &t);
+    static ts_peer_t peers[TS_MAX_PEERS];  // httpd task only
+    int n = ts_get_peers(peers, TS_MAX_PEERS);
+    cJSON *arr = cJSON_AddArrayToObject(o, "peer_list");
+    for (int i = 0; i < n; i++) {
+        cJSON *p = cJSON_CreateObject();
+        char ip[16];
+        uint32_t a = peers[i].ip;
+        snprintf(ip, sizeof(ip), "%u.%u.%u.%u", (unsigned)(a >> 24), (unsigned)(a >> 16 & 0xff),
+                 (unsigned)(a >> 8 & 0xff), (unsigned)(a & 0xff));
+        cJSON_AddStringToObject(p, "name", peers[i].name);
+        cJSON_AddStringToObject(p, "ip", ip);
+        if (peers[i].online < 0) cJSON_AddNullToObject(p, "online");
+        else cJSON_AddBoolToObject(p, "online", peers[i].online);
+        cJSON_AddBoolToObject(p, "direct", peers[i].direct);
+        cJSON_AddStringToObject(p, "derp", peers[i].derp);
+        cJSON_AddItemToArray(arr, p);
+    }
+    char *s = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    esp_err_t r = web_send_json(req, "200 OK", s ? s : "{}");
+    free(s);
+    return r;
+}
+
+// {"key":"tskey-auth-..."} — write-only: the key is never sent back.
+static esp_err_t h_ts_key(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    char body[256];
+    if (web_read_body(req, body, sizeof(body)) != ESP_OK) return web_send_error(req, "400 Bad Request", "bad body");
+    cJSON *j = cJSON_Parse(body);
+    memset(body, 0, sizeof(body));
+    const cJSON *k = cJSON_GetObjectItem(j, "key");
+    esp_err_t err = cJSON_IsString(k) ? ts_set_auth_key(k->valuestring) : ESP_ERR_INVALID_ARG;
+    if (cJSON_IsString(k)) memset(k->valuestring, 0, strlen(k->valuestring));
+    cJSON_Delete(j);
+    if (err == ESP_ERR_INVALID_ARG) return web_send_error(req, "400 Bad Request", "not a Tailscale auth key (tskey-auth-…)");
+    if (err == ESP_ERR_INVALID_STATE) return web_send_error(req, "409 Conflict", "already logged in: log out first");
+    if (err != ESP_OK) return web_send_error(req, "500 Internal Server Error", esp_err_to_name(err));
+    return web_send_json(req, "200 OK", "{\"ok\":true}");
+}
+
+// Turning off or logging out a running node is applied by a restart (see ts.c).
+static esp_err_t ts_reply(httpd_req_t *req, esp_err_t err, bool reboot, const char *why)
+{
+    if (err != ESP_OK) return web_send_error(req, "500 Internal Server Error", esp_err_to_name(err));
+    web_send_json(req, "200 OK", reboot ? "{\"ok\":true,\"restarting\":true}" : "{\"ok\":true}");
+    if (reboot) hubsys_reboot(why, 800);  // >= 800 ms: let the reply reach the browser
+    return ESP_OK;
+}
+
+// {"on":true|false}
+static esp_err_t h_ts_enabled(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    char body[64];
+    if (web_read_body(req, body, sizeof(body)) != ESP_OK) return web_send_error(req, "400 Bad Request", "bad body");
+    cJSON *j = cJSON_Parse(body);
+    const cJSON *on = cJSON_GetObjectItem(j, "on");
+    if (!cJSON_IsBool(on)) {
+        cJSON_Delete(j);
+        return web_send_error(req, "400 Bad Request", "expected {\"on\":true|false}");
+    }
+    bool reboot = false;
+    esp_err_t err = ts_set_enabled(cJSON_IsTrue(on), &reboot);
+    cJSON_Delete(j);
+    return ts_reply(req, err, reboot, "Tailscale turned off from the web UI");
+}
+
+static esp_err_t h_ts_logout(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    bool reboot = false;
+    esp_err_t err = ts_logout(&reboot);
+    return ts_reply(req, err, reboot, "Tailscale logged out from the web UI");
+}
+
+// Diagnostics: microlink's per-packet DEBUG lines on the serial console for 10 minutes.
+static esp_err_t h_ts_debug(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    ts_debug_logs(10 * 60);
+    return web_send_json(req, "200 OK", "{\"debug_s\":600}");
+}
+
+// ---- access mode ("tailnet only, no password") -------------------------------------------
+
+static esp_err_t access_reply(httpd_req_t *req)
+{
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "{\"tailnet_only\":%s,\"lan_open\":%s,\"lan_window_s\":%d,\"via_tailnet\":%s,"
+             "\"tailscale_up\":%s,\"forged_dropped\":%lu}",
+             access_tailnet_only_setting() ? "true" : "false",
+             access_lan_open() ? "true" : "false", access_lan_window_s(),
+             access_fd_via_tailnet(httpd_req_to_sockfd(req)) ? "true" : "false",
+             ts_tailnet_ip() ? "true" : "false", (unsigned long)ts_guard_drops());
+    return web_send_json(req, "200 OK", buf);
+}
+
+static esp_err_t h_access_get(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    return access_reply(req);
+}
+
+// {"tailnet_only":true,"password":"…"} — turning it on needs the password once more,
+// a working Tailscale connection, and must itself come over Tailscale: proof that the
+// tailnet path works before the LAN is cut off. Turning it off needs only the usual
+// login (or the tailnet, in this mode).
+static esp_err_t h_access_set(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    char body[256];
+    if (web_read_body(req, body, sizeof(body)) != ESP_OK) return web_send_error(req, "400 Bad Request", "bad body");
+    cJSON *j = cJSON_Parse(body);
+    memset(body, 0, sizeof(body));
+    const cJSON *on = cJSON_GetObjectItem(j, "tailnet_only");
+    const cJSON *pw = cJSON_GetObjectItem(j, "password");
+    if (!cJSON_IsBool(on)) {
+        cJSON_Delete(j);
+        return web_send_error(req, "400 Bad Request", "tailnet_only must be true or false");
+    }
+    if (cJSON_IsTrue(on)) {
+        if (!ts_tailnet_ip()) {
+            cJSON_Delete(j);
+            return web_send_error(req, "409 Conflict", "Tailscale isn't connected");
+        }
+        if (!access_fd_via_tailnet(httpd_req_to_sockfd(req))) {
+            cJSON_Delete(j);
+            return web_send_error(req, "409 Conflict",
+                                  "open the UI over Tailscale (http://<hub>/ on the tailnet) to switch this on");
+        }
+        int retry = 0;
+        esp_err_t err = cJSON_IsString(pw) ? auth_verify(pw->valuestring, &retry) : ESP_FAIL;
+        if (cJSON_IsString(pw)) memset(pw->valuestring, 0, strlen(pw->valuestring));
+        cJSON_Delete(j);
+        if (err == ESP_ERR_INVALID_STATE) return web_send_error(req, "429 Too Many Requests", "too many attempts, wait a bit");
+        if (err != ESP_OK) return web_send_error(req, "401 Unauthorized", "wrong password");
+        access_set_tailnet_only(true);
+    } else {
+        cJSON_Delete(j);
+        access_set_tailnet_only(false);
+    }
+    return access_reply(req);
 }
 
 // ---- firmware ---------------------------------------------------------------------------------
@@ -532,6 +719,13 @@ esp_err_t api_register(httpd_handle_t server)
         {.uri = "/api/wifi/switch", .method = HTTP_POST, .handler = h_wifi_switch},
         {.uri = "/api/wifi/reset", .method = HTTP_POST, .handler = h_wifi_reset},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = h_ota},
+        {.uri = "/api/ts", .method = HTTP_GET, .handler = h_ts_get},
+        {.uri = "/api/ts/key", .method = HTTP_POST, .handler = h_ts_key},
+        {.uri = "/api/ts/enabled", .method = HTTP_POST, .handler = h_ts_enabled},
+        {.uri = "/api/ts/logout", .method = HTTP_POST, .handler = h_ts_logout},
+        {.uri = "/api/ts/debug", .method = HTTP_POST, .handler = h_ts_debug},
+        {.uri = "/api/access", .method = HTTP_GET, .handler = h_access_get},
+        {.uri = "/api/access", .method = HTTP_POST, .handler = h_access_set},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = h_reboot},
         {.uri = "/api/logs", .method = HTTP_GET, .handler = h_logs},
         {.uri = "/api/coredump", .method = HTTP_GET, .handler = h_coredump},

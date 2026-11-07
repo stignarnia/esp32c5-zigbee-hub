@@ -10,6 +10,8 @@ esp_err_t auth_init(const char *admin_hash);
 bool auth_has_password(void);
 // Returns ESP_OK and fills token_hex (65 bytes) on success;
 // ESP_ERR_INVALID_STATE when rate-limited (retry_after_s set).
+// Password check with the login lockout (3 free attempts, then 2…60 s), no session.
+esp_err_t auth_verify(const char *password, int *retry_after_s);
 esp_err_t auth_login(const char *password, char token_hex[65], int *retry_after_s);
 bool auth_check_request(httpd_req_t *req);  // valid session cookie?
 void auth_logout_request(httpd_req_t *req);

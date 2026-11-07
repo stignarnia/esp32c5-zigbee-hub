@@ -17,7 +17,9 @@
 #include "hubsys.h"
 #include "web.h"
 #include "web_internal.h"
+#include "access.h"
 #include "zb.h"
+#include "tailscale.h"
 
 static const char *TAG = "web";
 
@@ -74,7 +76,7 @@ bool web_guard(httpd_req_t *req)
             return false;
         }
     }
-    if (!auth_check_request(req)) {
+    if (!access_passwordless(req) && !auth_check_request(req)) {
         web_send_error(req, "401 Unauthorized", "login required");
         return false;
     }
@@ -141,7 +143,7 @@ static void ws_forget(int fd)
 // in the pre-handshake hook, *before* the server agrees to upgrade.
 static esp_err_t ws_pre_handshake(httpd_req_t *req)
 {
-    if (!auth_check_request(req)) {
+    if (!access_passwordless(req) && !auth_check_request(req)) {
         ESP_LOGW(TAG, "ws: rejected unauthenticated client");
         return ESP_FAIL;
     }
@@ -213,10 +215,15 @@ static void ws_push_work(void *arg)
 static void ws_push_task(void *arg)
 {
     uint32_t last_rev = UINT32_MAX, last_permit = 0;
+    bool last_any = false;
     for (int tick = 1;; tick++) {
         vTaskDelay(pdMS_TO_TICKS(100));
         bool any = false;
         for (int i = 0; i < MAX_WS; i++) any |= s_ws_fds[i] >= 0;
+        if (any != last_any) {  // the UI is open: Tailscale keeps peer paths fresh for it
+            last_any = any;
+            ts_set_ui_watching(any);
+        }
         if (!any || !s_server) {
             last_rev = UINT32_MAX;  // a new client gets a snapshot at once
             continue;
@@ -258,14 +265,16 @@ esp_err_t web_start(const web_config_t *cfg)
     cJSON_InitHooks(&hooks);
 
     ESP_ERROR_CHECK(auth_init(cfg->admin_hash));
+    access_init(cfg->lan_reset, cfg->lan_cb);
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size = 8192;           // PBKDF2 + JSON building
-    hc.max_uri_handlers = 24;
+    hc.max_uri_handlers = 32;     // 25 in use (Phase 4)
     hc.lru_purge_enable = true;     // a stuck client can't lock others out
     hc.recv_wait_timeout = 10;      // OTA uploads stream for seconds
     hc.send_wait_timeout = 10;
     hc.close_fn = on_close;
+    hc.open_fn = access_open_fn;    // tailnet-only mode: LAN connections closed at once
     hc.uri_match_fn = httpd_uri_match_wildcard;
     esp_err_t err = httpd_start(&s_server, &hc);
     if (err != ESP_OK) {
@@ -298,4 +307,9 @@ esp_err_t web_start(const web_config_t *cfg)
 bool web_is_running(void)
 {
     return s_server != NULL;
+}
+
+bool web_lan_open(void)
+{
+    return access_lan_open();
 }

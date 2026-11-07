@@ -11,6 +11,7 @@
 #include "mdns.h"
 #include "nvs_flash.h"
 #include "prov.h"
+#include "tailscale.h"
 #include "hublog.h"
 #include "hubsys.h"
 #include "web.h"
@@ -148,6 +149,18 @@ static void start_mdns(const char *hostname)
     ESP_LOGI(TAG, "mdns: %s.local", hostname);
 }
 
+// Tailnet-only access closed or re-opened the LAN side (web/access.c).
+static char s_mdns_host[33];
+static void on_lan_access(bool lan_open)
+{
+    if (lan_open) {
+        start_mdns(s_mdns_host);
+    } else {
+        mdns_free();
+        ESP_LOGI(TAG, "mdns: stopped (tailnet-only access)");
+    }
+}
+
 // A freshly updated image runs on trial: the bootloader rolls it back if it
 // reboots (crash) or isn't healthy within the deadline. Health = the Zigbee network
 // is up and the web server runs. Wi-Fi is deliberately not required: an update
@@ -244,11 +257,19 @@ void app_main(void)
         ESP_ERROR_CHECK(wifi5g_start(nets, prov.hostname, prov.country));
         wifi5g_set_reboot_gate(reboot_gate);
         memset(nets, 0, sizeof(nets));
-        start_mdns(prov.hostname);
         hublog_start_time_sync();
 
-        web_config_t wc = {.hostname = prov.hostname, .admin_hash = prov.admin_hash};
+        strlcpy(s_mdns_host, prov.hostname, sizeof(s_mdns_host));
+        web_config_t wc = {.hostname = prov.hostname, .admin_hash = prov.admin_hash,
+                           .lan_reset = prov.lan_reset, .lan_cb = on_lan_access};
         if (web_start(&wc) != ESP_OK) ESP_LOGE(TAG, "web UI failed to start");
+        // In tailnet-only mode nothing is announced on the LAN.
+        if (web_lan_open()) start_mdns(s_mdns_host);
+        else ESP_LOGI(TAG, "mdns: off (tailnet-only access)");
+
+        // Tailscale last: it waits for an IP on its own task and nothing depends on it.
+        // Its settings (auth key, on/off) come from the web UI, not from prov.
+        if (ts_init(prov.hostname) != ESP_OK) ESP_LOGE(TAG, "tailscale failed to start");
     } else {
         ESP_LOGW(TAG, "no Wi-Fi credentials; running offline (provision with ./flash.sh)");
     }

@@ -131,7 +131,7 @@ static bool password_ok(const char *pw)
     return ct_equal(out, s.hash, sizeof(out));
 }
 
-esp_err_t auth_login(const char *password, char token_hex[65], int *retry_after_s)
+esp_err_t auth_verify(const char *password, int *retry_after_s)
 {
     int64_t now = esp_timer_get_time();
     if (now < s.locked_until_us) {
@@ -154,6 +154,13 @@ esp_err_t auth_login(const char *password, char token_hex[65], int *retry_after_
         return ESP_FAIL;
     }
     s.fails = 0;
+    return ESP_OK;
+}
+
+esp_err_t auth_login(const char *password, char token_hex[65], int *retry_after_s)
+{
+    esp_err_t err = auth_verify(password, retry_after_s);
+    if (err != ESP_OK) return err;
 
     uint8_t token[32];
     esp_fill_random(token, sizeof(token));

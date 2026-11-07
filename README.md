@@ -3,9 +3,10 @@
 > **Work in progress.** This README describes the finished product. Working today:
 > 5 GHz-only Wi-Fi with backup network and recovery, provisioning via `flash.sh`,
 > the web UI (login, live status, Wi-Fi settings, devices), over-the-air updates
-> with rollback, and the Zigbee coordinator with enrollment of battery sensors
-> (tested with contact sensors). Tailscale, automations and Home Assistant are
-> next. [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
+> with rollback, the Zigbee coordinator with enrollment of battery sensors
+> (tested with contact sensors), and Tailscale (direct paths, relays, the
+> "tailnet only, no password" mode). Automations and Home Assistant are next.
+> [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
 
 A Zigbee 3.0 coordinator, automation engine and web UI on a single ESP32-C5,
 reachable from anywhere over your tailnet. No cloud, no Home Assistant, no MQTT
@@ -61,7 +62,7 @@ Nothing goes into your home directory or system packages. You only need `git`,
 
 ```bash
 # 1. Plug the board in, then:
-./flash.sh --ts-authkey tskey-auth-XXXXXXXX
+./flash.sh
 ```
 
 `flash.sh`:
@@ -75,24 +76,27 @@ Nothing goes into your home directory or system packages. You only need `git`,
 5. watches the board boot and prints where to find it:
 
 ```
-✓ Connected to MyWiFi on 5 GHz, channel 44, -47 dBm
+✓ Connected to MyWiFi on 5 GHz, channel 44, -47 dBm, 1.7 s after boot
 ✓ Zigbee network up on channel 25 (PAN 0x7A3C)
 ✓ Tailscale: zigbee-hub.<tailnet>.ts.net (100.101.12.7)
 
-  Web UI:   http://zigbee-hub.local/   (LAN)
+  Web UI:   http://zigbee-hub.local/   (LAN, 192.168.1.50)
             http://zigbee-hub/         (tailnet)
   Password: 7f3k-qp9x-m2va
 ```
 
-The Tailscale auth key is optional at flash time; you can paste it in the UI later.
-Use a reusable, pre-approved key from the
-[Tailscale admin console](https://login.tailscale.com/admin/settings/keys).
+To put the hub on your tailnet, paste an auth key in the UI under **Settings →
+Tailscale** (the Tailscale line appears from the next boot on). Create it in the
+[Tailscale admin console](https://login.tailscale.com/admin/settings/keys): not
+reusable, not ephemeral, pre-approved. The hub uses it once to register and then
+erases it.
 
 ### Other flash options
 
 | | |
 |---|---|
-| `./flash.sh --prov-only` | re-write Wi-Fi/Tailscale credentials without rebuilding. The Zigbee network and your devices are untouched |
+| `./flash.sh --prov-only` | re-write the Wi-Fi credentials without rebuilding. The Zigbee network, your devices and the Tailscale login are untouched |
+| `./flash.sh --prov-only --lan-access` | locked out of *tailnet only* access: turns it off, so the LAN with the password works again |
 | `./flash.sh --hostname kitchen-hub` | different hostname on the LAN and the tailnet |
 | `./flash.sh --ssid X --psk Y` | provision a network other than the one you're on |
 | `./flash.sh --monitor` | stay attached to the serial log after flashing |
@@ -102,8 +106,7 @@ Use a reusable, pre-approved key from the
 
 Credentials live in their own flash partition. Re-provisioning never wipes the
 Zigbee network, so you never have to re-pair devices because the Wi-Fi password
-changed. `flash.sh` remembers your backup network, hostname and Tailscale key
-between runs.
+changed. `flash.sh` remembers your backup network and hostname between runs.
 
 ### Backup Wi-Fi
 
@@ -329,9 +332,10 @@ device with its link quality and signal strength to the hub. Download a network 
 
 ### Tailscale
 
-Connection state, tailnet IP, MagicDNS name, and peers with whether each path is
-direct or relayed through DERP. Change the auth key, hostname, or control server
-(Headscale works too).
+Connection state, tailnet IP, MagicDNS name, the home relay (DERP region), and
+peers with whether each path is direct or relayed. Under Settings: paste or
+replace the auth key, turn Tailscale off, or log out of the tailnet. The hub's name
+on the tailnet is its hostname (`./flash.sh --hostname`).
 
 #### Tailnet only, no password
 
@@ -363,8 +367,9 @@ build, slot, whether it's still on trial, the last update's result).
 
 ### Settings
 
-Everything you can change: the primary and backup Wi-Fi networks, firmware
-updates, restarting the hub, and the diagnostic log download.
+Everything you can change: the primary and backup Wi-Fi networks, Tailscale (auth
+key, on/off, log out, tailnet-only access), firmware updates, restarting the hub,
+and the diagnostic log download.
 
 **Diagnostic log.** The hub keeps its own log on flash: warnings, errors, Wi-Fi
 events, updates and reboots (with the reason), plus a status sample every 5
@@ -432,7 +437,11 @@ USB flashing always works either way.
 - **Tailscale**: a native client (Tailscale's control protocol, WireGuard, DERP,
   DISCO, STUN) based on [microlink](https://github.com/CamM2325/microlink). The
   WireGuard interface sits in the network stack next to Wi-Fi, so the same web
-  server answers on both.
+  server answers on both. The hub picks its home relay (DERP region) by measured
+  latency, reaches peers homed elsewhere through their own region, and asks your
+  router for a port mapping (NAT-PMP) so peers behind the same ISP can connect
+  directly. It only probes paths when they're in use or the UI is open, so an idle
+  hub stays quiet on the network.
 - **Automations**: Lua 5.5. All scripts run on one dedicated task, fed events
   through a queue; Lua never runs on the Zigbee or web server task.
 - **Home Assistant**: ESPHome native API on TCP 6053 with Noise encryption, Zigbee
@@ -445,11 +454,13 @@ USB flashing always works either way.
 
 | Partition | Size | Holds |
 |---|---|---|
-| `nvs` | 24 KB | settings |
-| `prov` | 16 KB | Wi-Fi + Tailscale credentials, admin password, optional Home Assistant key (written by `flash.sh`) |
+| `nvs` | 16 KB | settings, Wi-Fi driver state, Tailscale node keys |
+| `otadata` | 8 KB | which firmware slot boots |
+| `prov` | 12 KB | Wi-Fi credentials, admin password, optional Home Assistant key (written by `flash.sh`) |
+| `zb_storage` | 120 KB | Zigbee network state (keys, PAN, children) |
+| `coredump` | 64 KB | crash dump of the last panic |
 | `ota_0` / `ota_1` | 4 MB each | firmware, A/B updates |
-| `zb_storage` | 1 MB | Zigbee network state |
-| `storage` | ~7 MB | device registry, scripts |
+| `storage` | ~7.75 MB | device registry, scripts, diagnostic log |
 
 ## Development
 
@@ -491,6 +502,19 @@ Settings.
 **UI not reachable over Tailscale.** The Tailscale page shows the connection
 state. The auth key must be valid and the device approved in the admin console if
 your tailnet requires device approval.
+
+**Pings to the hub vary between a few ms and ~60 ms.** That's the radio being
+shared: the C5 has one 2.4/5 GHz radio front end for Wi-Fi and Zigbee, and gives
+Zigbee about 56 ms of every 102 ms. A packet that arrives in that window waits
+for it to end. Zigbee comes first by design; a web UI doesn't notice.
+
+**A peer shows "relay (DERP)" instead of "direct".** Direct paths are only kept
+up while there's traffic or the UI is open, so an idle peer showing relay is
+normal; open the UI and it turns direct within seconds if the networks allow it.
+If it never does, the two networks block each other's UDP (common behind
+carrier-grade NAT). Traffic still flows, through Tailscale's relay. A public IPv4
+address from your ISP, or NAT-PMP/UPnP on the other side's router, usually fixes
+it.
 
 ## Credits
 

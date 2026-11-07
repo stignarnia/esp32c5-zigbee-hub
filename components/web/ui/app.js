@@ -258,7 +258,7 @@ const REASON_TEXT = {
 };
 
 pages.status = {
-  render() { $('#view').innerHTML = '<div class="grid" id="sys"></div>'; this.live(); },
+  render() { $('#view').innerHTML = '<div class="grid" id="sys"></div>'; tsui.peers = null; this.live(); tsui.loadPeers(); },
   live() {
     const el = $('#sys');
     if (!el || !status) return;
@@ -286,6 +286,7 @@ pages.status = {
         ['Driver restarts', w.driver_restarts],
         ['Watchdog reboots', w.watchdog_reboots],
       ])}</section>
+      ${tsui.statusCard(s.tailscale)}
       <section class="card"><h2>Memory</h2>
         <div class="muted">Internal RAM: ${kb(m.internal_free)} free, lowest ${kb(m.internal_min)}</div>
         <div class="bar"><i style="width:${Math.min(100, 100 - (m.internal_free / intTotal) * 100).toFixed(0)}%"></i></div>
@@ -318,6 +319,7 @@ pages.settings = {
       <div id="wifi-note"></div>
       <div id="wifi-area"><div class="card">Loading…</div></div>
       <div class="grid">
+        <section class="card" id="ts-card"><h2>Tailscale</h2><div class="muted">Loading…</div></section>
         <section class="card"><h2>Firmware update</h2>
           <p class="muted">Upload <code>build/esp32c5-zigbee-hub.bin</code>, or run <code>./flash.sh --ota</code>.
           The new firmware runs on trial and the hub goes back to this version by itself if it fails.</p>
@@ -343,8 +345,9 @@ pages.settings = {
       catch (e) { fw.msg(esc(e.message), 'err'); }
     });
     wifi.render();
+    tsui.renderSettings();
   },
-  live() { wifi.live(); },
+  live() { wifi.live(); tsui.liveSettings(); },
 };
 
 // Wi-Fi networks (part of Settings) ---------------------------------------------------
@@ -404,6 +407,155 @@ const wifi = {
     if (confirm('Go back to the Wi-Fi networks written by flash.sh? (On trial, like any switch.)')) {
       this.go(api('/api/wifi/reset', { method: 'POST' }));
     }
+  },
+};
+
+// Tailscale (Status card + Settings card) -------------------------------------------------
+const tsui = {
+  peers: null, peersAt: 0, shown: '',
+  stateBadge(t) {
+    const cls = t.state === 'connected' ? 'ok' : t.state === 'off' ? '' : t.error ? 'bad' : 'warn';
+    return `<span class="badge ${cls}">${esc(t.state)}</span>`;
+  },
+  expiry(t) {
+    if (!t.key_expiry) return '<span class="muted">never</span>';
+    const d = new Date(t.key_expiry * 1000).toISOString().slice(0, 10);
+    return t.key_expired ? `<span class="badge bad">expired ${d}</span>` : `${d} <span class="muted">(turn off key expiry for this machine in the admin console)</span>`;
+  },
+  statusCard(t) {
+    if (!t) return '';
+    const rows = [['Status', this.stateBadge(t) + (t.error ? `<br><span class="muted">${esc(t.error)}</span>` : '')]];
+    if (t.ip) rows.push(['Tailnet IP', esc(t.ip)]);
+    if (t.name) rows.push(['Name', `<a href="http://${esc(t.name)}/">${esc(t.name)}</a>`]);
+    if (t.registered && t.state !== 'off') rows.push(['Node key expires', this.expiry(t)]);
+    if (t.home_derp) rows.push(['Home relay (DERP)', esc(t.home_derp)]);
+    if (t.ip) rows.push(['Online after boot', t.connected_ms >= 0 ? `${(t.connected_ms / 1000).toFixed(1)} s` : '–']);
+    let peers = '';
+    if (t.ip) {
+      if (Date.now() - this.peersAt > 10000) this.loadPeers();
+      const list = this.peers || [];
+      peers = list.length
+        ? `<table><tr><th>Peer</th><th>IP</th><th>Path</th></tr>${list.map((p) => `<tr><td>${esc(p.name.split('.')[0])}</td><td>${esc(p.ip)}</td>
+            <td>${this.path(p)}</td></tr>`).join('')}</table>`
+        : `<p class="muted">${this.peers ? 'No peers.' : 'Loading peers…'}</p>`;
+    }
+    return `<section class="card"><h2>Tailscale</h2>${dl(rows)}${peers}</section>`;
+  },
+  // Offline comes from the control server; direct = a working direct UDP path;
+  // otherwise an online peer is reached through a DERP relay.
+  path(p) {
+    if (p.online === false) return '<span class="muted">offline</span>';
+    if (p.direct) return '<span class="badge ok">direct</span>';
+    if (p.online === true) return `<span class="badge warn">relay (DERP${p.derp ? ' ' + esc(p.derp) : ''})</span>`;
+    return '<span class="muted">unknown</span>';
+  },
+  async loadPeers() {
+    this.peersAt = Date.now();
+    try { this.peers = (await api('/api/ts')).peer_list; if (currentPage() === 'status') pages.status.live(); } catch (_) { /* keep last */ }
+  },
+  msg(html, cls = '') { const m = $('#ts-msg'); if (m) { m.className = cls; m.innerHTML = html; } },
+  // Settings card. Re-rendered only when what it shows changes (not on every status push),
+  // so a half-typed key is never wiped.
+  renderSettings() {
+    const el = $('#ts-card');
+    if (!el || !status) return;
+    const t = status.tailscale;
+    this.shown = `${t.enabled}|${t.registered}|${t.key_pending}|${t.suspended}`;
+    let body;
+    if (t.suspended) {
+      body = `<p class="err">Suspended: the hub crashed twice in a row while Tailscale was running, so it was
+        not started this time (Zigbee and automations come first). Download the log for details.</p>
+        <div class="row"><button id="ts-on">Try again</button><button class="ghost" id="ts-off">Turn off</button></div>`;
+    } else if (!t.enabled) {
+      body = `<p class="muted">Off: the hub is reachable only on the local network.</p>
+        <div class="row"><button id="ts-on">Turn on</button></div>`;
+    } else if (!t.registered) {
+      body = `<p class="muted">Put the hub on your tailnet so this page opens from anywhere.
+        Create a key at <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener">login.tailscale.com → Settings → Keys</a>:
+        not reusable, not ephemeral, pre-approved. It is used once and then erased from the hub.</p>
+        <label>Auth key <input type="password" id="ts-key" autocomplete="off" placeholder="${t.key_pending ? 'stored — paste a new one to replace it' : 'tskey-auth-…'}"></label>
+        <div class="row"><button id="ts-save">Connect</button><button class="ghost" id="ts-off">Turn off</button></div>`;
+    } else {
+      body = `<p class="muted">On the tailnet as <b>${esc(t.name || status.hostname)}</b>. The tailnet decides who can reach it
+        (Tailscale ACLs).</p>
+        <div id="ts-access"><p class="muted">Loading access mode…</p></div>
+        <div class="row"><button class="ghost" id="ts-off">Turn off</button><button class="danger" id="ts-logout">Log out</button></div>`;
+      setTimeout(() => this.loadAccess(), 0);
+    }
+    el.innerHTML = `<h2>Tailscale ${this.stateBadge(t)}</h2>${body}<p id="ts-msg"></p>`;
+    const on = (id, fn) => { const b = $(id); if (b) b.addEventListener('click', fn); };
+    on('#ts-on', () => this.post('/api/ts/enabled', { on: true }));
+    on('#ts-off', () => {
+      if (t.state !== 'off' && !confirm('Turn Tailscale off? The hub restarts to apply it (Zigbee is back within seconds).')) return;
+      this.post('/api/ts/enabled', { on: false });
+    });
+    on('#ts-logout', () => {
+      if (!confirm('Log out of the tailnet? The hub forgets its node key and restarts; you will need a new auth key. Delete the old machine in the Tailscale admin console.')) return;
+      this.post('/api/ts/logout');
+    });
+    on('#ts-save', () => {
+      const key = $('#ts-key').value.trim();
+      if (!key) return;
+      this.post('/api/ts/key', { key }).then((ok) => { const k = $('#ts-key'); if (ok && k) k.value = ''; });
+    });
+    this.liveSettings();
+  },
+  // "Tailnet only, no password" (GET/POST /api/access)
+  async loadAccess() {
+    const el = $('#ts-access');
+    if (!el) return;
+    let a;
+    try { a = await api('/api/access'); } catch (e) { el.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    const name = (status && status.tailscale.name) || 'the hub’s tailnet name';
+    if (a.tailnet_only) {
+      el.innerHTML = `<p><b>Access: tailnet only.</b> Over Tailscale no password is asked; the LAN is closed
+          (port 80 refused, nothing announced).${a.lan_window_s > 0 ? ` <span class="badge warn">LAN open with password for ${Math.ceil(a.lan_window_s / 60)} more min (BOOT button)</span>` : ''}</p>
+        <p class="muted">Locked out? Hold the board’s BOOT button 10 s (LAN with password for 15 min),
+          or run <code>./flash.sh --prov-only --lan-access</code> over USB.</p>
+        <div class="row"><button class="ghost" id="acc-off">Allow LAN access again</button></div>`;
+    } else if (!a.tailscale_up) {
+      el.innerHTML = `<p class="muted">Access: LAN and tailnet, with the password. <i>Tailnet only</i> can be switched on once Tailscale is connected.</p>`;
+    } else if (!a.via_tailnet) {
+      el.innerHTML = `<p class="muted">Access: LAN and tailnet, with the password. To switch to <i>tailnet only, no password</i>,
+        open this page over Tailscale (<a href="http://${esc(name)}/">http://${esc(name)}/</a>), so the switch itself proves that path works.</p>`;
+    } else {
+      el.innerHTML = `<p>Access: LAN and tailnet, with the password.</p>
+        <p class="muted"><b>Tailnet only</b>: the hub stops answering on the LAN and stops asking for a password over
+          Tailscale — being on your tailnet is the login. Restrict <code>${esc(status.hostname)}</code> with a Tailscale ACL if your tailnet is shared.</p>
+        <label>Admin password, once more <input type="password" id="acc-pw" autocomplete="current-password"></label>
+        <div class="row"><button id="acc-on">Switch to tailnet only</button></div>`;
+    }
+    const b1 = $('#acc-on');
+    if (b1) b1.addEventListener('click', () => this.setAccess({ tailnet_only: true, password: $('#acc-pw').value }));
+    const b2 = $('#acc-off');
+    if (b2) b2.addEventListener('click', () => {
+      if (!confirm('Open the LAN again? The UI will ask for the password on the local network.')) return;
+      this.setAccess({ tailnet_only: false });
+    });
+  },
+  async setAccess(json) {
+    try {
+      await api('/api/access', { method: 'POST', json });
+      this.loadAccess();
+    } catch (e) { this.msg(esc(e.message), 'err'); }
+  },
+  liveSettings() {
+    if (!$('#ts-card') || !status) return;
+    const t = status.tailscale;
+    if (`${t.enabled}|${t.registered}|${t.key_pending}|${t.suspended}` !== this.shown) { this.renderSettings(); return; }
+    const h = $('#ts-card h2');
+    if (h) h.innerHTML = `Tailscale ${this.stateBadge(t)}`;
+    if (t.error) this.msg(esc(t.error), 'err');
+    else if (t.state === 'connected') this.msg(`Connected: <code>${esc(t.ip)}</code>${t.name ? ` · <a href="http://${esc(t.name)}/">${esc(t.name)}</a>` : ''}`);
+  },
+  async post(path, json) {
+    try {
+      const r = await api(path, { method: 'POST', json });
+      if (r.restarting) { this.msg('Restarting…'); fw.waitBack(null); return true; }
+      await refresh();
+      this.renderSettings();
+      return true;
+    } catch (e) { this.msg(esc(e.message), 'err'); return false; }
   },
 };
 

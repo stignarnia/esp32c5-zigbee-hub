@@ -1,10 +1,11 @@
 idf_component_register(
-    SRCS "web_server.c" "web_api.c" "auth.c"
+    SRCS "web_server.c" "web_api.c" "auth.c" "access.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     REQUIRES esp_common
     PRIV_REQUIRES esp_http_server esp_timer esp_system esp_netif app_update esp_app_format
-                  nvs_flash mbedtls log hubsys hublog wifi5g spi_flash zb
+                  nvs_flash mbedtls log hubsys hublog wifi5g spi_flash zb tailscale
+                  esp_driver_gpio
 )
 
 # UI assets: gzipped at build time (-n: no timestamp, reproducible), embedded as

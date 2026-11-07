@@ -68,3 +68,24 @@ CONFIG_ZB_RADIO_NATIVE=y
 # task/PC/RA into the on-board log and /api/coredump serves the full dump.
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# --- Tailscale (components/tailscale, microlink port) ---------------------------
+# The control-plane Noise channel is ChaCha20-Poly1305 via PSA.
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
+# The WireGuard netif keeps its device in an lwIP client-data slot: ESP-IDF reads
+# netif->state of every netif as its own esp_netif_t (crashed on netif_add).
+CONFIG_LWIP_NUM_NETIF_CLIENT_DATA=1
+# WireGuard runs partly in its own task: every call into it (and into lwIP's raw API)
+# from there holds the lwIP core lock. The safety check asserts on any lwIP call made
+# from the wrong context, so a mistake fails loudly instead of corrupting memory.
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y
+CONFIG_LWIP_CHECK_THREAD_SAFETY=y
+# mbedTLS buffers in PSRAM (memory lever 3). Measured with Tailscale up: internal heap
+# lowest 15 KB with them internal (DERP TLS session). IDF's warning about PSRAM on rev
+# v1.0 only matters with flash encryption, which this project doesn't use.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# No IPv6 (2026-11-07): nothing on the hub uses it (no SLAAC, microlink is IPv4-only;
+# the direct path to a same-ISP peer came from NAT-PMP instead). Measured cost when on: 43.6 KB
+# flash, 2.0 KB static internal RAM. Turning it back on also needs IPv6 in microlink.
+CONFIG_LWIP_IPV6=n

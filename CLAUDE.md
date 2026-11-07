@@ -177,7 +177,7 @@ the app slots need; app slots and LittleFS take everything else (2026-11-06).
 |---|---|---|---|---|
 | nvs | nvs | 0x9000 | 0x4000 | app settings, Wi-Fi driver state, radio calibration (~3 KB used, measured) |
 | otadata | ota | 0xD000 | 0x2000 | |
-| prov | nvs | 0xF000 | 0x3000 | **written by flash.sh**: SSID, PSK, admin password, TS auth key, hostname, optional HA setting + API key (< 1 KB) |
+| prov | nvs | 0xF000 | 0x3000 | **written by flash.sh**: SSID, PSK, admin password, hostname, `lanreset` nonce, optional HA setting + API key (< 1 KB). The Tailscale auth key is entered in the UI (app NVS) |
 | zb_storage | nvs | 0x12000 | 0x1E000 | Zigbee stack NVRAM (network key, PAN, children). esp-zigbee-lib 2.x needs NVS, not FAT. Generous on purpose: resizing it later means re-pairing every device |
 | coredump | coredump | 0x30000 | 0x10000 | ELF core dump on panic; summary logged on next boot, `/api/coredump` |
 | ota_0 | app | 0x40000 | 0x400000 | |
@@ -218,8 +218,9 @@ Notes from the first boot:
     fallback only if NetworkManager withholds the secret — here it didn't)
   - rejects open / enterprise networks (WPA2/WPA3-Personal only)
   - **refuses** if the SSID is only visible on 2.4 GHz; **warns** on DFS (52–144)
-  - `--backup-ssid/--backup-psk` (or `--no-backup`), `--hostname`, `--ts-authkey`;
-    remembered in `.esp/secrets/prov.env` (0600) for the next run
+  - `--backup-ssid/--backup-psk` (or `--no-backup`), `--hostname`; remembered in
+    `.esp/secrets/prov.env` (0600) for the next run. `--lan-access` (one-shot, not
+    remembered) turns tailnet-only access off (Phase 4)
   - admin password generated once (`.esp/secrets/admin_password`); only a
     PBKDF2-SHA256 hash (10k iters, random salt) goes to the board
   - country code from `iw reg get` (here `IT`) → `esp_wifi_set_country_code`
@@ -412,8 +413,8 @@ OTA bookkeeping), `wifi5g` (runtime network API).
       the next boot doesn't hit the stale-association login delay
 - Updates restart into the new firmware immediately, never gated (user decision
   2026-11-06: an update is intentional). Only the Wi-Fi watchdog's reboot is gated (Phase 1)
-- [x] `flash.sh --ota [--host H]` (default `<hostname>.local`; MagicDNS name
-      after Phase 4): build → login (password via stdin) → upload → wait →
+- [x] `flash.sh --ota [--host H]` (default `<hostname>.local`, falling back to the
+      MagicDNS name `<hostname>` when that doesn't answer — tailnet-only access): build → login (password via stdin) → upload → wait →
       report. **Measured: upload 5.6 s, confirmed 16 s after upload start, ~21 s
       for the whole command when nothing needs rebuilding.** Faster than USB
 - [x] Rollback demonstrated 2026-11-06: an image that calls `abort()` at the start of
@@ -621,51 +622,174 @@ For long tests without a serial cable: log on the board, download later.
       Minor: a failed registry save clears `s_dirty` first, so it isn't retried until the
       next change
 
-### Phase 4 — Tailscale
-- [ ] **Spike first**: build microlink against IDF v6.1. It uses legacy mbedTLS
-      APIs (`chacha20.h`, `chachapoly.h`, `ctr_drbg.h`, `entropy.h`); IDF v6 ships
-      mbedTLS 4.x, where much of that moved behind PSA. Port to PSA (user OK'd
-      modernising it freely). This is the riskiest item in the plan — do it
-      before the UI gets big
-- [ ] Copy microlink + wireguard_lwip into `components/tailscale/` (MIT, keep
-      `LICENSE` + `x25519-license.txt`); drop cellular/PPP/AT-socket code
-- [ ] We own Wi-Fi: call `microlink_start()` after our STA has an IP; never let
-      `ml_net_switch` initialise Wi-Fi (it would not set 5G-only)
-- [ ] Buffers (H2 512 KB, JSON 512 KB) in PSRAM; task stacks ~42 KB internal —
-      check internal heap budget against Zigbee + Wi-Fi + HTTP
-- [ ] Disable microlink's own config httpd; its settings move into our UI
-      (auth key, hostname, control server for Headscale, peer allowlist)
-- [ ] UI page: state, tailnet IP, MagicDNS name, peers with direct/DERP path
-- [ ] Verified: `tailscale ping zigbee-hub` from the dev machine; UI loads at
-      `http://zigbee-hub/` from a phone on cellular
+### Phase 4 — Tailscale (done 2026-11-07, except two checks that need a person: the BOOT-button press and the UI from a phone on cellular)
+- [x] **Spike**: microlink builds and runs on IDF v6.1 / mbedTLS 4: ChaCha20-Poly1305
+      through PSA (the chachapoly module is private in mbedTLS 4), randomness from
+      PSA (no entropy/CTR-DRBG contexts), DERP TLS verified against the IDF CA bundle
+      (upstream used `VERIFY_NONE`), failed DERP connects free their TLS context
+      (upstream leaked ~20 KB per attempt)
+- [x] microlink + wireguard-lwip in `components/tailscale/` with their licences
+      (`microlink/LICENSE`, `microlink/x25519-license.txt`, `wireguard/LICENSE`).
+      Cellular/PPP/AT-socket transport gone; the last dead `ml_at_socket_is_ready()`
+      branches and the unbuilt `ml_peer_nvs.c` removed 2026-11-07
+- [x] We own Wi-Fi: `ts_task` starts microlink once the STA has an IP; microlink has
+      no Wi-Fi calls left (the optional TX-power setter was removed 2026-11-07)
+- [x] Memory: H2/JSON buffers and all four microlink task stacks (42 KB) in PSRAM;
+      mbedTLS buffers in PSRAM (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, lever 3). Audited:
+      no PSRAM-stack task writes flash (node keys and settings are written by
+      `ts_task`, internal stack). With Zigbee + Wi-Fi + web + Tailscale (no UI
+      client), after IPv6 was turned off: **79 KB free, lowest 42 KB** (2026-11-07)
+- [x] Settings in our UI: auth key, on/off, log out, access mode. The hostname comes
+      from `flash.sh --hostname` (prov). No peer allowlist, on purpose: who can reach
+      the hub is decided by Tailscale ACLs
+- [x] UI: state, tailnet IP, MagicDNS name, home relay region, peers with
+      offline / direct / "relay (DERP fra)" (Status page)
+- [~] Verified: `tailscale ping zigbee-hub` from the dev machine (direct, 4–5 ms);
+      from peer A (another house, same ISP) direct via the NAT-PMP endpoint, 10–27 ms,
+      15/15. A phone on cellular: not tested by Claude (no such device available)
 
-#### Access mode: "Tailnet only, no password" (user request)
-Offered in the UI only once Tailscale is connected. When on:
-- [ ] Web UI, `/api`, `/ws`, OTA, and (if active) the ESPHome API accept
-      connections **only via the Tailscale interface**, and the admin password is
-      not asked. Tailscale is the authentication: only tailnet members can reach it
-- [ ] Enforcement, two layers (lwIP is a *weak host*: by default it accepts a
-      packet for any of its IPs on any interface, so "the destination is 100.x"
-      alone proves nothing):
-  1. accept-time check (`httpd_config_t.open_fn`, and the same in the ESPHome
-     server): `getsockname()` must be our tailnet IP, `getpeername()` must be in
-     100.64.0.0/10, else close before reading a byte
-  2. lwIP input hook (`LWIP_HOOK_IP4_INPUT`): drop any packet arriving on the
-     Wi-Fi netif whose destination is the tailnet IP (strong-host for that address)
-- [ ] mDNS stops advertising the UI and `_esphomelib._tcp` in this mode (nothing
-      on the LAN to find)
-- [ ] Switching it on: UI requires the password one last time, and only offers it
-      while the current request itself came over Tailscale (proves it works
-      before cutting the LAN off)
-- [ ] **Lockout recovery** (Tailscale key expired, tailnet down, account change):
-  - hold the BOOT button 10 s → LAN access with password re-opens for 15 min
-  - or USB: `flash.sh --prov-only --lan-access` resets the mode
-  - automations and Zigbee are unaffected either way
-- [ ] Who on the tailnet can reach it is decided by Tailscale ACLs — README says
-      to restrict `zigbee-hub` to the user's own devices if the tailnet is shared
-- [ ] Verified: from a LAN machine not on Tailscale, port 80 refuses/closes; from
-      the tailnet the UI opens with no login; forged packets to 100.x from the LAN
-      are dropped (send with `nping`/scapy from another LAN host)
+#### What the port needed (measured 2026-11-06/07)
+- **Online state**: microlink's "online" meant "has a slot in my table"; it now uses
+  the control server's `Online` and live `OnlineChange` updates (parsed in the
+  wrong format upstream, so they never matched)
+- **DISCO key cache**: every DISCO message did a fresh X25519 (tens of ms);
+  now once per peer. `tailscale ping` 85 → 62 ms
+- **Logging cost**: ~10 INFO lines/s of per-packet DISCO/DERP logs, each ~7 ms on the
+  115200-baud console, inside the tasks that move packets. Demoted to DEBUG:
+  `tailscale ping` 50 → **4 ms**. `POST /api/ts/debug` turns them back on for 10 min
+- **Home DERP region was hard-coded to Dallas** (`ML_DERP_REGION` 9, also the STUN
+  server): every relayed packet crossed the Atlantic, and a DERP server only
+  delivers to clients connected to it, so peers homed elsewhere (peer A on fra,
+  peer B, a cloud VM, on iad) got `PeerGone` for every DISCO ping and CallMeMaybe and never
+  answered. Now: home region by STUN latency to every region (3 rounds, minimum per
+  region — the minimum filters the coex sleeps), reported as `PreferredDERP`:
+  **fra, 19–22 ms**. Plus up to 2 extra DERP connections to peers' home regions,
+  opened on demand, closed after 60 s without our traffic, 60 s back-off for a
+  region that fails. peer B relay → direct
+- **DERP Nagle**: each frame was two TLS records (header, payload) and Nagle held the
+  second for the server's delayed ACK. One record per frame + `TCP_NODELAY`:
+  peer A → hub via DERP 58–199 ms → 41–49 ms (plus the coex sleep, below)
+- **Pongs** went out over DERP even for direct pings, keeping other-region DERP
+  connections alive for nothing; now only when the ping came via DERP
+- **LAN vs hairpin**: a LAN peer answers on its LAN address and via the router's
+  public address (through the ISP's CGNAT, 90–280 ms); whichever pong came first won.
+  A trusted LAN path is no longer replaced by a public one
+- **CallMeMaybe** was sent once, at startup (before DERP was even connected); now with
+  every relay probe, and a direct ping from a relayed peer is answered with a burst
+  of pings back (0, 0.2, 0.5, 1, 2, 3.5 s) to the address it came from
+- **Probing follows need** (user request; upstream: 3 s heartbeats and 15 s probes
+  for every peer, forever):
+  - active peer (WireGuard data, not keepalives, within 45 s): direct → heartbeat 3 s;
+    relay → probe + CallMeMaybe every 5 s
+  - idle, UI open (a WebSocket client connected): direct → heartbeat 10 s (inside the
+    15 s trust); relay → probes taper 15 → 30 → 45 s. Opening the UI refreshes every
+    path at once (measured: all direct again within 2 s)
+  - idle, no UI: nothing. Traffic starting restarts discovery at once
+  - offline (control server): never. The control server pushes their return live
+- **No persistent WireGuard keepalive** (was 25 s for every peer with a session,
+  forever); Tailscale peers don't use one either
+- **NAT-PMP** (`ml_pmp.c`): see "A peer behind the same ISP" below
+- **IPv6 off** (`CONFIG_LWIP_IPV6=n`): nothing used it; cost 43.6 KB flash and 2.0 KB
+  static internal RAM. microlink's unused IPv6 STUN code is behind `LWIP_IPV6`
+
+#### Latency over the tunnel: the coex sleep (measured 2026-11-07)
+- Despite `WIFI_PS_NONE`, the hub sends QoS-Null PM=1 / PM=0 once per beacon (laptop
+  mt7925 in monitor mode, 25 s, 244 of each for 243 beacons): **Wi-Fi sleeps 56 ms
+  (54.6–58.2) of every 102.4 ms** while 802.15.4 has the radio: PM=1 at ~43 ms after
+  the beacon, PM=0 ~3 ms before the next. The AP holds frames for the hub meanwhile
+  (delayed ping replies arrive on exact multiples of 102.4 ms). It's the coex
+  scheduler (closed `libcoexist`; the IDF docs describe 802.15.4 coex as priority
+  only). Not changed: it is "Zigbee wins"
+- Effect: ~53 % of packets to the hub wait 0–56 ms (~15 ms average) per direction,
+  LAN and tunnel alike
+- Tunnel cost on the hub: 5.4 ms turnaround on air vs 1.8 ms LAN (+3.6 ms per packet)
+- `tailscale ping` showed a clean 48 / 100 ms alternation via DERP: it sends the next
+  ping 1 s after the previous reply, so the RTT shifts the next ping's phase in the
+  102.4 ms cycle by ±26 ms — in, out, in. An artifact of the tool, not of the hub
+  (hub-internal DERP ping → pong measured flat at 4–7 ms)
+
+#### The "post-boot stall" was the dev machine (measured 2026-11-07)
+- Symptom: right after an OTA or restart, the UI and pings from the dev machine
+  stalled for 3–21 s at a time (logins of 4.6–9.8 s, TCP SYNs unanswered for 5 s,
+  up to 202 pings in a row lost), while the router and the phone (another Wi-Fi
+  client on the same AP) lost nothing in the same windows
+- Ruled out on the hub, each measured: lwIP core lock (longest hold 102 ms, sampler of
+  the holder every 50 ms), socket exhaustion (peak 9 of 24), CPU stalls (a priority-15
+  task never woke > 300 ms late), coex (802.15.4 back to default priorities 1.5 s
+  after boot)
+- Cause: **ARP flux on the dev machine**. It has Ethernet and Wi-Fi on
+  the same subnet with Linux's default `arp_ignore=0`, so both interfaces answer the
+  hub's "who-has <its Ethernet IP>" — Wi-Fi 68 ms after Ethernet — and lwIP keeps the last
+  answer. From then on the hub sends everything for that address to the laptop's Wi-Fi card
+  (power save on): 248 echo replies seen arriving on wlan0, outages until the entry
+  changes. Only after a boot (empty ARP table); never with the laptop's Wi-Fi off the
+  network (monitor mode: 0 outages in ~6 min, an OTA included)
+- Not a hub bug. Fix on the dev machine if it matters: `arp_ignore=1` + `arp_announce=2`,
+  or not both interfaces on the same subnet
+- Diagnostics added while hunting it, kept: `lwIP core lock held N ms by <call>` (WARN,
+  ≥ 200 ms; normal holds are 50–100 ms) for every WireGuard call, a 50 ms sampler of the core-lock holder, a socket
+  census (`lwIP sockets in use: N of 24`, full list at ≥ 21), and a CPU-stall detector
+
+#### A peer behind the same ISP: why IPv4 direct needs NAT-PMP (measured 2026-11-07)
+- Peer A (a container in another house, same ISP) never got a direct path. Sniffed on
+  peer A: its pings reached the hub; not one IPv4 packet from our network reached it
+- The ISP routes between its own customers internally: packets to peer A's public
+  <peer A's public IPv4> never reach the CGNAT (which sits at the ISP's exit; traceroutes show
+  only private hops to peer A's router, a public hop only toward 1.1.1.1). They
+  leave with our router's ISP-side address <router WAN 10.x> and whatever port the
+  router picked. peer A's router filters by exact address:port (shown with peer B:
+  replies from the port it sent to pass, another port of the same host is dropped),
+  so they were dropped
+- tailscaled on the dev machine asks the router for a NAT-PMP mapping and advertises
+  <router WAN 10.x>:41641 — that is why its IPv4 path "sometimes" worked (and IPv6
+  otherwise). Its frequent path switching: within a discovery round the IPv4 pong
+  arrives first and the IPv6 pong a moment later wins (tailscaled prefers IPv6 at
+  similar latency); new rounds start whenever the path expires after a pause
+- Now the hub maps UDP 51820 on the router (NAT-PMP, RFC 6886; 2 h lifetime, renewed
+  at half-life, retried every 10 min if the router doesn't answer) and advertises
+  <router WAN 10.x>:51820 as a "portmapped" endpoint (and in CallMeMaybe). peer A → hub
+  **direct, 10–27 ms, 15/15**, from both sides (was 120–220 ms via DERP). A 20-packet
+  raw test over the same path: 20/20
+- With a public IPv4 from the ISP (user plans to ask), the CGNAT disappears; NAT-PMP
+  stays useful (it makes our router's port predictable)
+
+#### Access mode: "Tailnet only, no password" (user request; built 2026-11-07)
+Offered in the UI (Settings → Tailscale) once Tailscale is connected. Code:
+`components/web/access.c` (+ `hub_ip4_input_hook` in `components/tailscale/ts.c`).
+- [x] Web UI, `/api`, `/ws` and OTA accept connections **only via the Tailscale
+      interface**, and the admin password is not asked there (`web_guard`, the WS
+      pre-handshake check, `/api/session`, `/api/login` all pass for tailnet
+      connections in this mode). The ESPHome API (Phase 6) must use the same check
+- [x] Enforcement, two layers (lwIP is a weak host):
+  1. `httpd_config_t.open_fn` = `access_open_fn`: in this mode a connection whose
+     local address isn't the tailnet IP or whose peer isn't in 100.64.0.0/10 is
+     closed before a byte is read
+  2. `LWIP_HOOK_IP4_INPUT` (custom hook header `hub_lwip_hooks.h`, set on the lwip
+     component from `components/tailscale/CMakeLists.txt`): packets that arrive on
+     the Wi-Fi netif addressed to the tailnet IP are dropped — **always**, not only in
+     this mode (they're never legitimate). Armed once Tailscale has an IP; counter
+     `forged_dropped` in `GET /api/access`
+- [x] mDNS stopped in this mode (`mdns_free`), restarted when the LAN opens again
+- [x] Switching on: `POST /api/access` needs the password once more, a connected
+      Tailscale, and the request itself coming over Tailscale (LAN → 409)
+- [~] Lockout recovery: BOOT (GPIO28, the C5's download-mode strap) held 10 s →
+      LAN with password for 15 min; `flash.sh --prov-only --lan-access` writes a fresh
+      nonce into `prov` (`lanreset`), a nonce not seen before turns the mode off at
+      boot. USB path verified; **the button press is not verified** (needs someone at
+      the board; GPIO28 reads 1 = released at boot, as expected)
+- [x] Who on the tailnet can reach it is decided by Tailscale ACLs (README says so)
+- [x] Verified 2026-11-07:
+  - forged TCP SYNs from a LAN host (scapy, Ethernet frames straight to the hub's MAC)
+    to <tailnet IP>:80: 0 of 3 answered, `forged_dropped` 3; control SYNs to the LAN
+    IP: 3 of 3 answered. (Not run: the same test with the hook removed)
+  - switch on: from the LAN → 409; over the tailnet with a wrong password → 401;
+    with the right one → on
+  - in the mode: LAN port 80 reset before any response (curl exit 56); mDNS name
+    gone; over the tailnet `/api/session` authed and `/api/status` 200 without a
+    cookie; from peer A (another house) the same, UI page 200
+  - `flash.sh --ota` with no `--host`: `.local` doesn't answer → tailnet name, login
+    without password, upload 22.8 s over the tunnel, confirmed; mode kept after reboot
+  - `flash.sh --prov-only --lan-access`: mode off, LAN + password and mDNS back
 
 ### Phase 5 — Automation (Lua 5.5)
 
@@ -806,10 +930,12 @@ records free and lowest internal heap in its verification notes, so a shortage i
 seen coming.
 
 Where it stands: after Phase 2, **133 KB free, lowest 98 KB** (Wi-Fi + web UI +
-WebSocket client + on-board log); with Zigbee (Phase 3) **95 KB free, lowest 63 KB**. Expected next (estimates, not measured here):
-Zigbee ~60–80 KB, Tailscale ~42 KB of task stacks + ~30–40 KB for its persistent
-TLS connection, Lua engine task ~8–16 KB. That adds up to more than what's free,
-so expect to pull levers during Phase 3 or 4.
+WebSocket client + on-board log); with Zigbee (Phase 3) **95 KB free, lowest 63 KB**;
+with Tailscale (Phase 4, 2026-11-07: Zigbee + Wi-Fi + web + Tailscale with 3 DERP
+connections, a UI WebSocket client, IPv6 off) **78.5 KB free, lowest 41.5 KB** (the
+lowest is early in boot). Pulled so far: lever 3 (mbedTLS in PSRAM) and lever 4 for
+microlink's four tasks and the two Phase 4 watcher tasks (none of them writes flash).
+Next expected: Lua engine task ~8–16 KB (Phase 5).
 
 Levers, roughly cheapest first — pull only what's needed:
 1. Wi-Fi code out of IRAM (`CONFIG_ESP_WIFI_IRAM_OPT`, `_RX_IRAM_OPT`,

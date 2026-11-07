@@ -6,14 +6,16 @@
 #   ./flash.sh --backup-ssid X --backup-psk Y    add a backup network (e.g. phone hotspot)
 #   ./flash.sh --ssid X --psk Y        provision a network other than the current one
 #   ./flash.sh --hostname NAME         default: zigbee-hub
-#   ./flash.sh --ts-authkey KEY        Tailscale auth key (Phase 4)
 #   ./flash.sh --monitor               keep showing the serial log afterwards
 #   ./flash.sh --port /dev/ttyACM0     default: $ESPPORT from env.sh
 #   ./flash.sh --ota [--host H]        build and update over the network (no USB);
-#                                      default host: <hostname>.local
+#                                      default host: <hostname>.local, else the tailnet
+#                                      name <hostname> (tailnet-only access)
+#   ./flash.sh --prov-only --lan-access   turn tailnet-only access off (locked out)
 #
 # Options you pass are remembered in .esp/secrets/prov.env (gitignored, 0600), so
-# the next run keeps your backup network, hostname and Tailscale key.
+# the next run keeps your backup network and hostname. (The Tailscale auth key is
+# entered in the web UI: Settings → Tailscale.)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,12 +27,13 @@ ok()   { printf '\e[32m✓\e[0m %s\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
 
 # ---------------------------------------------------------------- arguments
-PROV_ONLY=0 MONITOR=0 PORT="" OTA=0 OTA_HOST=""
+PROV_ONLY=0 MONITOR=0 PORT="" OTA=0 OTA_HOST="" LAN_ACCESS=0
 ARG_SSID="" ARG_PSK="" ARG_BSSID_SET=0 ARG_BSSID="" ARG_BPSK=""
-ARG_HOST="" ARG_TSKEY=""
+ARG_HOST=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prov-only)   PROV_ONLY=1 ;;
+    --lan-access)  LAN_ACCESS=1 ;;
     --ota)         OTA=1 ;;
     --host)        OTA_HOST="$2"; shift ;;
     --monitor)     MONITOR=1 ;;
@@ -41,8 +44,7 @@ while [[ $# -gt 0 ]]; do
     --backup-psk)  ARG_BPSK="$2"; shift ;;
     --no-backup)   ARG_BSSID_SET=1; ARG_BSSID=""; ARG_BPSK="" ;;
     --hostname)    ARG_HOST="$2"; shift ;;
-    --ts-authkey)  ARG_TSKEY="$2"; shift ;;
-    -h|--help)     sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
   shift
@@ -62,7 +64,7 @@ PY="$IDF_PYTHON_ENV_PATH/bin/python"
 SECRETS="$ROOT/.esp/secrets"
 mkdir -p "$SECRETS"; chmod 700 "$SECRETS"
 STATE="$SECRETS/prov.env"
-SAVED_BACKUP_SSID="" SAVED_BACKUP_PSK="" SAVED_HOSTNAME="" SAVED_TS_AUTHKEY=""
+SAVED_BACKUP_SSID="" SAVED_BACKUP_PSK="" SAVED_HOSTNAME=""
 # shellcheck disable=SC1090
 [[ -f "$STATE" ]] && source "$STATE"
 
@@ -75,7 +77,16 @@ build() {
 # ---------------------------------------------------------------- OTA (network update)
 if [[ "$OTA" == 1 ]]; then
   command -v curl >/dev/null || die "curl not found"
-  HOST="${OTA_HOST:-${SAVED_HOSTNAME:-zigbee-hub}.local}"
+  HOST="$OTA_HOST"
+  if [[ -z "$HOST" ]]; then
+    # <hostname>.local on the LAN; in tailnet-only access the LAN is closed, so fall
+    # back to the MagicDNS short name (this machine must be on the tailnet).
+    base="${SAVED_HOSTNAME:-zigbee-hub}"
+    if curl -s -o /dev/null --max-time 4 "http://$base.local/api/session"; then HOST="$base.local"
+    elif curl -s -o /dev/null --max-time 6 "http://$base/api/session"; then
+      HOST="$base"; info "$base.local doesn't answer (tailnet-only access?): using the tailnet name $HOST"
+    else HOST="$base.local"; fi
+  fi
   [[ -s "$SECRETS/admin_password" ]] || die "no admin password in .esp/secrets (flash over USB once first)"
   build
   BIN=build/esp32c5-zigbee-hub.bin
@@ -95,11 +106,18 @@ if [[ "$OTA" == 1 ]]; then
   [[ "$OLD_ID" == "$NEW_ID" ]] && warn "the hub already runs this exact build ($NEW_ID); installing anyway"
   info "uploading to $HOST…"
   T0=$(date +%s%N)
-  RESP=$(curl -s --max-time 120 -b "$JAR" -H 'X-Hub: 1' -H 'Content-Type: application/octet-stream' \
-           --data-binary @"$BIN" -w '\n%{http_code}' "http://$HOST/api/ota") || die "upload failed"
-  CODE=${RESP##*$'\n'}
-  [[ "$CODE" == 200 ]] || die "hub refused the update: ${RESP%$'\n'*}"
-  ok "uploaded in $(( ($(date +%s%N) - T0) / 1000000 )) ms; the hub is restarting"
+  UPLOAD_LOST=0
+  if RESP=$(curl -s --max-time 120 -b "$JAR" -H 'X-Hub: 1' -H 'Content-Type: application/octet-stream' \
+           --data-binary @"$BIN" -w '\n%{http_code}' "http://$HOST/api/ota"); then
+    CODE=${RESP##*$'\n'}
+    [[ "$CODE" == 200 ]] || die "hub refused the update: ${RESP%$'\n'*}"
+    ok "uploaded in $(( ($(date +%s%N) - T0) / 1000000 )) ms; the hub is restarting"
+  else
+    # The answer can get lost while the hub restarts into the new image: ask the hub
+    # what it runs instead of guessing.
+    UPLOAD_LOST=1
+    warn "no answer to the upload; checking whether the hub installed it…"
+  fi
   info "waiting for it to come back (up to 3 min; a failed update rolls back by itself)…"
   for _ in $(seq 1 90); do
     sleep 2
@@ -110,6 +128,9 @@ if [[ "$OTA" == 1 ]]; then
       ok "updated to $NEW_ID and confirmed ($(( ($(date +%s%N) - T0) / 1000000 )) ms total)"; exit 0
     fi
     [[ "$RESULT" == rolled_back && "$TO_ID" == "$NEW_ID" ]] && die "the new firmware failed (crash or health check); the hub rolled back to $RUN_ID"
+    if [[ "$UPLOAD_LOST" == 1 && "$RUN_ID" == "$OLD_ID" && $(( ($(date +%s%N) - T0) / 1000000000 )) -gt 40 ]]; then
+      die "upload failed: the hub still runs $RUN_ID"
+    fi
   done
   die "the hub didn't come back within 3 minutes"
 fi
@@ -173,7 +194,6 @@ else
 fi
 HOSTNAME_="${ARG_HOST:-${SAVED_HOSTNAME:-zigbee-hub}}"
 [[ "$HOSTNAME_" =~ ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ ]] || die "hostname must be a-z, 0-9, '-' (max 32)"
-TS_AUTHKEY="${ARG_TSKEY:-$SAVED_TS_AUTHKEY}"
 [[ -n "$BACKUP_SSID" ]] && check_5ghz "$BACKUP_SSID" 0
 
 umask 077
@@ -181,7 +201,6 @@ umask 077
   printf 'SAVED_BACKUP_SSID=%q\n' "$BACKUP_SSID"
   printf 'SAVED_BACKUP_PSK=%q\n' "$BACKUP_PSK"
   printf 'SAVED_HOSTNAME=%q\n' "$HOSTNAME_"
-  printf 'SAVED_TS_AUTHKEY=%q\n' "$TS_AUTHKEY"
 } >"$STATE"
 
 # Admin password: generated once, kept here, only its hash goes to the board.
@@ -207,7 +226,7 @@ PROV_SIZE=$(awk -F, '{gsub(/[ \t]/, "")} $1=="prov"{print $5}' partitions.csv)
 PROV_BIN="$SECRETS/prov.bin"
 PROV_SSID="$SSID" PROV_PSK="$PSK" PROV_SSID2="$BACKUP_SSID" PROV_PSK2="$BACKUP_PSK" \
 PROV_HOSTNAME="$HOSTNAME_" PROV_COUNTRY="$COUNTRY" PROV_ADMIN_PW="$ADMIN_PW" \
-PROV_TS_AUTHKEY="$TS_AUTHKEY" \
+PROV_LANRESET="$( [[ $LAN_ACCESS == 1 ]] && echo "$(date +%s)-$RANDOM" )" \
   "$PY" -I tools/mkprov.py "$IDF_PATH" "$PROV_BIN" "$((PROV_SIZE))" || die "mkprov failed"
 
 # ---------------------------------------------------------------- flash
@@ -226,8 +245,10 @@ info "waiting for the board to join Wi-Fi (up to 90 s)…"
 # awk reads the port itself and does all the cleanup. A pipeline here cost
 # minutes: a filter (tr) block-buffered the HUB_READY line, and a `cat` feeding
 # awk only noticed awk had exited on its next write, ~30 s later.
-READY=$(timeout 90 awk '
+ZBF=$(mktemp)
+READY=$(timeout 90 awk -v zbf="$ZBF" '
   { gsub(/\r/, ""); gsub(/\033\[[0-9;]*m/, "") }
+  / zb: network (restored|formed): / { z = $0; sub(/^.*zb: network /, "", z); print z > zbf; fflush(zbf) }
   / wifi5g: / { line = $0; sub(/^.*wifi5g: /, "", line)
                 if (line !~ /^HUB_READY/) { print "    " line > "/dev/stderr"; fflush("/dev/stderr") } }
   /HUB_READY/ { sub(/^.*HUB_READY /, ""); print; exit }' <"$PORT" || true)
@@ -240,8 +261,20 @@ DFS=""; (( CH >= 52 && CH <= 144 )) && DFS=" (DFS)"
 
 echo
 ok "Connected to $NETNAME on 5 GHz, channel $CH$DFS, $RSSI dBm, $((MS / 1000)).$(( (MS % 1000) / 100 )) s after boot"
+# "restored: PAN 0x4668, ext PAN 0x…, channel 15, short 0x0000" (or "formed: …")
+ZB=$(cat "$ZBF" 2>/dev/null); rm -f "$ZBF"
+if [[ -n "$ZB" ]]; then
+  ZB_CH=$(sed -n 's/.*channel \([0-9]*\).*/\1/p' <<<"$ZB"); ZB_PAN=$(sed -n 's/^[a-z]*: PAN \(0x[0-9a-fA-F]*\).*/\1/p' <<<"$ZB")
+  ok "Zigbee network up on channel $ZB_CH (PAN $ZB_PAN)$( [[ $ZB == formed* ]] && echo ', newly formed')"
+fi
+# Tailscale connects a few seconds after Wi-Fi (TS_READY ip=… name=… took_ms=…).
+TS=$(timeout 15 awk '{ gsub(/\r/, "") } /TS_READY/ { sub(/^.*TS_READY /, ""); print; exit }' <"$PORT" || true)
+TS_NAME=$(sed -n 's/.*\bname=\([^ ]*\).*/\1/p' <<<"$TS"); TS_IP=$(sed -n 's/.*\bip=\([^ ]*\).*/\1/p' <<<"$TS")
+if [[ -n "$TS_IP" ]]; then ok "Tailscale: $TS_NAME ($TS_IP)"
+else info "Tailscale: not connected within 15 s (off, no auth key yet, or still connecting; see Settings → Tailscale)"; fi
 echo
-echo "  Board:    $IP   ($HOSTNAME_.local)"
+echo "  Web UI:   http://$HOSTNAME_.local/   (LAN, $IP)"
+[[ -n "$TS_IP" ]] && echo "            http://$HOSTNAME_/         (tailnet)"
 echo "  Password: $ADMIN_PW$( [[ $NEW_PW == 1 ]] && echo '   (new — saved in .esp/secrets/admin_password)')"
 [[ -n "$BACKUP_SSID" ]] && echo "  Backup:   $BACKUP_SSID"
 echo

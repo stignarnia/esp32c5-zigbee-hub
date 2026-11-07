@@ -24,8 +24,8 @@ nav a.active, nav a:hover { color: var(--fg); background: var(--bg); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; }
 .dot.on { background: var(--ok); }
 
-main { max-width: 1000px; margin: 0 auto; padding: 1rem; }
-.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
+main { max-width: 1400px; margin: 0 auto; padding: 1rem; }
+.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; }
 .card + .card, .grid + .card, .card + .grid, .grid + .grid { margin-top: 1rem; }
 .grid .card + .card { margin-top: 0; }
@@ -70,7 +70,7 @@ th { color: var(--muted); font-weight: normal; }
 #zb-map { overflow-x: auto; }
 
 .login { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }
-.login-card { width: min(360px, 100%); }
+.login-card { width: min(440px, 100%); }
 .login-card button { width: 100%; margin-top: .5rem; }
 
 @media (max-width: 560px) {

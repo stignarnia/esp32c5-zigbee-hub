@@ -34,6 +34,11 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_MEMTEST=n
 
 # --- Network ---------------------------------------------------------------
+# Channel state information for the Wi-Fi motion sensing log (components/motion).
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+# CSI reserves internal RAM per static RX buffer, on top of the buffers themselves: with 16
+# buffers the lowest free internal heap fell to 14.7 KB; with 8 it is 32.4 KB (2026-11-08).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
 # Re-request the last DHCP lease (stored in NVS) instead of a full DISCOVER.
 CONFIG_LWIP_DHCP_RESTORE_LAST_IP=y
 # The default ARP probe of the offered address costs ~1 s per connect.

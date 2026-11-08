@@ -24,6 +24,9 @@ char *api_zb_json(void);      // devices + network snapshot, {"type":"zb",...}; 
 // ---- web_auto.c ----
 esp_err_t auto_api_register(httpd_handle_t server);
 
+// ---- web_motion.c ----
+esp_err_t motion_api_register(httpd_handle_t server);
+
 // ---- web_server.c helpers used by the API ----
 esp_err_t web_send_json(httpd_req_t *req, const char *status, const char *json);
 esp_err_t web_send_error(httpd_req_t *req, const char *status, const char *msg);

@@ -9,6 +9,7 @@
 #include "esp_app_desc.h"
 #include "esp_netif.h"
 #include "mdns.h"
+#include "motion.h"
 #include "nvs_flash.h"
 #include "prov.h"
 #include "tailscale.h"
@@ -248,6 +249,8 @@ void app_main(void)
     if (zb_start() != ESP_OK) ESP_LOGE(TAG, "zigbee failed to start");
     // Scripts next (the device registry is loaded): they don't wait for Wi-Fi either.
     if (automation_start() != ESP_OK) ESP_LOGE(TAG, "automation engine failed to start");
+    // Wi-Fi motion sensing ("moving" / "not moving"); senses once Wi-Fi is up.
+    if (motion_init() != ESP_OK) ESP_LOGE(TAG, "motion sensing failed to start");
 
     static prov_t prov;  // static: holds secrets, keep it off the small main stack
     bool have_prov = prov_load(&prov) == ESP_OK;

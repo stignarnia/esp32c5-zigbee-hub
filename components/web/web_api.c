@@ -739,5 +739,7 @@ esp_err_t api_register(httpd_handle_t server)
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
         if (err != ESP_OK) return err;
     }
-    return auto_api_register(server);
+    esp_err_t err = auto_api_register(server);
+    if (err != ESP_OK) return err;
+    return motion_api_register(server);
 }

@@ -109,6 +109,7 @@ function render() {
     a.classList.toggle('active', a.getAttribute('href') === `#${name}`));
   if (name !== 'devices') pages.devices.stop();
   if (name !== 'automations') pages.automations.stop();
+  if (name !== 'settings') motionui.stop();
   (pages[name] || pages.devices).render();
 }
 window.addEventListener('hashchange', render);
@@ -710,6 +711,7 @@ pages.settings = {
         <section class="card"><h2>Restart</h2>
           <div class="row"><button class="danger" id="reboot">Restart the hub</button></div>
         </section>
+        <section class="card" id="mo-card"><h2>Motion</h2><div class="muted">Loading…</div></section>
       </div>
       <div class="grid" id="tz-settings"></div>`;
     $('#fw-file').addEventListener('change', () => { $('#fw-upload').disabled = !$('#fw-file').files.length; });
@@ -722,8 +724,43 @@ pages.settings = {
     wifi.render();
     tsui.renderSettings();
     autoset.render();
+    motionui.render();
   },
   live() { wifi.live(); tsui.liveSettings(); },
+};
+
+// Motion (part of Settings) -----------------------------------------------------------
+// Wi-Fi motion sensing. The two buttons are the calibration: each one learns what that
+// state looks like (stay still 30 s / keep moving 15 s).
+const motionui = {
+  timer: null,
+  stop() { clearInterval(this.timer); this.timer = null; },
+  async render() {
+    const card = $('#mo-card');
+    if (!card) return;
+    card.innerHTML = `<h2>Motion</h2>
+      <div id="mo-state" style="font-size:2.5rem;font-weight:700;text-align:center;margin:.5rem 0">…</div>
+      <p id="mo-note" class="muted" style="text-align:center"></p>
+      <div class="row" style="justify-content:center"><button id="mo-still">Not moving</button><button id="mo-move">Moving</button></div>`;
+    $('#mo-still').addEventListener('click', () => this.learn(false));
+    $('#mo-move').addEventListener('click', () => this.learn(true));
+    await this.poll();
+    this.stop();
+    this.timer = setInterval(() => this.poll(), 1000);
+  },
+  async learn(moving) {
+    try { await api('/api/motion/learn', { method: 'POST', json: { moving } }); await this.poll(); }
+    catch (e) { $('#mo-note').textContent = e.message; }
+  },
+  async poll() {
+    if (!$('#mo-card')) { this.stop(); return; }
+    let d;
+    try { d = await api('/api/motion'); } catch (_) { return; }
+    $('#mo-state').textContent = !d.sensing ? '—' : d.moving ? 'Moving' : 'Not moving';
+    $('#mo-note').textContent = !d.sensing ? 'No Wi-Fi signal: not sensing'
+      : d.learning === 'still' ? 'Learning: stay still for 30 s…'
+      : d.learning === 'moving' ? 'Learning: keep moving for 15 s…' : '';
+  },
 };
 
 // Wi-Fi networks (part of Settings) ---------------------------------------------------

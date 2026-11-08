@@ -203,6 +203,7 @@ components/
   automation/    Lua engine (auto_engine.c), store, GPIO, HTTP
   lua/           Lua 5.5.1 source (MIT), vendored unmodified
   tailscale/     microlink (MIT) ported to IDF v6, wrapped
+  motion/        Wi-Fi motion sensing (CSI): moving / not moving, two-button calibration
   esphome_api/   (Phase 6, not yet) ESPHome native API server (Noise), HA mode
 examples/        example Lua scripts offered in the editor (*.lua; put into app.js at
                  build time by components/web/gen_app_js.py; template.lua = new-script text)
@@ -1296,6 +1297,74 @@ nothing from Phase 6.
 - [ ] Verified on hardware: door opens → buzzers within a second, Alexa plays; same
       with the router unplugged (buzzers immediately, Alexa once it's back)
 
+#### Keys alarm (`examples/keys-alarm.lua`): failure decisions (user, 2026-11-08)
+Setup: "Door" contact sensor; "Keys" contact sensor on the inside of the door, a magnet on
+the one key; tapping the key on "Keys" = "I'm leaving with it". No hardware on the market
+tracks where the key is (user), so the hub never knows it: every wrong guess must be an
+alarm, never silence. No procedures: nobody does anything except tap when leaving with the
+key. Design under review: a Door opening is silent only after a Keys tap within the window,
+or when the house was still (Wi-Fi sensing, CSI) for a set time before it (coming home);
+anything else sounds the alarm. Every alarm is the same (user): full alarm (3 buzzers,
+Alexa at once) for 10 s, stopped earlier by a Keys tap or the door closing; the tap only
+stops it and changes nothing else.
+- Accepted:
+  - M1: tap, key put down, out within the window (window may be 60 s)
+  - M6: a buzzer unplugged or broken
+  - M7: door propped open, no Door event (closing it is loud)
+  - F1: coming home while someone else is home → alarm
+  - F6: leaving with the key without tapping → alarm until a tap
+  - F7: Wi-Fi down → every homecoming alarms
+  - F8: hub restarted recently → homecomings alarm
+  - F9: something moving in the empty house → homecoming alarms
+- Accepted only on conditions:
+  - F2: B leaves while A has the key → alarm: only if it stops when the door closes
+    **and** the hub guarantees A has the key and it isn't in the house
+  - F3 (A leaves the key for B, B at home), F4 (delivery, looking out), F5 (second person
+    let in by the first) → alarm: only if the tap that silences it causes no further problem
+- Rejected:
+  - F12: delaying the Alexa call. Alexa is called the moment the alarm starts
+- Open:
+  - M2: Wi-Fi sensing misses a walk to the door → decided by the sensing test
+  - F10: how long the house must be still before an opening counts as coming home
+  - F11: the person coming home seen on the landing before opening → alarm
+- Accepted as long as a natural action resets everything to normal (rule for every
+  failure, user): M3 (still by the door for long, out within 3 s of moving), M4 (Door
+  report lost, sensor offline or flat), M5 (hub down or script disabled). The design keeps
+  nothing from one opening to the next (no `away`, no key location), so once the door is
+  closed the next opening is judged fresh: closing the door is the reset
+
+#### Wi-Fi motion sensing (`components/motion`; built and installed 2026-11-08)
+Settings → Motion shows **Moving** / **Not moving**; two buttons are the only calibration:
+"Not moving" (stay still 30 s → still level = p99) and "Moving" (move 15 s → moving level =
+p25); threshold = geometric mean of the two (still only: 2.5 × still; neither: 800), kept in
+NVS. "Moving" = a 500 ms score above the threshold within the last 2 s. Not used by the
+alarm or scripts yet. A first version logged scores and events to LittleFS for analysis;
+removed at the user's request once the live test below was convincing.
+- How: the hub pings its gateway every 50 ms; the CSI of every frame addressed to the hub is
+  scored every 500 ms (mean per-subcarrier std dev of the amplitude normalised per frame,
+  x10000). It sees movement anywhere along the router–hub path, both ends included
+- CSI on the C5, measured: with only `acquire_csi_legacy` + `force_lltf` the driver gave CSI for
+  the router's beacons only (format 1, ~6/s). The ping replies (HE SU, format 4) needed the HE
+  options too (ht20/ht40/vht/su/mu/dcm/beamformed/stbc all set; which one did it is not isolated).
+  The replies' source MAC is the router's LAN MAC, not the BSSID: the filter is "addressed to
+  the hub". With `force_lltf` both formats give 106 bytes (53 subcarriers, 8-bit I/Q). The
+  score uses one format, the one most frames came in over the last 10 s (format 4 here):
+  beacons are sent differently and would mix two channel shapes. 23–33 frames/s scored
+- Live test (user at the desk, hub placed by the user): sitting still 160–240 with short jumps
+  to 470; walking to the door 1,360–2,960; standing at the door 230–590; walking back
+  1,310–2,670. Waving in front of the router 1,270–3,760, in front of the hub 1,570–4,340,
+  still in between 150–290
+- **RAM**: `CONFIG_ESP_WIFI_CSI_ENABLED` alone took the lowest internal free from 30 KB to
+  17.9 KB (sensing off) / 14.7 KB (on): the driver reserves per static RX buffer at boot.
+  Lever 2 pulled: static RX buffers 16 → 8 → **69 KB free, lowest 32.9 KB**, sensing on
+- Load with sensing on (logging version): 38 downloads of `cm.js` over the tailnet in 30 s
+  (4.5 MB, 0 failed), LAN ping every 100 ms 300/300 (avg 21.5 ms, as before), 0 Wi-Fi
+  disconnects, Zigbee up
+- [x] moving / not moving checked by the user with the default threshold 800 (no calibration
+  pressed): "insanely accurate" (2026-11-08)
+- [x] both calibration buttons used by the user: learned threshold **798** (geometric mean of
+  the two levels; the individual levels aren't exposed), next to the hand-picked 800
+
 ### Phase 6 — Home Assistant mode (ESPHome native API)
 **Two modes, not either/or (user decision 2026-11-07).** With the integration on, the
 hub always speaks to Home Assistant; what it shows depends on whether any Lua script
@@ -1380,6 +1449,8 @@ lowest is early in boot). Pulled so far: lever 3 (mbedTLS in PSRAM) and lever 4 
 microlink's four tasks and the two Phase 4 watcher tasks (none of them writes flash).
 With the Lua engine (Phase 5, 2026-11-07, no scripts): **74 KB free, lowest 37–40 KB** —
 the engine's 160 KB stack is in PSRAM, so it cost ~4 KB internal, not the 8–16 KB expected.
+With Wi-Fi CSI compiled in (2026-11-08) the lowest fell to 14.7 KB; lever 2 pulled (static RX
+buffers 16 → 8): **69 KB free, lowest 32.9 KB** with motion sensing on.
 
 Levers, roughly cheapest first — pull only what's needed:
 1. Wi-Fi code out of IRAM (`CONFIG_ESP_WIFI_IRAM_OPT`, `_RX_IRAM_OPT`,

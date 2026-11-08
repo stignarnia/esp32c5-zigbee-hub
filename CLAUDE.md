@@ -18,9 +18,9 @@ One ESP32-C5 board that is, on its own:
 5. **A local automation engine** — scripts in an interpreted language (Lua),
    pasted into the UI and run on the board, with no cloud and no Home Assistant.
 6. **Optional Home Assistant integration** — an opt-in setting (off by default).
-   When it's on, the board speaks the **ESPHome native API**: with no script
-   enabled, every Zigbee device appears in Home Assistant as a native sub-device of
-   the hub; with scripts enabled, the hub appears as one smarter device (see Phase 6).
+   When it's on, the board speaks the **ESPHome native API**: every Zigbee device
+   appears in Home Assistant as a native sub-device of the hub, and the hub adds its own
+   entities plus whatever the enabled scripts publish (see Phase 6).
 
 ## Priorities (user decision, 2026-11-04)
 
@@ -46,9 +46,9 @@ Everything below follows from that ordering:
    A dead uplink delays them (or, with `retry_for`, holds them until it's back) but
    can't stall a trigger or timer — the local buzzer still sounds at once.
 6. **The HA integration doesn't change the priority.** The ESPHome API server is a
-   consumer of the device registry like the UI; it must never block Zigbee. In devices
-   mode (no local scripts) automations live in HA and depend on Wi-Fi by definition —
-   the user's choice; with local scripts, they run on the hub whatever HA does.
+   consumer of the device registry like the UI; it must never block Zigbee. Automations
+   built in HA depend on Wi-Fi by definition — the user's choice; local scripts run on
+   the hub whatever HA does.
 
 ## Ground rules
 
@@ -204,7 +204,7 @@ components/
   lua/           Lua 5.5.1 source (MIT), vendored unmodified
   tailscale/     microlink (MIT) ported to IDF v6, wrapped
   motion/        Wi-Fi motion sensing (CSI): moving / not moving, two-button calibration
-  esphome_api/   (Phase 6, not yet) ESPHome native API server (Noise), HA mode
+  esphome_api/   (Phase 6, not yet) ESPHome native API server (Noise), HA integration
 examples/        example Lua scripts offered in the editor (*.lua; put into app.js at
                  build time by components/web/gen_app_js.py; template.lua = new-script text)
 tools/
@@ -1365,36 +1365,31 @@ removed at the user's request once the live test below was convincing.
 - [x] both calibration buttons used by the user: learned threshold **798** (geometric mean of
   the two levels; the individual levels aren't exposed), next to the hand-picked 800
 
-### Phase 6 — Home Assistant mode (ESPHome native API)
-**Two modes, not either/or (user decision 2026-11-07).** With the integration on, the
-hub always speaks to Home Assistant; what it shows depends on whether any Lua script
-is enabled:
-- **Devices mode** — setting on, **no script enabled**: every Zigbee device appears
-  in HA as its own ESPHome sub-device of the hub (HA is the brain)
-- **Smart-device mode** — setting on, **scripts enabled**: the hub appears in HA as
-  **one smarter device** (the hub is the brain); the Zigbee devices aren't exposed
-  individually
+### Phase 6 — Home Assistant integration (ESPHome native API)
+**One entity set, additive (user decision 2026-11-08; replaces the two modes of
+2026-11-07).** With the integration on, Home Assistant always sees every Zigbee device as
+its own sub-device of the hub, plus the hub's own entities, plus whatever enabled scripts
+publish. Enabling or disabling scripts never hides a device. The earlier design switched
+between "devices mode" (no script enabled) and "smart-device mode" (the hub as one device,
+Zigbee devices hidden): dropped because enabling a first script would have broken every HA
+dashboard, automation and history built on the devices, for nothing — the hub never
+commands devices, so HA seeing them can't conflict with the scripts; clutter is HA's to
+hide.
 
 - [ ] **Setting** "Home Assistant integration", **off by default**, in the UI
       (Settings) and as `flash.sh --ha` at provisioning. Off → the API server
       never starts, port 6053 closed, nothing advertised
-- [ ] **Mode rule** when the setting is on: devices mode iff the number of *enabled*
-      scripts is 0, else smart-device mode. Disabled scripts don't count, so
-      "disable all" hands HA the individual devices without deleting anything.
-      Evaluated at boot, on every script enable/disable/delete, and when the setting
-      changes
-- [ ] Switching modes: the API server keeps running; the entity set changes, so the
-      hub closes its API clients (each client task closes its own socket — lesson 8)
-      and HA reconnects and lists the new entities by itself. Enabling the first
-      script asks first ("Home Assistant will see the hub as one device instead of
-      N devices"). Entity keys are derived from IEEE address + attribute (devices
-      mode) and script name + entity name (smart-device mode), so HA entity IDs and
-      history are identical every time a mode comes back
-- [ ] **Smart-device mode entities (user decision 2026-11-07)**: the gateway
-      entities below; one switch per script (enable/disable);
-      entities a script publishes through a small Lua API (e.g. `ha.sensor(name,
-      value)`, `ha.binary(name, on)`, `ha.event(name)`), so a script can expose
-      "alarm armed", "doors open: 2", "alarm triggered" instead of raw devices
+- [ ] **Script entities (user decision 2026-11-07)**, in addition to the devices: one
+      switch per script (enable/disable); entities a script publishes through a small Lua
+      API (e.g. `ha.sensor(name, value)`, `ha.binary(name, on)`, `ha.event(name)`), so a
+      script can expose "alarm armed", "doors open: 2", "alarm triggered". A disabled
+      script's entities stay, unavailable (history kept); deleting the script removes them
+- [ ] Entity set changes (a device paired or removed, a script publishing a new entity, a
+      script deleted): the API server keeps running; the hub closes its API clients (each
+      client task closes its own socket — lesson 8) and HA reconnects and lists the new
+      set by itself. Entity keys come from IEEE address + attribute (devices), script name
+      + entity name (scripts) and fixed names (hub), so HA entity IDs and history survive
+      every change
 - [ ] ESPHome native API on TCP 6053, **Noise encryption mandatory** (no plaintext).
       Key generated by the board the first time the setting is turned on (or by
       `flash.sh --ha`, stored in `.esp/secrets/` and written to `prov`); shown
@@ -1404,37 +1399,36 @@ is enabled:
       MagicDNS name, `zigbee-hub.<tailnet>.ts.net:6053`. In tailnet-only access mode
       the API accepts only tailnet connections (same check as the web server) and
       nothing is advertised
-- [ ] **Sub-devices** (devices mode; HA/ESPHome 2025.7+): hub = main device, each
+- [ ] **Sub-devices** (HA/ESPHome 2025.7+): hub = main device, each
       Zigbee device = sub-device with its own name/area/manufacturer/model from the
       interview. `device_id` field numbers per entity type are in the reference
       repo's CLAUDE.md ("Protobuf device_id Field Numbers") — verify against the
       current `api.proto` before relying on them
-- [ ] Capability → entity mapping (devices mode; same capabilities as the UI uses):
+- [ ] Capability → entity mapping (same capabilities as the UI uses):
       sensors → sensor with device_class, IAS zone → binary_sensor,
       battery/LQI/last seen → diagnostic entities. Read-only: the hub doesn't command
       Zigbee devices (no `zb.set`, user decision 2026-11-07)
-- [ ] Gateway entities (both modes): permit-join button (pairing works from HA too),
+- [ ] Hub entities: permit-join button (pairing works from HA too),
       Zigbee channel, device count, Wi-Fi RSSI, uptime
 - [ ] **The hub is a motion sensor itself** (user, 2026-11-08): Wi-Fi motion sensing
-      (`components/motion`, Phase 5b) exposed in both modes as a `binary_sensor` with
+      (`components/motion`, Phase 5b) exposed as a `binary_sensor` with
       device_class `motion` on the hub's own device (Moving = on), with "no signal" (Wi-Fi
       down, no frames) reported as unavailable, not as "not moving"
 - [ ] Wire-format safety: every length off the socket bounded before use
       (reference had a pre-auth overflow on the hello frame — lesson 9)
 - [ ] Entity table in PSRAM (reference: 54 KB, moving it freed half the internal heap)
-- [ ] The web UI keeps working in both modes (devices, enrollment, network, status);
-      the Automations page shows which mode is active and why
+- [ ] The web UI is unchanged by the integration (devices, enrollment, network, status)
 - [ ] When the setting is off, the ESPHome API code costs no runtime RAM (server
       task and entity table only allocated when it's on)
 - [ ] Verified: HA discovers the hub, adopts with the key, shows each paired device as
-      a sub-device (no script enabled); enabling a script turns it into one device
-      with the smart-device entities; disabling all scripts brings the individual
-      devices back with history intact
+      a sub-device and the hub's own entities; enabling a script that publishes entities
+      adds them and leaves every device and its history in place; disabling it leaves
+      its entities unavailable
 
 ### Phase 7 — Hardening
 - [ ] Soak test 24 h+ (reference repo's worst bugs needed 9 h of uptime)
-- [ ] Internal heap low-water mark measured in both modes: Zigbee + Tailscale +
-      UI client + 3 scripts, and Zigbee + Tailscale + UI client + HA connected
+- [ ] Internal heap low-water mark measured: Zigbee + Tailscale + UI client + 3 scripts,
+      and the same with HA connected
 - [ ] Zigbee network backup/restore (download from UI)
 - [ ] Factory reset (UI + long-press BOOT button)
 
@@ -1504,9 +1498,9 @@ All measured there on the same chip; re-verify, don't assume.
   don't need. It's our fork once copied into `components/tailscale/`.
 - **"Scanning" = discovery, not QR.** Success criterion: *put the battery in a
   random cheap reed sensor and the hub finds it.* No camera, no install codes.
-- **HA modes** (opt-in setting on; updated 2026-11-07): zero *enabled* scripts →
-  every Zigbee device as its own HA device; scripts enabled → the hub as one smarter
-  HA device. Disabled scripts don't count.
+- **HA entities are additive** (opt-in setting on; 2026-11-08, replaces the two modes of
+  2026-11-07): every Zigbee device always appears as its own HA device; the hub's own
+  entities and whatever enabled scripts publish come on top. Scripts never hide devices.
 - **Lua** for automations (see Phase 5).
 - **Script editor = CodeMirror 6**, prebuilt and committed (2026-11-07; Monaco rejected:
   no mobile support, several MB).

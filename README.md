@@ -24,9 +24,9 @@ broker, no Raspberry Pi.
   humidity sensors. Mains-powered Zigbee devices (plugs, bulbs, other routers) are
   untested and not what this hub is built for.
 - **Optionally, native Home Assistant devices.** Turn on the Home Assistant
-  integration: with no local automation enabled, every Zigbee device appears in Home
-  Assistant as a native ESPHome device; with automations enabled, the hub appears as
-  one smarter device. No MQTT, no ZHA, no zigbee2mqtt.
+  integration: every Zigbee device appears in Home Assistant as a native ESPHome
+  device, the hub adds its own entities (including its Wi-Fi motion sensor), and your
+  automations can publish their own on top. No MQTT, no ZHA, no zigbee2mqtt.
 
 ## Design priority
 
@@ -442,20 +442,13 @@ as its own device, with its name, area, manufacturer and model:
 The hub itself adds a **Permit join** button, so you can pair new devices from
 Home Assistant too.
 
-**Two modes, depending on your automations:**
-
-- **No script enabled**: Home Assistant is the brain and sees every Zigbee device
-  on its own, as described above.
-- **Scripts enabled**: the hub is the brain and appears in Home Assistant as **one
-  smarter device**: its own entities (pairing, Zigbee channel, signal, uptime) and
-  the state of your automations, instead of one device per sensor. Enabling the
-  first script asks first.
-
-Switching is automatic: Home Assistant reconnects by itself and picks up the new
-set. Entity IDs and history are unchanged when a mode comes back, because they're
-derived from each device's hardware address (or the script's name). Disabled
-scripts don't count, so you can switch without deleting anything. The Automations
-page always shows which mode is active.
+**Your automations add to this, they never replace it.** Every Zigbee device is always
+there. Each script gets an on/off switch, and a script can publish its own entities
+("alarm armed", "doors open: 2", "alarm triggered"). A disabled script's entities show
+as unavailable and keep their history; deleting the script removes them. When the set
+changes, Home Assistant reconnects by itself and picks it up. Entity IDs and history
+never change, because they're derived from each device's hardware address (or the
+script's name).
 
 The connection is encrypted (ESPHome's Noise protocol, no plaintext fallback). If
 Home Assistant runs somewhere else on your tailnet, add the hub manually as

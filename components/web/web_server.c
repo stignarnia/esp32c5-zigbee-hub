@@ -40,6 +40,8 @@ extern const uint8_t style_css_gz_start[] asm("_binary_style_css_gz_start");
 extern const uint8_t style_css_gz_end[] asm("_binary_style_css_gz_end");
 extern const uint8_t cm_js_gz_start[] asm("_binary_cm_js_gz_start");
 extern const uint8_t cm_js_gz_end[] asm("_binary_cm_js_gz_end");
+extern const uint8_t favicon_svg_gz_start[] asm("_binary_favicon_svg_gz_start");
+extern const uint8_t favicon_svg_gz_end[] asm("_binary_favicon_svg_gz_end");
 
 // ---- helpers ---------------------------------------------------------------------
 
@@ -130,7 +132,7 @@ static esp_err_t asset_handler(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)a->start, a->end - a->start);
 }
 
-static asset_t s_assets[4];
+static asset_t s_assets[5];
 
 // ---- WebSocket ------------------------------------------------------------------------
 
@@ -288,6 +290,7 @@ esp_err_t web_start(const web_config_t *cfg)
     s_assets[1] = (asset_t){"/app.js", "text/javascript", app_js_gz_start, app_js_gz_end};
     s_assets[2] = (asset_t){"/style.css", "text/css", style_css_gz_start, style_css_gz_end};
     s_assets[3] = (asset_t){"/cm.js", "text/javascript", cm_js_gz_start, cm_js_gz_end};  // editor, loaded on demand
+    s_assets[4] = (asset_t){"/favicon.svg", "image/svg+xml", favicon_svg_gz_start, favicon_svg_gz_end};
     for (size_t i = 0; i < sizeof(s_assets) / sizeof(s_assets[0]); i++) {
         httpd_uri_t u = {.uri = s_assets[i].uri, .method = HTTP_GET, .handler = asset_handler,
                          .user_ctx = &s_assets[i]};

@@ -7,6 +7,28 @@ const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Light / dark: follows the system until the header toggle is used; the choice is kept in
+// this browser only.
+const theme = {
+  dark: matchMedia('(prefers-color-scheme: dark)'),
+  current() { return document.documentElement.dataset.theme || (this.dark.matches ? 'dark' : 'light'); },
+  label() {
+    const b = $('#theme'), dark = this.current() === 'dark';
+    b.textContent = dark ? '☀' : '☾';
+    b.title = dark ? 'Light theme' : 'Dark theme';
+  },
+  toggle() {
+    const t = this.current() === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = t;
+    try { localStorage.setItem('theme', t); } catch (_) { /* private mode: this page view only */ }
+    this.label();
+  },
+};
+try { const t = localStorage.getItem('theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (_) { /* none */ }
+theme.label();
+$('#theme').addEventListener('click', () => theme.toggle());
+theme.dark.addEventListener('change', () => theme.label());
+
 let status = null;
 let ws = null;
 let wsRetry = null;
@@ -866,7 +888,12 @@ const tsui = {
     this.peersAt = Date.now();
     try { this.peers = (await api('/api/ts')).peer_list; if (currentPage() === 'status') pages.status.live(); } catch (_) { /* keep last */ }
   },
-  msg(html, cls = '') { const m = $('#ts-msg'); if (m) { m.className = cls; m.innerHTML = html; } },
+  // Rewritten only when it changes: a re-created link flashes from unvisited to visited colour.
+  msg(html, cls = '') {
+    const m = $('#ts-msg');
+    if (!m || (m.dataset.html === html && m.className === cls)) return;
+    m.dataset.html = html; m.className = cls; m.innerHTML = html;
+  },
   // Settings card. Re-rendered only when what it shows changes (not on every status push),
   // so a half-typed key is never wiped.
   renderSettings() {
@@ -956,8 +983,8 @@ const tsui = {
     if (!$('#ts-card') || !status) return;
     const t = status.tailscale;
     if (`${t.enabled}|${t.registered}|${t.key_pending}|${t.suspended}` !== this.shown) { this.renderSettings(); return; }
-    const h = $('#ts-card h2');
-    if (h) h.innerHTML = `Tailscale ${this.stateBadge(t)}`;
+    const h = $('#ts-card h2'), head = `Tailscale ${this.stateBadge(t)}`;
+    if (h && h.dataset.html !== head) { h.dataset.html = head; h.innerHTML = head; }
     if (t.error) this.msg(esc(t.error), 'err');
     else if (t.state === 'connected') this.msg(`Connected: <code>${esc(t.ip)}</code>${t.name ? ` · <a href="http://${esc(t.name)}/">${esc(t.name)}</a>` : ''}`);
   },

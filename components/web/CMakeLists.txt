@@ -25,7 +25,7 @@ add_custom_command(
     VERBATIM)
 
 # cm.js is the script editor (CodeMirror), prebuilt by tools/codemirror/build.sh.
-foreach(asset index.html app.js style.css cm.js)
+foreach(asset index.html app.js style.css cm.js favicon.svg)
     set(src "${CMAKE_CURRENT_SOURCE_DIR}/ui/${asset}")
     if(asset STREQUAL "app.js")
         set(src "${app_js}")

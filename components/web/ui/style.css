@@ -1,15 +1,28 @@
 :root {
+  color-scheme: light;
+  --link: #1d5bc2; --link-visited: #6b3fbf;
   --bg: #f4f5f7; --card: #fff; --fg: #1d2129; --muted: #667085; --line: #e3e6ea;
   --accent: #2f6fde; --accent-fg: #fff; --ok: #1f9d55; --warn: #c27c0e; --bad: #d14343;
   --radius: 10px;
-  --tok-kw: #8839c7; --tok-str: #2c7a39; --tok-num: #b35c00; --tok-cmt: #7a8494; --tok-fn: #2f6fde;
+  --tok-kw: #8839c7; --tok-str: #2c7a39; --tok-num: #b35c00; --tok-cmt: #5f6978; --tok-fn: #2f6fde;
 }
+/* Dark: the system's choice unless the header toggle picked light, or the toggle picked dark. */
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #111418; --card: #1a1f25; --fg: #e6e9ee; --muted: #98a2b3; --line: #2a3139;
-          --accent: #5b8ff0; --ok: #3fbf74; --warn: #e0a23a; --bad: #ef6b6b;
-          --tok-kw: #c792ea; --tok-str: #9ece6a; --tok-num: #f2a65a; --tok-cmt: #7d8796; --tok-fn: #7aa2f7; }
+  :root:not([data-theme=light]) { color-scheme: dark;
+  --bg: #111418; --card: #1a1f25; --fg: #e6e9ee; --muted: #98a2b3; --line: #2a3139;
+  --accent: #5b8ff0; --ok: #3fbf74; --warn: #e0a23a; --bad: #ef6b6b;
+  --tok-kw: #c792ea; --tok-str: #9ece6a; --tok-num: #f2a65a; --tok-cmt: #939dac; --tok-fn: #7aa2f7;
+  --link: #8ab4f8; --link-visited: #c4a7f7; }
 }
+:root[data-theme=dark] { color-scheme: dark;
+  --bg: #111418; --card: #1a1f25; --fg: #e6e9ee; --muted: #98a2b3; --line: #2a3139;
+  --accent: #5b8ff0; --ok: #3fbf74; --warn: #e0a23a; --bad: #ef6b6b;
+  --tok-kw: #c792ea; --tok-str: #9ece6a; --tok-num: #f2a65a; --tok-cmt: #939dac; --tok-fn: #7aa2f7;
+  --link: #8ab4f8; --link-visited: #c4a7f7; }
 * { box-sizing: border-box; }
+/* Browser default link colours are made for white pages (2:1 or less on the dark theme). */
+main a:not(.button) { color: var(--link); }
+main a:not(.button):visited { color: var(--link-visited); }
 body { margin: 0; background: var(--bg); color: var(--fg);
        font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 [hidden] { display: none !important; }
@@ -103,7 +116,7 @@ td.actions > * { margin-left: .3rem; }
         border-bottom: 1px solid var(--line); }
 .srow-main { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
 .srow-actions { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin-left: auto; }
-#logout { margin-left: auto; }
+#theme { margin-left: auto; padding: .55rem .7rem; }
 .good { color: var(--ok); }
 
 .login { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }

@@ -27,15 +27,26 @@ const theme = EditorView.theme({
   '&': { height: '100%', fontSize: '13px', backgroundColor: 'var(--bg)', color: 'var(--fg)' },
   '.cm-scroller': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', lineHeight: '1.5' },
   '.cm-content': { caretColor: 'var(--fg)' },
+  // CodeMirror draws its own cursor, black unless it thinks the editor is dark.
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--fg) !important' },
   '.cm-gutters': { backgroundColor: 'var(--bg)', color: 'var(--muted)', borderRight: '1px solid var(--line)' },
   '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'color-mix(in srgb, var(--accent) 8%, transparent)' },
   '&.cm-focused': { outline: 'none' },
-  '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection':
-    { backgroundColor: 'color-mix(in srgb, var(--accent) 30%, transparent)' },
+  // !important: CodeMirror's own light-theme rule for a focused editor (#d7d4f0) is more
+  // specific than any theme selector, and light text vanishes on it in dark mode.
+  '.cm-selectionLayer .cm-selectionBackground, .cm-content ::selection':
+    { background: 'color-mix(in srgb, var(--accent) 35%, transparent) !important' },
   '.cm-matchingBracket': { outline: '1px solid var(--muted)', backgroundColor: 'transparent' },
   '.cm-tooltip': { backgroundColor: 'var(--card)', color: 'var(--fg)', border: '1px solid var(--line)' },
   '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'var(--accent)', color: 'var(--accent-fg)' },
   '.cm-panels': { backgroundColor: 'var(--card)', color: 'var(--fg)' },
+  // Search panel and match highlights: CodeMirror's own are light-theme colours.
+  '.cm-textfield': { backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--line)' },
+  '.cm-button': { backgroundImage: 'none', backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--line)' },
+  '.cm-panel.cm-search [name=close]': { color: 'var(--muted)' },
+  '.cm-searchMatch': { backgroundColor: 'color-mix(in srgb, var(--warn) 25%, transparent)', outline: '1px solid color-mix(in srgb, var(--warn) 60%, transparent)' },
+  '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: 'color-mix(in srgb, var(--warn) 45%, transparent)' },
+  '.cm-selectionMatch': { backgroundColor: 'color-mix(in srgb, var(--ok) 22%, transparent)' },
 });
 
 // Completions: the hub's script API (keep in sync with the Template in app.js) + Lua.

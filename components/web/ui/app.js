@@ -734,8 +734,8 @@ pages.settings = {
           <div class="row"><button class="danger" id="reboot">Restart the hub</button></div>
         </section>
         <section class="card" id="mo-card"><h2>Motion</h2><div class="muted">Loading…</div></section>
-      </div>
-      <div class="grid" id="tz-settings"></div>`;
+        <div id="tz-settings" style="display: contents"></div>
+      </div>`;
     $('#fw-file').addEventListener('change', () => { $('#fw-upload').disabled = !$('#fw-file').files.length; });
     $('#fw-upload').addEventListener('click', () => fw.upload());
     $('#reboot').addEventListener('click', async () => {

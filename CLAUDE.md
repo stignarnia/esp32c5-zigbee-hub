@@ -1415,6 +1415,10 @@ is enabled:
       Zigbee devices (no `zb.set`, user decision 2026-11-07)
 - [ ] Gateway entities (both modes): permit-join button (pairing works from HA too),
       Zigbee channel, device count, Wi-Fi RSSI, uptime
+- [ ] **The hub is a motion sensor itself** (user, 2026-11-08): Wi-Fi motion sensing
+      (`components/motion`, Phase 5b) exposed in both modes as a `binary_sensor` with
+      device_class `motion` on the hub's own device (Moving = on), with "no signal" (Wi-Fi
+      down, no frames) reported as unavailable, not as "not moving"
 - [ ] Wire-format safety: every length off the socket bounded before use
       (reference had a pre-auth overflow on the hello frame — lesson 9)
 - [ ] Entity table in PSRAM (reference: 54 KB, moving it freed half the internal heap)

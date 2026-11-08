@@ -111,9 +111,9 @@ has VDD_SPI = pin 29 = GPIO19.
 
 | GPIO | On the board | Chip function | At reset | Scripts |
 |---|---|---|---|---|
-| 0 | header P1-5; 32 kHz crystal Y1, R12, R17 **NC (not fitted)** | XTAL_32K_P | — | yes |
+| 0 | header P1-5; 32 kHz crystal Y1, R12, R17 **NC (not fitted)** | XTAL_32K_P | — | yes (buzzer 3 −) |
 | 1 | header P1-6; crystal not fitted | XTAL_32K_N, ADC1_CH0 | — | yes |
-| 2 | header P1-3 | MTMS (JTAG TMS), ADC1_CH1 | strapping (floating), but no boot setting in §3 uses it | yes |
+| 2 | header P1-3 | MTMS (JTAG TMS), ADC1_CH1 | strapping (floating), but no boot setting in §3 uses it | yes (buzzer 3 +) |
 | 3 | header P1-4 | MTDI (JTAG TDI), ADC | SDIO-slave sampling/driving edge (with 25): never used | yes |
 | 4 | header P2-8 | MTCK (JTAG TCK), ADC; pull-up after reset | — | yes |
 | 5 | header P2-9 | MTDO (JTAG TDO), ADC1_CH4 | — | yes (buzzer 1 +) |
@@ -403,11 +403,11 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
 - [x] **Pin choice** (redone 2026-11-08 from the datasheet + this board's schematic: see
       "GPIO map of this board" in the Hardware section for every pin and why). The buzzer
       legs are natively 2 holes apart. Final placement: buzzer 1 = + IO5 / − IO27 (ground),
-      buzzer 2 = + IO6 / − IO8 (ground). What a buzzer pin must satisfy:
+      buzzer 2 = + IO6 / − IO8 (ground), buzzer 3 = + IO2 / − IO0 (ground). What a buzzer pin must satisfy:
     - not flash/PSRAM (15–22), USB D−/D+ (13/14), UART0 (11/12) or BOOT (28)
     - **stays low through reset and boot**, otherwise the buzzer chirps on every reboot (and
       a stuck-high pin during a crash would be a fail-safe hole). Checked by ear: no chirp
-      across resets with the buzzer plugged in
+      across resets with all three buzzers plugged in (software restart and USB hardware reset)
     - ADC-capable for the + pin if the probe should measure the load (GPIO1–6)
 - [x] **Probe firmware** as a separate tiny project (`tools/gpio_probe/`), flashed
       app-only and replaced by the hub firmware afterwards (`prov`, `zb_storage`
@@ -458,7 +458,7 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
     chip, taking Zigbee down). The hub logs the reset reason at boot, so a
     `RTC_PWR_GLITCH` reset shows up in `hublog`
 - [x] **Follow-up 2026-11-08: the hub reset-looped, the pins changed** (final pins:
-      **buzzer 1 = + IO5 / − IO27, buzzer 2 = + IO6 / − IO8**)
+      **buzzer 1 = + IO5 / − IO27, buzzer 2 = + IO6 / − IO8, buzzer 3 = + IO2 / − IO0**)
   - `t_buzz` (the alarm, played at script start) on the hub: `RTC_PWR_GLITCH` ~1.7 s into
     every boot → reboot loop, Zigbee down, until the buzzers were pulled out (buzzer 1 then
     on IO5 → GND, 3 holes apart: the legs, natively 2 apart, had to be bent)
@@ -473,7 +473,10 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
     into the board
   - user rule: each buzzer in two holes **2 apart** (the legs' native spacing, no bending)
     and **on the antenna side of the IO9/NC row**; the case holds them.
-    The only pairs: IO6–IO8, and IO5–IO27 with IO27 as a ground
+    The only pairs under the first allow list: IO6–IO8, and IO5–IO27 with IO27 as a ground.
+    With 0–10 allowed, 2–0, 3–1 and 1–7 qualify too, but their 12 mm bodies crowd buzzer 2;
+    the user fitted **buzzer 3 = + IO2 / − IO0** (closest of them, 4 holes from buzzer 2;
+    verified silent across software and USB hardware resets)
   - **IO15 must never be used** (removed from every pin list): its pad is **SPICS1, the
     in-package PSRAM chip select** (`IO_MUX_GPIO15_REG = PERIPHS_IO_MUX_U_PAD_SPICS1`; board
     label "NC/IO15"). Driving it low as a buzzer ground: `rst:0x1a (CPU_LOCKUP)`, then
@@ -502,11 +505,10 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
   - applied (2026-11-07): 3.00 V average at drive 3, sticker off → direct drive, drive 3.
     The peaks (dips to 2.42 V) were the open question; 50/50 clean rounds settled it
 - [x] Result became Phase 5's defaults (`auto_gpio.c`): allowed pin list, drive strength, and any
-      on-time/duty limits `gpio.beep` enforces for this buzzer type. From the
-      measurements: pins 3, 4, 5, 6, 8, 9, 10, 23, 24, 26 (15 removed 2026-11-08: PSRAM CS),
-      plus **27 as a ground only** (2026-11-08; the UI offers only "ground" for it). **New allow
-      list decided 2026-11-08, not yet in code**: 0–10, 23–26, 27 ground only (GPIO map,
-      Hardware section; Phase 5 GPIO safety has the to-do); drive strength 3 for
+      on-time/duty limits `gpio.beep` enforces for this buzzer type. Allowed pins:
+      0–10, 23–26, plus **27 as a ground only** (the UI offers only "ground" for it), in
+      `auto_gpio.c` since 2026-11-08 (reasons per pin: GPIO map, Hardware section; the first
+      list, from the measurements, was 3–6, 8–10, 23, 24, 26); drive strength 3 for
       outputs; a second GPIO driven low works as a buzzer's ground (IO6 + IO8, IO5 + IO27). Tested
       continuous on-times up to 1 s and the 10 s pattern above, nothing longer — so the
       first `gpio.beep` cap is 2 s per pulse (the probe's limit) until longer tones are
@@ -958,7 +960,7 @@ Findings, in case it comes back:
   to 512 entries (~16 KB); forwarding costs CPU on the lwIP/WireGuard path, so Zigbee
   first: rate-limit
 
-### Phase 5 — Automation (Lua 5.5) (built and mostly verified 2026-11-07; boot-loop guard, RGB LED, new pins 2026-11-08; router-off and buzzer endurance tests pending)
+### Phase 5 — Automation (Lua 5.5) (built and mostly verified 2026-11-07; boot-loop guard, RGB LED, new pins, buzzer endurance 2026-11-08; router-off test pending)
 
 **Tests still to do** (user: "tests are last"), in one place:
 - [x] `zb.on` firing on a real door change: `t_door` logged `Door open=true` → `false`
@@ -998,12 +1000,12 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       count hook aborts runaway scripts; errors reported to the UI with line numbers
 - [~] API — verified on hardware: `timer.*`, `cron`, `state` (kept across reboots),
   `json`, `http` (HTTPS, POST + headers, LAN plain HTTP, bad host → 0), `secret` + masking,
-  `gpio.*`, `net.online`/`net.on("up")`, `zb.devices`/`zb.get`. **Not yet observed:**
-  `zb.on` firing (needs a door opened), `net.on("down")`, `retry_for` across an outage,
+  `gpio.*`, `net.online`/`net.on("up")`, `zb.devices`/`zb.get`, `zb.on` (door changes, see
+  the tests above). **Not yet observed:** `net.on("down")`, `retry_for` across an outage,
   `gpio.on`. Last known device state (zone status, on/off, occupancy within 2 s of a
   change; battery/temperature/humidity at most every 5 min) is saved in `devices.json` and
-  restored at boot, so `zb.get` and the UI have it right after a restart (built
-  2026-11-07, verification pending: needs a sensor report, then a restart). Side effect:
+  restored at boot, so `zb.get` and the UI have it right after a restart (verified
+  2026-11-08: the door's state was back after an OTA restart, before any report). Side effect:
   the first report after a boot no longer counts as a change unless the value differs
   - `zb.on(device, attr, fn)` — state change triggers
   - `zb.get(device, attr)`. No `zb.set` (user decision 2026-11-07): the hub reads its
@@ -1045,9 +1047,9 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       buzzers in step: `steps` = `{{mask, ms}, …}`, bit *i* of `mask` = `pins[i]` on.
       Played by C on a precise timer (30–40 ms steps would jitter if Lua timed them),
       non-blocking; `gpio.stop(pins)` ends it. The alarm from Phase 1b is the built-in
-      example. A buzzer's ground may be a second pin driven low (Automations → GPIO).
-      Planned as "ground for …" (naming the output) but **built as "ground (always low)"
-      with no link** — found 2026-11-08; the link is now part of the RGB LED item, not done.
+      example. A buzzer's ground may be a second pin driven low (Automations → GPIO), set as
+      "ground for <output>" (built and verified 2026-11-08 with the RGB LED item; the first
+      build had no link, only "ground (always low)").
       Defaults from Phase 1b: drive strength 3, 2 s cap per pulse
   - **Network state** (user request 2026-11-07): `net.online()` (Wi-Fi associated with
     an IP, now) and `net.on("up"|"down", fn)`, so a script can change what it does
@@ -1172,14 +1174,23 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
     - [x] normal reboots never disable anything: Settings → Restart and an RST pulse (reports
       power-on), each during a playing alarm → script still enabled, reset reason "normal".
       OTA restarts use the same `esp_restart()` path as Settings → Restart
-- [ ] **Buzzer endurance on the hub** (user, 2026-11-08), buzzers held by the case (legs 2
+- [x] **Buzzer endurance on the hub** (user, 2026-11-08), buzzers held by the case (legs 2
       holes apart, IO5/IO27 + IO6/IO8), serial captured:
-  - [ ] 50 alarm rounds back to back (the Phase 1b standard; so far 5 rounds on the hub):
-    0 resets
-  - [ ] the same with Zigbee traffic: door sensor opened/closed during the alarm, every
-    report received (strict open/closed alternation in the log)
-  - [ ] the same with Wi-Fi load (downloads from the hub + ping), to settle the open
-    question from Phase 1b's follow-up: Wi-Fi was ruled out on the probe, 802.15.4 never was
+  - [x] 50 alarm rounds back to back (the Phase 1b standard): 0 resets — see the next item
+  - [x] the same with Zigbee traffic — **passed 2026-11-08 with three buzzers** (buzzer 3 =
+    + IO2 / − IO0 added; GPIO config `buzzer3`=2, `gnd3`=0 "ground for buzzer3"), a harsher
+    pattern than the alarm: 2 s rounds of a 30 ms A→B→C chase, all three stuttering 25/25 ms,
+    rotating pairs 50 ms, all three on 400 ms, 60 ms off; 50 rounds (100 s). The user flipped
+    the Keys sensor during the first ~65 s: **62 changes received, strict open/closed
+    alternation, 0 repeats** (each also seen by `t_door`); **0 resets** (uptime 849 → 992 s
+    unbroken, 150 s serial capture with no WARN/ERROR). The first item (50 rounds, 0 resets)
+    is covered by this run. Heap afterwards: 69 KB internal free, lowest since boot 30 KB
+    (Phase 5 recorded 37–40; not traced)
+  - [x] the same with Wi-Fi load — **passed 2026-11-08**: the 3-buzzer chime, 50 rounds,
+    while the dev machine downloaded `cm.js` over the tailnet in a loop (163 × 120 KB = 19.6 MB,
+    0 failed) and pinged the LAN IP every 50 ms (2471/2471, avg 21.6 ms, max 93 ms): **0
+    resets** (uptime unbroken), 0 Wi-Fi disconnects. Together with the Zigbee run above this
+    settles Phase 1b's open question: neither radio makes the buzzers reset the hub
 - [ ] Test: unplug the router for an hour — every trigger and timer still fires,
       verified from the serial log
 - [x] UI editor (verified by the user, 2026-11-08): paste/edit,
@@ -1199,10 +1210,27 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
 - [x] Scripts persisted in LittleFS (`/storage/scripts/*.lua`), started at boot
       after the device registry is loaded (before Wi-Fi: `net.online()` false at start,
       then `net up`)
-- [~] Built-in examples (not run yet): `examples/*.lua` in the repo (since 2026-11-07, user
+- [~] Built-in examples: `examples/*.lua` in the repo (since 2026-11-07, user
       request: a clear location), compiled into `app.js` at build time, offered in the editor;
       none is stored on the hub until saved (door opens → buzzer + Alexa URL with `retry_for`; weekday-morning
       `cron` that logs which doors are still open)
+  - [x] `door-alarm.lua` (door names changed to Door/Keys) verified 2026-11-08: Keys opened →
+    alarm on buzzers 1 + 2 at once, routine URL (virtualsmarthome.xyz URL Routine Trigger,
+    `response=json`, stored as secret `alexa_alarm_url`) → HTTP 200 in 1.5–2.7 s from the hub
+    (0.22 s from the dev machine: the hub pays a full TLS handshake), Alexa ran the routine
+    (user). Each opening restarts the alarm and calls the URL again (3 calls in 13 s) — 5b
+    needs one call per alarm. The JSON reply carries `"triggerActivationStatus": "success"`.
+    The trigger is a doorbell-type device in Alexa, so Alexa also announces "<trigger> ha
+    rilevato un visitatore"
+    Changed the same day (user): the alarm plays while a door is open (pattern capped at
+    the engine's 10 min, now on all three buzzers `buzzer1`/`buzzer2`/`buzzer3` with the
+    3-buzzer pattern) and `gpio.stop()` ends it when the last open door closes; Alexa is
+    called once per alarm start, not on a second door opening. Verified: 4 open/close cycles
+    on Keys (open 1–5 s), alarm off the moment Keys closed, each start → HTTP 200 in
+    1.6–1.9 s; works "perfectly" (user). Not exercised: two doors at once, an alarm past
+    10 s. A door reopened right after closing starts a new alarm and a new Alexa call
+    (two calls 2 s apart) — 5b should hold off repeat calls
+  - [ ] `morning-check.lua` not run yet
 
 #### Phase 5 findings (2026-11-07)
 - **A script crashed the hub into a boot loop.** The engine task had 32 KB of stack "sized
@@ -1246,8 +1274,9 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
      (the core dump's backtrace stopped at `abort`)
 - **Two crashed trial boots in a row suspend Tailscale** (its own crash guard, `ts.c`):
   after the rollback the hub stayed off the tailnet, so in tailnet-only mode the UI was
-  unreachable until a clean (power-on) reset. Open: decide whether a rolled-back OTA trial
-  should count toward Tailscale's crash guard
+  unreachable until a clean (power-on) reset or BOOT held 10 s (LAN access). **Kept as is**
+  (user decision 2026-11-08): a rolled-back OTA trial counts toward Tailscale's crash guard
+  like any other crash
 - **`espefuse` leaves the chip in download mode**: the hub stays down until reset (RTS
   pulse). The CH343 auto-reset resets the chip whenever DTR and RTS differ, even briefly
 
@@ -1256,14 +1285,14 @@ Built on Phase 5, before Home Assistant: it runs entirely on the hub, so it need
 nothing from Phase 6.
 - [ ] Door sensors (the two contact sensors) → the Phase 1b alarm on both buzzers
       (`gpio.pattern`) and the Alexa routine URL (`secret(...)`, `retry_for`)
-- [ ] Decide when writing it (user, 2026-11-07): buzzer always + Alexa as an addition,
-      or buzzer only when Alexa can't be reached. What the hub can know: network down /
-      timeout / error = certainly not delivered; HTTP 200 = Amazon's service accepted
-      it, **not** that an Echo played (no public API reports that). Option to research:
-      the routine's last step switches a smart-home device the hub can see, confirming
-      the routine ran (still not that sound came out — a muted Echo completes it too)
-- [ ] Arm / disarm (how: decided with the script — e.g. a schedule, or a state
-      the UI sets)
+- [x] **Buzzers always**, Alexa in addition (user decision 2026-11-08). The routine URL is a
+      virtualsmarthome.xyz URL Routine Trigger (`alexa_alarm_url`, `response=json`); its reply
+      `"triggerActivationStatus": "success"` means the service accepted it, **not** that an
+      Echo played. Alexa also announces the trigger as a doorbell visitor unless that device's
+      announcements are turned off in the Alexa app
+- [ ] Arm / disarm and the rest of the business logic: the user describes it later
+      (2026-11-08). Starting point: `examples/door-alarm.lua` (alarm while a door is open,
+      one Alexa call per alarm), plus a hold-off on repeat Alexa calls
 - [ ] Verified on hardware: door opens → buzzers within a second, Alexa plays; same
       with the router unplugged (buzzers immediately, Alexa once it's back)
 

@@ -732,7 +732,8 @@ For long tests without a serial cable: log on the board, download later.
       2026-11-06 on the Door sensor: pressed twice, each time "waiting for it to wake up",
       then on the next open/close the full interview ran and completed in 620 / 639 ms.
       **No controls in the UI (user decision 2026-11-06)**; since 2026-11-07 nothing
-      commands devices at all (no `zb.set` in Lua, no commands from Home Assistant)
+      commands devices at all (no `zb.set` in Lua, no commands from Home Assistant) —
+      only because none of the paired devices can be commanded (see Decisions)
 - [~] Availability tracking — built: battery devices offline after 25 h of silence.
       **Not yet observed firing** (needs a sensor silent for 25 h)
 - [x] Network map from the coordinator's neighbour table (both sensors listed with
@@ -1009,8 +1010,9 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
   2026-11-08: the door's state was back after an OTA restart, before any report). Side effect:
   the first report after a boot no longer counts as a change unless the value differs
   - `zb.on(device, attr, fn)` — state change triggers
-  - `zb.get(device, attr)`. No `zb.set` (user decision 2026-11-07): the hub reads its
-    sensors, it doesn't command devices
+  - `zb.get(device, attr)`. No `zb.set` yet: none of the paired devices can be commanded.
+    In principle scripts set devices (user, 2026-11-08); `zb.set` comes with the first
+    device that takes commands
   - `timer.after(s, fn)`, `timer.every(s, fn)`, `cron("0 7 * * 1-5", fn)`
   - `state.get/put(key, value)` — small persistent KV for scripts
   - **HTTP requests** (user request: call an Alexa skill URL that sounds the
@@ -1284,18 +1286,38 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
 ### Phase 5b — The user's own alarm script (user request 2026-11-07)
 Built on Phase 5, before Home Assistant: it runs entirely on the hub, so it needs
 nothing from Phase 6.
-- [ ] Door sensors (the two contact sensors) → the Phase 1b alarm on both buzzers
-      (`gpio.pattern`) and the Alexa routine URL (`secret(...)`, `retry_for`)
+- [x] **The script is the keys alarm** (`examples/keys-alarm.lua`, installed on the hub as
+      `keys-alarm` 2026-11-08; replaces the `away`-based version, which missed lockouts even
+      with one person). Door + Keys tap + Wi-Fi motion, nothing remembered between openings:
+      - Door opens ≤ 60 s after a Keys tap (`KEYS_WINDOW`; M1 accepted at 60 s): silent, and
+        the tap is used up
+      - Door opens and `motion.moved(62, 2)` is false (nothing moved in the minute before,
+        the last 2 s left out as the opening itself): silent, coming home
+      - anything else, `nil` (no motion signal) included: alarm — 3 buzzers + Alexa at once,
+        10 s (5 rounds), stopped by a Keys tap or the Door closing; a tap changes nothing else.
+        Alexa called the moment the alarm starts (F12), but not again within 30 s: calling it
+        on every alarm was "too eager" (user, 2026-11-08), as the earlier script's 30 s did
+      - `STILL_S` = 60 s and `GAP_S` = 2 s are Claude's choice, not measured (F10 is still the
+        user's): longer = fewer silent openings (safer), more homecoming alarms when someone
+        moved inside shortly before
+- [x] Lua API for it: `motion.moving()` and `motion.moved(from_s, to_s)` (10 min of history,
+      one flag per 500 ms; movement anywhere in the window → true even where part of it
+      wasn't seen; otherwise any unseen part → nil). Verified with a throwaway script:
+      true/false/nil as expected, bad windows raise an error
 - [x] **Buzzers always**, Alexa in addition (user decision 2026-11-08). The routine URL is a
       virtualsmarthome.xyz URL Routine Trigger (`alexa_alarm_url`, `response=json`); its reply
       `"triggerActivationStatus": "success"` means the service accepted it, **not** that an
       Echo played. Alexa also announces the trigger as a doorbell visitor unless that device's
       announcements are turned off in the Alexa app
-- [ ] Arm / disarm and the rest of the business logic: the user describes it later
-      (2026-11-08). Starting point: `examples/door-alarm.lua` (alarm while a door is open,
-      one Alexa call per alarm), plus a hold-off on repeat Alexa calls
-- [ ] Verified on hardware: door opens → buzzers within a second, Alexa plays; same
-      with the router unplugged (buzzers immediately, Alexa once it's back)
+- [x] User, 2026-11-08: open without a tap → alarm; tap then open → silent. (The old script
+      did the same; Alexa was called on every alarm, so the 30 s cooldown went back in)
+- [x] What the old script got wrong, verified by the user on hardware (2026-11-08): come home
+      after more than a minute with nobody inside → silent; tap to stop an alarm, close, later
+      open without a tap → alarm; tap, open, don't go out, close, later open without a tap →
+      alarm
+- [x] The alarm stopped by closing the door, and by a tap (user, 2026-11-08)
+- [ ] Same with the router unplugged: every opening without a tap sounds (no motion signal),
+      Alexa once the router is back
 
 #### Keys alarm (`examples/keys-alarm.lua`): failure decisions (user, 2026-11-08)
 Setup: "Door" contact sensor; "Keys" contact sensor on the inside of the door, a magnet on
@@ -1372,9 +1394,10 @@ its own sub-device of the hub, plus the hub's own entities, plus whatever enable
 publish. Enabling or disabling scripts never hides a device. The earlier design switched
 between "devices mode" (no script enabled) and "smart-device mode" (the hub as one device,
 Zigbee devices hidden): dropped because enabling a first script would have broken every HA
-dashboard, automation and history built on the devices, for nothing — the hub never
-commands devices, so HA seeing them can't conflict with the scripts; clutter is HA's to
-hide.
+dashboard, automation and history built on the devices; clutter is HA's to hide. Today
+nothing commands devices, so HA and scripts can't conflict; once devices can be set
+(`zb.set`, commands from HA), both may command the same device, and the last command wins —
+the same as two people at two switches.
 
 - [ ] **Setting** "Home Assistant integration", **off by default**, in the UI
       (Settings) and as `flash.sh --ha` at provisioning. Off → the API server
@@ -1406,8 +1429,8 @@ hide.
       current `api.proto` before relying on them
 - [ ] Capability → entity mapping (same capabilities as the UI uses):
       sensors → sensor with device_class, IAS zone → binary_sensor,
-      battery/LQI/last seen → diagnostic entities. Read-only: the hub doesn't command
-      Zigbee devices (no `zb.set`, user decision 2026-11-07)
+      battery/LQI/last seen → diagnostic entities. Read-only for now: no paired device
+      takes commands. Commandable devices get switch/light/... entities when they come
 - [ ] Hub entities: permit-join button (pairing works from HA too),
       Zigbee channel, device count, Wi-Fi RSSI, uptime
 - [ ] **The hub is a motion sensor itself** (user, 2026-11-08): Wi-Fi motion sensing
@@ -1506,7 +1529,9 @@ All measured there on the same chip; re-verify, don't assume.
   no mobile support, several MB).
 - **GPIO pins are claimed only while a script loads** (2026-11-07), so conflicts show at
   Save. Secrets and GPIO settings live on the Automations page (2026-11-07).
-- **The hub never commands Zigbee devices** (2026-11-07): no `zb.set`, nothing from HA.
+- **Commanding Zigbee devices: not yet, not never** (2026-11-07, clarified 2026-11-08): in
+  principle scripts (and HA) set devices; there's no `zb.set` and no HA commands only
+  because none of the paired devices (contact sensors) can be commanded.
 - **No last-known clock in NVS** (2026-11-07): after a power-off it would be wrong; cron
   waits for SNTP instead. Soft resets keep the RTC time.
 - **Router**: test on DFS channel 52 first; move to 36–48 only if measurements are bad.

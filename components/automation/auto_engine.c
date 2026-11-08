@@ -34,6 +34,7 @@
 #include "hublog.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include "motion.h"
 #include "nvs.h"
 #include "wifi5g.h"
 
@@ -1059,6 +1060,27 @@ static int l_net_online(lua_State *L)
     return 1;
 }
 
+// motion.moving() -> true/false, nil when not sensing (no Wi-Fi signal)
+static int l_motion_moving(lua_State *L)
+{
+    int r = motion_moving_now();
+    if (r < 0) lua_pushnil(L);
+    else lua_pushboolean(L, r);
+    return 1;
+}
+
+// motion.moved(from_s [, to_s]) -> movement between from_s and to_s (default 0) seconds ago:
+// true/false, nil when the hub couldn't see part of that window
+static int l_motion_moved(lua_State *L)
+{
+    double from = luaL_checknumber(L, 1), to = luaL_optnumber(L, 2, 0);
+    luaL_argcheck(L, to >= 0 && from > to && from <= MOTION_HISTORY_S, 1, "need 0 <= to < from <= 600");
+    int r = motion_moved(from, to);
+    if (r < 0) lua_pushnil(L);
+    else lua_pushboolean(L, r);
+    return 1;
+}
+
 static int l_net_on(lua_State *L)
 {
     const char *evt = luaL_checkstring(L, 1);
@@ -1124,6 +1146,9 @@ static void open_libs(lua_State *L)
     static const luaL_Reg net[] = {{"online", l_net_online}, {"on", l_net_on}, {NULL, NULL}};
     luaL_newlib(L, net);
     lua_setglobal(L, "net");
+    static const luaL_Reg mo[] = {{"moving", l_motion_moving}, {"moved", l_motion_moved}, {NULL, NULL}};
+    luaL_newlib(L, mo);
+    lua_setglobal(L, "motion");
     agpio_open_lib(L);
     ahttp_open_lib(L);
 }

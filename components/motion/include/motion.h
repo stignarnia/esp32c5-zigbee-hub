@@ -36,3 +36,12 @@ void motion_get_status(motion_status_t *out);
 
 // Calibration: learn the "moving" (true) or "not moving" (false) level from now on.
 void motion_learn(bool moving);
+
+// Moving right now: 1 / 0, -1 when not sensing.
+int motion_moving_now(void);
+
+// Was there movement between from_s and to_s seconds ago (0 <= to_s < from_s <= 600)?
+// 1 = yes (in any half second of the window); 0 = still the whole time; -1 = the hub
+// couldn't see part of it (no Wi-Fi signal, or not running that long). Any task.
+int motion_moved(double from_s, double to_s);
+#define MOTION_HISTORY_S 600

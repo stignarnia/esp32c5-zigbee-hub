@@ -68,6 +68,12 @@ static uint8_t s_learning;
 static int s_n_learn;
 static int64_t s_last_high_us;
 
+// One entry per interval, newest at (s_hist_n - 1) % HIST_N: 0 still, 1 moved, 2 unknown.
+#define HIST_N (MOTION_HISTORY_S * 1000 / INTERVAL_MS)
+static uint8_t *s_hist;           // PSRAM
+static uint32_t s_hist_n;         // intervals recorded since boot
+static int64_t s_hist_end_us;     // end of the newest interval
+
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static motion_status_t s_status = {.score = -1, .threshold = THR_DEFAULT};
 
@@ -337,8 +343,12 @@ static void motion_task(void *arg)
             if (next_interval < now) next_interval = now + INTERVAL_MS * 1000LL;
             uint16_t score = interval_score();
             learn_step(score);
-            if (score != UNKNOWN && score > s_thr) s_last_high_us = now;
+            bool high = score != UNKNOWN && score > s_thr;
+            if (high) s_last_high_us = now;
             taskENTER_CRITICAL(&s_lock);
+            s_hist[s_hist_n % HIST_N] = score == UNKNOWN ? 2 : high;
+            s_hist_n++;
+            s_hist_end_us = now;
             s_status.score = score == UNKNOWN ? -1 : score;
             s_status.moving = s_last_high_us && now - s_last_high_us < HOLD_MS * 1000LL;
             s_status.learning = s_learning;
@@ -350,6 +360,36 @@ static void motion_task(void *arg)
             housekeeping();
         }
     }
+}
+
+int motion_moving_now(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    int r = s_status.sensing ? s_status.moving : -1;
+    taskEXIT_CRITICAL(&s_lock);
+    return r;
+}
+
+int motion_moved(double from_s, double to_s)
+{
+    if (!s_hist || !(to_s >= 0 && from_s > to_s && from_s <= MOTION_HISTORY_S)) return -1;
+    int64_t now = esp_timer_get_time();
+    int64_t w_start = now - (int64_t)(from_s * 1e6), w_end = now - (int64_t)(to_s * 1e6);
+    const int64_t iv = INTERVAL_MS * 1000LL;
+    bool moved = false, unknown = false;
+    taskENTER_CRITICAL(&s_lock);
+    if (w_end > s_hist_end_us + iv) unknown = true;  // the task fell behind: not seen
+    for (uint32_t k = 0;; k++) {
+        int64_t end = s_hist_end_us - (int64_t)k * iv, start = end - iv;
+        if (end <= w_start) break;
+        if (start >= w_end) continue;
+        if (k >= s_hist_n || k >= HIST_N) { unknown = true; break; }
+        uint8_t f = s_hist[(s_hist_n - 1 - k) % HIST_N];
+        if (f == 1) { moved = true; break; }
+        if (f == 2) unknown = true;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    return moved ? 1 : unknown ? -1 : 0;
 }
 
 void motion_get_status(motion_status_t *out)
@@ -365,7 +405,10 @@ esp_err_t motion_init(void)
     s_cb_item = heap_caps_calloc(1, sizeof(csi_item_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_item = heap_caps_calloc(1, sizeof(csi_item_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_w = heap_caps_calloc(1, sizeof(work_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_csi_q || !s_cb_item || !s_item || !s_w) return ESP_ERR_NO_MEM;
+    uint8_t *hist = heap_caps_calloc(HIST_N, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_csi_q || !s_cb_item || !s_item || !s_w || !hist) return ESP_ERR_NO_MEM;
+    s_hist_end_us = esp_timer_get_time();
+    s_hist = hist;
 
     nvs_handle_t h;
     if (nvs_open("motion", NVS_READONLY, &h) == ESP_OK) {

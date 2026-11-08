@@ -241,6 +241,7 @@ The Automations page has everything scripts need, top to bottom:
 | `http.get(url, opts)` / `http.post(url, body, opts)` | shorthands for the above |
 | `secret(name)` | a value stored under **Automations → Secrets**, so it never appears in script text |
 | `net.online()` / `net.on("up" or "down", fn)` | whether the hub has Wi-Fi with an address now / be told when that changes |
+| `motion.moving()` / `motion.moved(from_s, to_s)` | Wi-Fi motion sensing (Settings → Motion): moving now / any movement between `from_s` and `to_s` seconds ago (up to 600). `nil` when the hub couldn't see (no Wi-Fi signal, just started) |
 | `json.encode(v)` / `json.decode(s)` | |
 | `log(...)` (or `print`) | to the script log |
 | `gpio.claim(pin, ...)` | take pins for this script when it loads (needed for pins only used in handlers) |
@@ -580,8 +581,8 @@ USB flashing always works either way.
 - **Home Assistant**: ESPHome native API on TCP 6053 with Noise encryption, Zigbee
   devices as ESPHome sub-devices (needs Home Assistant 2025.7 or newer). It uses
   no memory unless the integration is on and active.
-- **Read-only towards devices**: the hub reads its sensors and never commands
-  Zigbee devices, neither from scripts nor from Home Assistant.
+- **Commanding devices**: scripts and Home Assistant can set devices that take
+  commands (switches, lights); devices that only report (sensors) are read.
 
 ### Flash layout (16 MB)
 

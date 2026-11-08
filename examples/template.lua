@@ -11,6 +11,8 @@
 -- gpio.write/read/on/beep/pattern/stop/tone   (pins from Automations -> GPIO)
 --   gpio.claim(pin, ...) at the top for pins only used in handlers: a pin belongs
 --   to one script, and claims happen only while the script loads (so at Save)
+-- led.set(r, g, b) / led.off()   the board's RGB LED (0..255); led.claim() at the top
+--   if only handlers use it. One script owns it; it goes off when that script stops
 -- net.online()  net.on("up"|"down", fn)   json.encode/decode   log(...)
 
 log("hello from", "the hub")

@@ -29,7 +29,7 @@ static volatile int64_t s_permit_until_us;
 static esp_ieee802154_coex_config_t s_coex_default;
 static int64_t s_start_us;
 
-// Coex priority, measured on this board (2026-11-06):
+// Coex priority on this board:
 //  - txrx HIGH permanently: a coordinator is always receiving, so Wi-Fi never got
 //    the RF to scan (NO_AP_FOUND after 15 s, every attempt).
 //  - driver defaults (txrx LOW, txrx_at MIDDLE) from the start: network formation
@@ -43,9 +43,8 @@ static void coex_settle(const char *what)
     esp_ieee802154_set_coex_config(s_coex_default);
     // set_coex_config() only stores the values: the driver applies a PTI when an
     // operation starts (enable_rx, transmit, ED). A coordinator sits in one long
-    // receive, so HIGH stayed in force until its first transmit 10-14 s later, and
-    // Wi-Fi couldn't transmit at all until then (measured: probe on air 0 of 5 boots,
-    // PTI log HIGH 0.85 s -> LOW at first TX). Apply it now; the radio is receiving.
+    // receive, so HIGH would stay in force until its first transmit 10-14 s later, and
+    // Wi-Fi can't transmit at all meanwhile. Apply it now; the radio is receiving.
     esp_coex_ieee802154_txrx_pti_set(s_coex_default.txrx);
     ezb_extaddr_t me;
     ezb_get_extended_address(&me);
@@ -228,9 +227,9 @@ fail:
 }
 
 // Network info for the UI, refreshed on the Zigbee task (no lock needed there) and
-// copied by the HTTP task under a short critical section. The HTTP task used to take
-// the Zigbee lock itself (up to 200 ms per snapshot): while the stack was busy, e.g.
-// during an interview, every live update blocked the web server behind it.
+// copied by the HTTP task under a short critical section. Taking the Zigbee lock on
+// the HTTP task (up to 200 ms per snapshot) would block the web server behind the
+// stack whenever it is busy, e.g. during an interview.
 typedef struct {
     uint64_t ieee;
     uint16_t short_addr;
@@ -290,8 +289,7 @@ esp_err_t zb_start(void)
     TimerHandle_t t = xTimerCreate("zb_tick", pdMS_TO_TICKS(1000), pdTRUE, NULL, tick_cb);
     if (!t || xTimerStart(t, 0) != pdPASS) return ESP_ERR_NO_MEM;
 
-    // Before the first Wi-Fi association (reference repo: without it the station
-    // barely associated, 371 s -> 27 s).
+    // Before the first Wi-Fi association: without it the station barely associates.
     esp_err_t err = esp_coex_wifi_i154_enable();
     if (err != ESP_OK) ESP_LOGW(TAG, "coex enable: %s", esp_err_to_name(err));
     if (xTaskCreate(zb_task, "zigbee", 8192, NULL, 6, NULL) != pdPASS) return ESP_ERR_NO_MEM;

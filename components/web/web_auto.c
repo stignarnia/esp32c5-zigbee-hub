@@ -201,6 +201,46 @@ static esp_err_t h_tz(httpd_req_t *req)
     return web_send_json(req, "200 OK", "{\"ok\":true}");
 }
 
+static esp_err_t h_safe(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    esp_err_t r = automation_leave_safe_mode();
+    if (r != ESP_OK) return send_err(req, r, NULL);
+    return web_send_json(req, "200 OK", "{\"ok\":true}");
+}
+
+#ifdef HUB_TEST_HOOKS
+// Test builds only (idf.py -DHUB_TEST_HOOKS=1): crash on purpose to test the boot-loop
+// guard. {"after_ms": N} aborts N ms from now; {"boots": N} also aborts 5 s after each of
+// the next N boots (auto_engine.c).
+#include "esp_timer.h"
+#include "nvs.h"
+static void crash_cb(void *arg) { abort(); }
+static esp_err_t h_crash(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    cJSON *j = read_json_body(req);
+    int after = cJSON_IsNumber(cJSON_GetObjectItem(j, "after_ms")) ? cJSON_GetObjectItem(j, "after_ms")->valueint : -1;
+    int boots = cJSON_IsNumber(cJSON_GetObjectItem(j, "boots")) ? cJSON_GetObjectItem(j, "boots")->valueint : 0;
+    cJSON_Delete(j);
+    if (boots > 0) {
+        nvs_handle_t h;
+        if (nvs_open("hubtest", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u8(h, "crashn", (uint8_t)boots);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
+    if (after >= 0) {
+        static esp_timer_handle_t t;
+        esp_timer_create_args_t a = {.callback = crash_cb, .name = "testcrash"};
+        if (!t) esp_timer_create(&a, &t);
+        esp_timer_start_once(t, (uint64_t)(after > 0 ? after : 1) * 1000);
+    }
+    return web_send_json(req, "200 OK", "{\"ok\":true}");
+}
+#endif
+
 esp_err_t auto_api_register(httpd_handle_t server)
 {
     const httpd_uri_t routes[] = {
@@ -214,6 +254,10 @@ esp_err_t auto_api_register(httpd_handle_t server)
         {.uri = "/api/auto/secret", .method = HTTP_POST, .handler = h_secret},
         {.uri = "/api/auto/gpio", .method = HTTP_POST, .handler = h_gpio},
         {.uri = "/api/auto/tz", .method = HTTP_POST, .handler = h_tz},
+        {.uri = "/api/auto/safe", .method = HTTP_POST, .handler = h_safe},
+#ifdef HUB_TEST_HOOKS
+        {.uri = "/api/debug/crash", .method = HTTP_POST, .handler = h_crash},
+#endif
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);

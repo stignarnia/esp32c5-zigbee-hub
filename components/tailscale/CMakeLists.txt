@@ -1,6 +1,6 @@
 # Tailscale node: microlink (MIT, Cameron Malone) + wireguard-lwip (BSD-3, Daniel Hope),
 # ported to IDF 6.1 / mbedTLS 4 / PSA. Upstream: github.com/CamM2325/microlink @ 216da33.
-# Removed: cellular/PPP/AT sockets, network switching, config httpd, zero-copy WG,
+# Not included: cellular/PPP/AT sockets, network switching, config httpd, zero-copy WG,
 # UDP/TCP socket API, NVS peer cache. See ts.c for the hub-side wrapper.
 idf_component_register(
     SRCS "ts.c"

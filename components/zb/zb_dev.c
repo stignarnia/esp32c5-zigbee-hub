@@ -3,7 +3,7 @@
 // Threading: the table is written on the Zigbee task (signals, ZCL/ZDO callbacks,
 // the 1 s tick) and read by the HTTP task for the UI, under s_mtx. File I/O never
 // happens on the Zigbee task or under the Zigbee lock: a saver task writes the
-// registry when it is dirty (CLAUDE.md lesson 11).
+// registry when it is dirty.
 //
 // Interview (sleepy end devices give us seconds after joining, not minutes):
 //   on announce, at once and in parallel: Basic read (manufacturer, model, power

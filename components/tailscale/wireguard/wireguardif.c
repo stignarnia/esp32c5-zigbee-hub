@@ -100,7 +100,7 @@ bool wireguardif_is_wireguard_packet(const uint8_t *data, size_t len) {
 
 static void update_peer_addr(struct wireguard_peer *peer, const ip_addr_t *addr, u16_t port) {
 	// Don't overwrite a valid endpoint with 0.0.0.0 (DERP-injected packets have no real source)
-	// This bug was causing DERP routing to break after receiving the first packet
+	// (otherwise DERP routing breaks after the first packet)
 	if (ip_addr_isany(addr)) {
 		WG_DEBUG("[WG] update_peer_addr: skipping DERP (0.0.0.0)\n");
 		return;  // Skip updating endpoint for DERP packets
@@ -1026,9 +1026,8 @@ err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip
 }
 
 
-// Hub port: move an established session to a new endpoint. WireGuard roams without
-// a new handshake (the keys don't depend on addresses); wireguardif_connect() forces
-// one, which upstream did on every DISCO path change.
+// Move an established session to a new endpoint. WireGuard roams without a new
+// handshake (the keys don't depend on addresses); wireguardif_connect() forces one.
 err_t wireguardif_roam(struct netif *netif, u8_t peer_index, const ip_addr_t *ip, u16_t port) {
 	struct wireguard_peer *peer;
 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);

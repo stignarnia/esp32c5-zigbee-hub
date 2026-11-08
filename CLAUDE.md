@@ -97,8 +97,45 @@ stty -F /dev/ttyACM0 115200 raw -echo && timeout 15 cat /dev/ttyACM0
 | Radios | Wi-Fi 6 2.4+5 GHz, BLE 5, IEEE 802.15.4 |
 | USB-UART | CH343 (`1a86:55d3`), `/dev/serial/by-id/usb-1a86_USB_Single_Serial_*-if00` (env.sh finds it) |
 | Console | UART0 on GPIO 11/12, 115200 |
+| Board | Waveshare ESP32-C5-WIFI6-KIT-NXRX, [schematic](https://files.waveshare.com/wiki/ESP32-C5-WIFI6-KIT-NXRX/ESP32-C5-WIFI6-KIT-NXRX-Schematic.pdf); bare plated holes, no header pins |
+| eFuses (read 2026-11-08) | factory: `UART_PRINT_CONTROL` 0, `JTAG_SEL_ENABLE` 0, `DIS_PAD_JTAG` 0, `DIS_USB_JTAG` 0. `espefuse` leaves the chip in download mode: reset it afterwards (RTS pulse) or the hub stays down |
 
 The user is in group `uucp` (serial access).
+
+### GPIO map of this board (2026-11-08; schematic + ESP32-C5 datasheet v1.5 §2, §3)
+
+"At reset" = what the chip reads from the pin at reset, with the eFuses above. The
+datasheet's strapping list is GPIO2, 3, 7, 25, 26, 27, 28 (IDF's docs list only 2, 7,
+25, 27, 28). Its restriction list says "GPIO27: the VDD_SPI pin" — a typo: its pin table
+has VDD_SPI = pin 29 = GPIO19.
+
+| GPIO | On the board | Chip function | At reset | Scripts |
+|---|---|---|---|---|
+| 0 | header P1-5; 32 kHz crystal Y1, R12, R17 **NC (not fitted)** | XTAL_32K_P | — | yes |
+| 1 | header P1-6; crystal not fitted | XTAL_32K_N, ADC1_CH0 | — | yes |
+| 2 | header P1-3 | MTMS (JTAG TMS), ADC1_CH1 | strapping (floating), but no boot setting in §3 uses it | yes |
+| 3 | header P1-4 | MTDI (JTAG TDI), ADC | SDIO-slave sampling/driving edge (with 25): never used | yes |
+| 4 | header P2-8 | MTCK (JTAG TCK), ADC; pull-up after reset | — | yes |
+| 5 | header P2-9 | MTDO (JTAG TDO), ADC1_CH4 | — | yes (buzzer 1 +) |
+| 6 | header P1-7 **and BAT_ADC**: R39 0 Ω from the 200 k/100 k battery divider + C14 100 nF | ADC | — | yes (buzzer 2 +); with a battery fitted, driving it loses the reading |
+| 7 | header P1-8, no pull resistor | — | JTAG source: ignored (`JTAG_SEL_ENABLE` 0) | yes |
+| 8, 9, 10 | header P1-9/10/11 | — | — | yes (8 = buzzer 2 −) |
+| 11 | header P2-2 "TX", R37 0 Ω → CH343 RXD | U0TXD | carries the boot log | **no** |
+| 12 | header P2-3 "RX", R33 0 Ω ← CH343 TXD (driven) | U0RXD, pull-up | — | **no** |
+| 13, 14 | header P2-14/13, R21/R23 22 Ω → "USB" USB-C (D−/D+) | USB Serial/JTAG; 14 has the USB pull-up at reset | — | **no** |
+| 15 | header P2-6 "NC/GPIO15" | **SPICS1, PSRAM chip select** | — | **no** (CPU_LOCKUP, 2026-11-08) |
+| 16–18, 20–22 | inside the module | SPI0/1 flash + PSRAM bus | — | **no** |
+| 19 | inside the module | VDD_SPI (flash supply) | — | **no** |
+| 23, 24 | header P2-5/4 | — | — | yes |
+| 25 | header P1-13 | — | SDIO-slave edge (with 3): never used | yes |
+| 26 | header P1-12 | — | boot mode only with 27 = 0 and 28 = 0 (BOOT held) | yes |
+| 27 | header P2-7, R8 10 k pull-up, R3 0 Ω → **WS2812B RGB LED** (LED2) DI | — | ROM UART printing (ignored, eFuse 0); with BOOT held 1 = download mode 0 (pull-up holds it) | **ground only** (buzzer 1 −) |
+| 28 | header P2-11, R9 10 k pull-up, **BOOT** button Key2, auto-download transistor T1 (DTR/RTS) | — | **SPI boot (1) or download (0)** | **no** |
+
+Allowed for scripts: **0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 23, 24, 25, 26; 27 as ground
+only** (user decision 2026-11-08). GPIO 0/1 only because this board leaves the crystal
+out. Auto-download (schematic table): DTR/RTS equal → EN 1, BOOT 1 (no reset); RTS
+alone → EN 0 (reset); DTR alone → BOOT 0.
 
 ## The flashing machine's network (observed 2026-11-04)
 
@@ -355,29 +392,23 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
 
 - [x] **Inputs from the user** (photos, 2026-11-07):
   - buzzer: 12 mm black sealed cylinder, ~9–10 mm tall, "+" on the seal sticker, two
-    legs ~7.6 mm apart by eye (= 3 header holes). The usual "12 mm active buzzer"
+    legs ~7.6 mm apart by eye (= 3 header holes) — **wrong: the legs are natively 2 holes
+    apart (5.08 mm), user 2026-11-08**. The usual "12 mm active buzzer"
     package, typically electromagnetic (~20–30 mA at 3 V) despite "piezo" in the
     listing; the probe measures it instead of guessing
   - board: **Waveshare ESP32-C5-WIFI6-KIT-NXRX** (ESP32-C5-WROOM-1, N16R8). Headers:
     top `G TX RX 24 23 N/15 27 4 5 NC 28 G 14 13 G VBAT`, bottom
     `3V3 RST 2 3 0 1 6 7 8 9 10 26 25 5V G VBAT`. On board: RGB LED on IO27, BOOT on
     IO28, two USB-C ports ("UART" = CH343, "USB" = native USB on GPIO13/14)
-- [~] **Pin choice** (ESP-IDF's C5 GPIO table, not memory): strapping 2, 7, 25, 27, 28;
-      USB-JTAG 13, 14; UART0 11/12 (TX/RX); flash/PSRAM 16–22 (not on the header);
-      32 kHz crystal pads 0/1 (`io_mux_reg.h`: `PAD_XTAL_32K_P/N`); ADC only on GPIO1–6.
-      Usable on the header: 3, 4, 5, 6, 8, 9, 10, 15, 23, 24, 26. With GND 3 holes away (legs at 7.62 mm): IO24, **IO5**, IO26 — and only
-      **IO5 is ADC-capable** (ADC1_CH4). Candidate: **IO5 + the GND three holes to its
-      right on the top row** (5 · NC · 28 · G). Reset state: the datasheet's pad default
-      table isn't in the repo; an internal pull-up (~45 kΩ, < 0.1 mA) can't sound the
-      buzzer, so the check that matters is by ear: no chirp across several resets and
-      boots with the buzzer plugged in. GPIO5 is the JTAG MTDO pad by default (not
-      driven while JTAG is unused). To confirm: the legs fit IO5/G, and the reboot test
-  - the criteria:
-    - not flash/PSRAM, USB D−/D+, UART0 (GPIO 11/12), 32 kHz crystal, or strapping pins
-    - **stays low through reset and boot** — otherwise the buzzer chirps on every
-      reboot (and a stuck-high pin during a crash would be a fail-safe hole)
-    - ADC-capable (for the self-measurement below)
-    - a GND pin at a spacing the buzzer legs can reach without wires
+- [x] **Pin choice** (redone 2026-11-08 from the datasheet + this board's schematic: see
+      "GPIO map of this board" in the Hardware section for every pin and why). The buzzer
+      legs are natively 2 holes apart. Final placement: buzzer 1 = + IO5 / − IO27 (ground),
+      buzzer 2 = + IO6 / − IO8 (ground). What a buzzer pin must satisfy:
+    - not flash/PSRAM (15–22), USB D−/D+ (13/14), UART0 (11/12) or BOOT (28)
+    - **stays low through reset and boot**, otherwise the buzzer chirps on every reboot (and
+      a stuck-high pin during a crash would be a fail-safe hole). Checked by ear: no chirp
+      across resets with the buzzer plugged in
+    - ADC-capable for the + pin if the probe should measure the load (GPIO1–6)
 - [x] **Probe firmware** as a separate tiny project (`tools/gpio_probe/`), flashed
       app-only and replaced by the hub firmware afterwards (`prov`, `zb_storage`
       untouched):
@@ -407,8 +438,9 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
     arms the power-glitch reset on **VDDPST**, the I/O pad supply
     (`bootloader_esp32c5.c:96` → `bootloader_power_glitch_reset_config(true)`, no
     Kconfig): the coil's current pulses and turn-off spikes (no flyback diode) dip the
-    pad supply. Disabling it needs a custom bootloader (USB only) and would only hide
-    a real supply dip
+    pad supply. (Correction 2026-11-08: no custom bootloader needed — the enable bits,
+    `LP_ANA_POWER_GLITCH_CNTL_REG.PWR_GLITCH_RESET_ENA`, one per supply domain, are R/W
+    from the app. The detectors are an anti-fault-injection feature; not changed)
   - buzzer 2 on IO6(+)/IO8(−): no load at first (IO6 stays at 3.36 V driven) — it
     wasn't seated properly (user). The reset with it reversed happened in that state
   - **reseated firmly, both buzzers at drive 3: 10 runs of 10 s, no reset** (user, 2026-11-07,
@@ -425,6 +457,43 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
     buzzers, but they must be soldered or firmly fixed (a loose one can reset the
     chip, taking Zigbee down). The hub logs the reset reason at boot, so a
     `RTC_PWR_GLITCH` reset shows up in `hublog`
+- [x] **Follow-up 2026-11-08: the hub reset-looped, the pins changed** (final pins:
+      **buzzer 1 = + IO5 / − IO27, buzzer 2 = + IO6 / − IO8**)
+  - `t_buzz` (the alarm, played at script start) on the hub: `RTC_PWR_GLITCH` ~1.7 s into
+    every boot → reboot loop, Zigbee down, until the buzzers were pulled out (buzzer 1 then
+    on IO5 → GND, 3 holes apart: the legs, natively 2 apart, had to be bent)
+  - the board has **bare plated holes, no header pins**: a ~0.5 mm buzzer leg in a ~1 mm
+    hole touches only where it leans, so contact makes and breaks with any movement
+  - Phase 1b repeated with the probe: 50/50 rounds, 0 resets, radio off; then with Wi-Fi
+    associated (ch 36, −47 dBm, pinging the gateway every 50 ms, 2163/2163): 50/50, 0
+    resets. **Wi-Fi is not what made the hub reset** (802.15.4 not tested)
+  - **breadboard + unsoldered header pins: worse.** The pins stand centred in the board's
+    holes and make contact only while the board is pressed down (IO6 read 3357 mV driven
+    = no load; sounds when pressed, user). Dropped. Without solder, the legs go straight
+    into the board
+  - user rule: each buzzer in two holes **2 apart** (the legs' native spacing, no bending)
+    and **on the antenna side of the IO9/NC row**; the case holds them.
+    The only pairs: IO6–IO8, and IO5–IO27 with IO27 as a ground
+  - **IO15 must never be used** (removed from every pin list): its pad is **SPICS1, the
+    in-package PSRAM chip select** (`IO_MUX_GPIO15_REG = PERIPHS_IO_MUX_U_PAD_SPICS1`; board
+    label "NC/IO15"). Driving it low as a buzzer ground: `rst:0x1a (CPU_LOCKUP)`, then
+    `invalid header` / `SPI flash busy` (garbage flash reads). No damage
+  - **IO27 as a ground** (strapping pin + RGB LED data): its reset level only selects ROM
+    UART printing (`EFUSE_UART_PRINT_CONTROL` 1/2), and this chip's eFuse is 0 = always
+    print, so it is ignored. Boot mode is IO28 (BOOT). With the buzzer on IO5/IO27: 10
+    resets all booted normally, no chirp (one strap reading `0x1a` vs `0x18`, harmless);
+    download mode entered 6/6 (esptool). Its role in download mode on the C5 isn't in
+    these files (C6 analogy: needs high) — 6/6 says the buzzer doesn't disturb it
+  - new pins, probe: IO5/IO27 loaded 3061 mV (2624–3325, coil switching); alarm on both
+    buzzers **50/50 rounds, 0 resets** (110 s). Hub (new firmware, GPIO config buzzer1=5,
+    gnd1=27, buzzer2=6, gnd2=8): `t_buzz` played the full alarm, **0 resets** (uptime
+    46 → 93 s, serial captured), both buzzers heard (user)
+  - the probe gained `w` (Wi-Fi STA from `prov`, RAM-only driver config, no PHY cal stored,
+    pings the gateway every 50 ms) and `l R G B` (RGB LED frame on IO27), and accepts
+    IO27 only as a ground
+  - **tooling**: the CH343 auto-reset circuit resets the chip whenever DTR and RTS differ,
+    even briefly — setting them one after the other in pyserial reset the hub twice.
+    Leave both at their defaults (equal) to read the serial port without a reset
 - [x] **Decision rule** (recorded here with the numbers):
   - loaded voltage ≥ 3.0 V → direct drive OK, any drive strength that's loud enough
   - 2.5–3.0 V → direct drive OK at max drive strength, beeps only (no long tones),
@@ -434,8 +503,11 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
     The peaks (dips to 2.42 V) were the open question; 50/50 clean rounds settled it
 - [x] Result became Phase 5's defaults (`auto_gpio.c`): allowed pin list, drive strength, and any
       on-time/duty limits `gpio.beep` enforces for this buzzer type. From the
-      measurements: pins 3, 4, 5, 6, 8, 9, 10, 15, 23, 24, 26; drive strength 3 for
-      outputs; a second GPIO driven low works as a buzzer's ground (IO6 + IO8). Tested
+      measurements: pins 3, 4, 5, 6, 8, 9, 10, 23, 24, 26 (15 removed 2026-11-08: PSRAM CS),
+      plus **27 as a ground only** (2026-11-08; the UI offers only "ground" for it). **New allow
+      list decided 2026-11-08, not yet in code**: 0–10, 23–26, 27 ground only (GPIO map,
+      Hardware section; Phase 5 GPIO safety has the to-do); drive strength 3 for
+      outputs; a second GPIO driven low works as a buzzer's ground (IO6 + IO8, IO5 + IO27). Tested
       continuous on-times up to 1 s and the 10 s pattern above, nothing longer — so the
       first `gpio.beep` cap is 2 s per pulse (the probe's limit) until longer tones are
       measured
@@ -886,17 +958,26 @@ Findings, in case it comes back:
   to 512 entries (~16 KB); forwarding costs CPU on the lwIP/WireGuard path, so Zigbee
   first: rate-limit
 
-### Phase 5 — Automation (Lua 5.5) (built and mostly verified 2026-11-07; door trigger and router-off test pending)
+### Phase 5 — Automation (Lua 5.5) (built and mostly verified 2026-11-07; boot-loop guard, RGB LED, new pins 2026-11-08; router-off and buzzer endurance tests pending)
 
 **Tests still to do** (user: "tests are last"), in one place:
-- `zb.on` firing on a real door change (`t_door` test script is loaded on the hub), then
-  a restart: the door's last state must come back (`devices.json` persistence)
-- router off for an hour: triggers, timers, cron and buzzers keep working; `net.on("down")`
+- [x] `zb.on` firing on a real door change: `t_door` logged `Door open=true` → `false`
+  (with `zb.get` agreeing) on 2026-11-07 18:33 and 2026-11-08 00:53
+- [x] then a restart: the door's last state must come back (`devices.json` persistence).
+  OTA restart 2026-11-08: `t_door` printed `Door open=false` at start, before any report
+  (the boot before: `Door open=nil`). Keys stays `nil` until it reports once
+- [ ] router off for an hour: triggers, timers, cron and buzzers keep working; `net.on("down")`
   fires; a `retry_for` request made offline goes out when the router is back
-- `gpio.on` with an input; buzzers audible with `gpio.pattern` (the user listens)
-- UI on the phone: Automations layout (Secrets/GPIO moved there, wrapping rows), the
+  (skipped for now, user 2026-11-08)
+- [x] buzzers audible with `gpio.pattern` (the user listens): `t_buzz` on the hub, both
+  buzzers (IO5/IO27, IO6/IO8), full 10 s alarm, 0 resets, heard (2026-11-08; see Phase 1b
+  follow-up — the first try reset-looped the hub with the old IO5 → GND seating)
+- [ ] `gpio.on` with an input
+- [x] UI on the phone: Automations layout (Secrets/GPIO moved there, wrapping rows), the
   CodeMirror editor (typing, completion, error line on Save), Settings → Time zone
-- the Wi-Fi watchdog's reboot gate deferring for a script (needs a 20+ min outage)
+  (user, 2026-11-08)
+- [ ] the Wi-Fi watchdog's reboot gate deferring for a script (needs a 20+ min outage;
+  skipped for now, user 2026-11-08)
 
 Built in addition to the list below: `zb.devices()`, `timer.cancel(id)` (also cancels
 cron), timers by global function name (survive a restart), `json.encode/decode`,
@@ -964,8 +1045,10 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       buzzers in step: `steps` = `{{mask, ms}, …}`, bit *i* of `mask` = `pins[i]` on.
       Played by C on a precise timer (30–40 ms steps would jitter if Lua timed them),
       non-blocking; `gpio.stop(pins)` ends it. The alarm from Phase 1b is the built-in
-      example. A buzzer's ground may be a second pin driven low (Automations → GPIO:
-      "ground for …"). Defaults from Phase 1b: drive strength 3, 2 s cap per pulse
+      example. A buzzer's ground may be a second pin driven low (Automations → GPIO).
+      Planned as "ground for …" (naming the output) but **built as "ground (always low)"
+      with no link** — found 2026-11-08; the link is now part of the RGB LED item, not done.
+      Defaults from Phase 1b: drive strength 3, 2 s cap per pulse
   - **Network state** (user request 2026-11-07): `net.online()` (Wi-Fi associated with
     an IP, now) and `net.on("up"|"down", fn)`, so a script can change what it does
     when the uplink is gone (e.g. a longer local alarm when Alexa can't be reached)
@@ -975,9 +1058,13 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       pattern left both pins low, the pattern stopped and no owner (checked 1 s after the error)
   - only pins enabled in the UI (Automations → GPIO: name, direction) are usable;
     scripts may refer to them by name (`gpio.write("buzzer", 1)`)
-  - pins that are never allowed: SPI flash / PSRAM bus, USB D−/D+, UART0 console
-    (GPIO 11/12), strapping pins, 32 kHz crystal pins. Exact list from the C5
-    datasheet + this board's pinout when implementing — don't guess
+  - pins that are never allowed: SPI flash / PSRAM bus (15–22), USB D−/D+ (13/14), UART0
+    console (11/12), BOOT (28); 27 as ground only. Exact list and reasons: "GPIO map of
+    this board" (Hardware section), from the C5 datasheet + this board's schematic
+  - [x] **the 2026-11-08 allow list is in code** (`auto_gpio.c`, `app.js`, the probe, the
+    error message). Verified on the hub: GPIO 0, 1, 2, 7, 25 each configured as an output,
+    driven high/low and read back 1/0
+    - [ ] the hub still boots normally with something attached to 7 and 25 (nothing on them yet)
   - one script owns a pin at a time. **Claims only while the script loads** (user decision
     2026-11-07): any gpio call at top level claims, `gpio.claim(...)` for pins used only in
     handlers; a handler using an unclaimed pin gets an error. So a conflict is reported at
@@ -986,6 +1073,45 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
     every output it owned goes low and any beep/tone stops — a crashed script
     must never leave a buzzer screaming
   - the UI GPIO page shows each enabled pin's state and owning script
+- [x] **RGB LED on IO27** (user request 2026-11-08; built and verified 2026-11-08). The board's LED between the USB ports
+      is an addressable WS2812-type LED on IO27 (WS2812B-0807 per the schematic). **It takes
+      R, G, B order**, not the usual WS2812B G, R, B: GRB showed red for green (user). Values
+      go out as given, no white balance (equal values look slightly bluish; user decision:
+      scripts balance it themselves). Verified on the hub: red → green → blue → off, mixed
+      colours, fail-safe off when the owning script errors, off after a crash reboot (was
+      red), a colour requested during a buzzer pattern stays pending and shows when it
+      ends, the "ground for" link (gnd1 → buzzer1, gnd2 → buzzer2) and its validation. It latches its colour
+      until the next frame or power-off. IO27 is also buzzer 1's ground (+ IO5, − IO27), so
+      they share the pin. Design (user, 2026-11-08):
+  - **Lua never sees IO27 as a pin.** Ground is a setting (Automations → GPIO, pin 27 =
+    "ground"), held low by C from boot; `gpio.write(27, …)` is an error like any ground pin.
+    The LED is its own API with no pin number: `led.set(r, g, b)`, `led.off()`
+  - **`led.claim()`**, same rules as GPIO claims: one script owns the LED; any `led` call at
+    top level claims it, `led.claim()` for a script that uses the LED only in handlers; a
+    second script gets a conflict error at Save, and a handler can't claim it later
+  - **The LED is not between IO27 and ground**: WS2812 = power + ground from the board,
+    data-in on IO27 (draws ~nothing). As a ground IO27 is steady low = "no data", the LED
+    keeps its colour. A frame = 24 high/low pulses (~30 µs, IO27 not a ground) + ≥ 50 µs low
+    (latch, a ground again) ≈ 80 µs
+  - **C arbitrates the pin** (nothing hard-coded to IO5, any user's wiring):
+    - a ground pin's setting names the output(s) it is the ground for (e.g. pin 27 = "ground
+      for buzzer1"). For a frame, C needs those outputs low, switches them to **input**
+      (not driven, no pull) for the ~80 µs, sends the frame, drives them low again. With
+      the + leg undriven no current can flow through the buzzer either way, whatever IO27
+      does (today's LED test ran exactly like that: IO5 was an input). Without the
+      release, IO5 low + IO27 pulsing high = the buzzer in reverse for < 1 µs per pulse
+      (unmeasured)
+    - fallback when a ground pin names no output: treat **every** configured output as
+      possibly wired to it — all must be low, all released for the frame. Never wrong,
+      only slower (an unrelated output held high, e.g. a relay, delays the LED)
+    - an output that has to be low but is high (pattern, beep, tone, `gpio.write(…, 1)`):
+      the colour is stored and sent as soon as they are all low. `led.set` never blocks
+  - **Fail-safe in C**: when the owning script stops (error, timeout, OOM, disabled,
+    deleted), C sends "off" in the same path that drives its outputs low and stops its
+    buzzers (deferred to the end of another script's pattern if one is playing). C also
+    sends "off" once at every boot: the LED keeps its colour through a reset, only power-off
+    clears it, so after a crash or watchdog reboot it would stay on. If the hub itself
+    crashes nothing can send a frame; the boot-time "off" clears it ~1 s later
 - [x] **Time without Wi-Fi** — the RTC keeps the time through soft resets, panics and
       watchdog reboots, so the clock is valid at once after them (seen: after the panic
       reset on 2026-11-07, cron fired at 15:25 before Wi-Fi was up). Only a power-off loses
@@ -1003,9 +1129,60 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       **And if the hub itself crashes while a script runs** (RTC marker `s_rtc_run`), the
       next boot disables that script (persisted, reason shown) — verified with a deliberate
       32 KB-stack build: one panic, next boot disabled it, the other script ran normally
+- [x] **Boot-loop guard** (user, 2026-11-08; built 2026-11-08). A script must never be able to keep the hub
+      in a reset loop — Zigbee is the top priority. Found the hard way: `t_buzz` played at
+      start, a loose buzzer reset the chip (`RTC_PWR_GLITCH`) ~1.7 s into every boot, and
+      `s_rtc_run` didn't catch it because the pattern runs in C after the script's top
+      level has returned (Phase 5 findings 2026-11-08). Two layers:
+  - **Buzzer marker**: whenever a pattern, beep or tone is playing, a marker in RTC memory
+    names the owning script(s); cleared when the last one stops. At boot, if the reset was
+    abnormal and the marker is set, that script is **disabled** (persisted, like
+    `s_rtc_run`) with the reason shown in the UI: "the hub reset (power glitch) while this
+    script's buzzer was playing". Abnormal = power glitch, CPU lockup, brownout, panic,
+    interrupt/task watchdog. Normal = power-on, the RST button/serial reset, `esp_restart()`
+    (OTA, planned reboots, the Wi-Fi watchdog's reboot)
+    - first check whether RTC memory survives an `RTC_PWR_GLITCH` reset on the C5 (the
+      reset wipes more than a panic does). If it doesn't, the marker goes to NVS, written
+      by the automation task when a pattern starts (alarms are rare, so the flash wear is
+      negligible) — never from the esp_timer callback
+  - **Safe mode**: a counter of abnormal resets that happened less than 60 s after boot
+    (RTC memory, or NVS if RTC doesn't survive), cleared once the hub has run 60 s. At 3 in
+    a row the engine **starts no scripts** this boot (nothing disabled, nothing deleted):
+    UI banner "Safe mode: the hub reset 3 times in a row soon after starting; scripts were
+    not started", with "Start scripts" and the last reset reasons. Zigbee, Wi-Fi, web and
+    Tailscale start as always — they already come up before scripts
+  - neither layer changes Zigbee's boot order or blocks it: both run inside the engine's
+    start, after the device registry is loaded
+  - **Tests**, each verified from the serial log and the UI:
+    - [x] RTC marker survives a panic: `rtc_kept: true` after every deliberate crash
+      (test build: `idf.py -DHUB_TEST_HOOKS=1`, `POST /api/debug/crash`; installed by OTA
+      and crashed only after the trial was confirmed)
+    - [ ] RTC survives a real `RTC_PWR_GLITCH`: unknown until one happens — every boot logs
+      "RTC memory kept/not kept" with the reset reason (the canary). The safe-mode counter
+      is in NVS, so safe mode doesn't depend on it
+    - [x] panic while a pattern plays → next boot: that script disabled with "the hub reset
+      (crash) while this script's buzzer was playing…", LED off (was red), the other
+      script running, Tailscale and Zigbee back
+    - [ ] the real case: during an alarm the user wiggles a buzzer until the chip resets →
+      one reset, script disabled, no loop
+    - [x] safe mode: crash 5 s into each boot (`{"boots": 3}`) → counter 1 → 2 → 3, then "SAFE
+      MODE, scripts not started" (the enabled `t_door` stayed stopped), Wi-Fi + Tailscale +
+      API up, API `boot.safe_mode: true`; `POST /api/auto/safe` (the banner's "Start
+      scripts") → safe mode off, `t_door` running. The UI banner itself: not looked at yet
+    - [x] normal reboots never disable anything: Settings → Restart and an RST pulse (reports
+      power-on), each during a playing alarm → script still enabled, reset reason "normal".
+      OTA restarts use the same `esp_restart()` path as Settings → Restart
+- [ ] **Buzzer endurance on the hub** (user, 2026-11-08), buzzers held by the case (legs 2
+      holes apart, IO5/IO27 + IO6/IO8), serial captured:
+  - [ ] 50 alarm rounds back to back (the Phase 1b standard; so far 5 rounds on the hub):
+    0 resets
+  - [ ] the same with Zigbee traffic: door sensor opened/closed during the alarm, every
+    report received (strict open/closed alternation in the log)
+  - [ ] the same with Wi-Fi load (downloads from the hub + ping), to settle the open
+    question from Phase 1b's follow-up: Wi-Fi was ruled out on the probe, 802.15.4 never was
 - [ ] Test: unplug the router for an hour — every trigger and timer still fires,
       verified from the serial log
-- [~] UI editor (built; the user checks it in the browser): paste/edit,
+- [x] UI editor (verified by the user, 2026-11-08): paste/edit,
       Save → syntax check (`luaL_loadbuffer`) before storing, enable/disable,
       live log, last error; a load error (e.g. GPIO conflict) is shown at Save with its line.
       Automations page = scripts, pins, editor, script log, **Secrets, GPIO** (moved from
@@ -1049,6 +1226,30 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
   78.5 / 41.5); the engine and HTTP task stacks are in PSRAM. HTTPS from a script: no
   visible change in the low-water mark (mbedTLS in PSRAM)
 - App image 2.0 MB (50 % of a slot); UI 19.1 KB gzipped
+
+#### Phase 5 findings (2026-11-08)
+- **A buzzer script reset-looped the hub** (`t_buzz`, saved enabled, played at start):
+  `RTC_PWR_GLITCH` ~1.7 s into every boot. The crash guard (`s_rtc_run`, script disabled at
+  the next boot) didn't catch it: the script's top level had already returned, the pattern
+  runs in C. Cause: loose buzzer legs (Phase 1b follow-up); fixed by the new pins.
+  The boot-loop guard below now stops such a loop (built and tested 2026-11-08)
+- **IO15 was on the allowed pin list** and crashes the chip (PSRAM chip select): removed
+  from `auto_gpio.c`, the UI, the probe, README
+- **The GPIO config had no "ground for …" link**: the plan said "ground for …" on
+  2026-11-07, the build made it "ground (always low)" with nothing linked, and the GPIO
+  item was ticked anyway. Built 2026-11-08 with the RGB LED (config field `for`, UI choice)
+- **Two failed OTA trials** (2026-11-08), both rolled back by the bootloader as designed:
+  1. stack overflow on the main task (3.5 KB): a 2 KB config buffer on its stack in
+     `agpio_init` → heap corruption → crash. Buffers moved to the heap
+  2. `ESP_ERR_HTTPD_HANDLERS_FULL`: the URL-handler limit (40) was reached → abort at boot.
+     Raised to 56 (~40 in use). Found only by capturing the console during the trial boot
+     (the core dump's backtrace stopped at `abort`)
+- **Two crashed trial boots in a row suspend Tailscale** (its own crash guard, `ts.c`):
+  after the rollback the hub stayed off the tailnet, so in tailnet-only mode the UI was
+  unreachable until a clean (power-on) reset. Open: decide whether a rolled-back OTA trial
+  should count toward Tailscale's crash guard
+- **`espefuse` leaves the chip in download mode**: the hub stays down until reset (RTS
+  pulse). The CH343 auto-reset resets the chip whenever DTR and RTS differ, even briefly
 
 ### Phase 5b — The user's own alarm script (user request 2026-11-07)
 Built on Phase 5, before Home Assistant: it runs entirely on the hub, so it needs

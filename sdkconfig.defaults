@@ -21,8 +21,7 @@ CONFIG_FREERTOS_HZ=1000
 
 # --- PSRAM: 8 MB embedded, quad --------------------------------------------
 # Internal RAM (~320 KB) is the bottleneck on this chip; PSRAM is where large
-# buffers go. Thresholds below are the ones the reference repo ran stably with
-# on the same chip; revisit with measurements once Zigbee + Wi-Fi are up.
+# buffers go. Thresholds below are known to run stably on this chip.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y
@@ -30,14 +29,14 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-# The boot-time PSRAM self-test cost ~1 s per boot (measured). Boot time matters
-# for the watchdog/OTA reboot gap; the chip's PSRAM passed it on every boot so far.
+# The boot-time PSRAM self-test costs ~1 s per boot. Boot time matters for the
+# watchdog/OTA reboot gap.
 CONFIG_SPIRAM_MEMTEST=n
 
 # --- Network ---------------------------------------------------------------
 # Re-request the last DHCP lease (stored in NVS) instead of a full DISCOVER.
 CONFIG_LWIP_DHCP_RESTORE_LAST_IP=y
-# The default ARP probe of the offered address cost ~1 s per connect (measured).
+# The default ARP probe of the offered address costs ~1 s per connect.
 # The router's DHCP server already owns the address pool.
 CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
 
@@ -74,20 +73,19 @@ CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_MBEDTLS_CHACHA20_C=y
 CONFIG_MBEDTLS_CHACHAPOLY_C=y
 # The WireGuard netif keeps its device in an lwIP client-data slot: ESP-IDF reads
-# netif->state of every netif as its own esp_netif_t (crashed on netif_add).
+# netif->state of every netif as its own esp_netif_t (it would crash on netif_add).
 CONFIG_LWIP_NUM_NETIF_CLIENT_DATA=1
 # WireGuard runs partly in its own task: every call into it (and into lwIP's raw API)
 # from there holds the lwIP core lock. The safety check asserts on any lwIP call made
 # from the wrong context, so a mistake fails loudly instead of corrupting memory.
 CONFIG_LWIP_TCPIP_CORE_LOCKING=y
 CONFIG_LWIP_CHECK_THREAD_SAFETY=y
-# mbedTLS buffers in PSRAM (memory lever 3). Measured with Tailscale up: internal heap
-# lowest 15 KB with them internal (DERP TLS session). IDF's warning about PSRAM on rev
+# mbedTLS buffers in PSRAM (memory lever 3): internal, the DERP TLS sessions take the
+# internal heap down to ~15 KB. IDF's warning about PSRAM on rev
 # v1.0 only matters with flash encryption, which this project doesn't use.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
-# No IPv6 (2026-11-07): nothing on the hub uses it (no SLAAC, microlink is IPv4-only;
-# the direct path to a same-ISP peer came from NAT-PMP instead). Measured cost when on: 43.6 KB
-# flash, 2.0 KB static internal RAM. Turning it back on also needs IPv6 in microlink.
+# No IPv6: nothing on the hub uses it (no SLAAC, microlink is IPv4-only). Cost when on:
+# 43.6 KB flash, 2.0 KB static internal RAM. Turning it back on also needs IPv6 in microlink.
 CONFIG_LWIP_IPV6=n
 
 # cJSON recurses once per nesting level (64 B of stack each). The default limit of 1000

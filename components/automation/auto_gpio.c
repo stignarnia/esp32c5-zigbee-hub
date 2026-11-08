@@ -10,15 +10,27 @@
 // Buzzer patterns are timed in C by an esp_timer, not by Lua: 30-40 ms steps stay
 // exact whatever the scripts are doing, and the script returns at once.
 //
-// Allowed pins (Phase 1b, CLAUDE.md): on the header and not strapping (2, 7, 25, 27,
-// 28), USB (13, 14), UART0 (11, 12), 32 kHz crystal (0, 1) or flash/PSRAM.
-// Outputs use drive strength 3 (measured with the 12 mm buzzers: 3.0 V loaded).
+// Allowed pins: "GPIO map of this board" in CLAUDE.md (ESP32-C5 datasheet v1.5 + the
+// Waveshare ESP32-C5-WIFI6-KIT-NXRX schematic). Never: 11/12 (UART0 to the
+// CH343), 13/14 (native USB), 15 (SPICS1, the PSRAM chip select: driving it low locks the
+// CPU up), 16-22 (flash/PSRAM bus, flash supply), 28 (BOOT). 0/1 only because this board
+// leaves the 32 kHz crystal out. 7 (JTAG-source strap) is ignored with JTAG_SEL_ENABLE = 0,
+// 25/3 (SDIO edge straps) only matter in SDIO-slave mode, 2 has no boot role, 26 only
+// matters with BOOT held.
+// Outputs use drive strength 3 (the 12 mm buzzers load a pin to 3.0 V).
+//
+// The board's RGB LED (WS2812B) has its data input on GPIO27, which is also allowed as a
+// buzzer's ground. C owns the pin: Lua only sees led.set/off/claim. A frame (~80 us) is sent
+// only while the outputs that may be wired to GPIO27 are low, and those are switched to
+// inputs for the frame, so no current can flow through a buzzer whatever the data line does.
 #include <stdio.h>
 #include <string.h>
 
 #include "auto_internal.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/rmt_tx.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -26,9 +38,15 @@
 
 static const char *TAG = "auto";
 
-static const uint8_t ALLOWED[] = {3, 4, 5, 6, 8, 9, 10, 15, 23, 24, 26};
+static const uint8_t ALLOWED[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 23, 24, 25, 26};
+// Usable only as a buzzer's ground (held low after boot, never driven high, never read):
+// 27 is a strapping pin and the board's RGB LED data line. On this chip its reset level only
+// selects UART boot printing, which the eFuse UART_PRINT_CONTROL = 0 ignores; with BOOT
+// held, the board's 10 k pull-up keeps it high (normal download mode).
+static const uint8_t GROUND_ONLY[] = {27};
+#define LED_PIN        27              // WS2812B data in (board), also a ground-only pin
 #define NPINS          32
-#define MAX_CFG        (sizeof(ALLOWED))
+#define MAX_CFG        (sizeof(ALLOWED) + sizeof(GROUND_ONLY))
 #define DEBOUNCE_US    (30 * 1000)
 #define MAX_PATTERNS   4
 #define PAT_PINS       4
@@ -43,6 +61,7 @@ typedef struct {
     char name[16];
     uint8_t pin;
     uint8_t mode;
+    char gfor[16];          // ground pins: the output this pin is the ground for ("" = not said)
 } pincfg_t;
 
 static pincfg_t s_cfg[MAX_CFG];
@@ -69,6 +88,59 @@ typedef struct {
 
 static pattern_t s_pat[MAX_PATTERNS];
 static SemaphoreHandle_t s_pat_mtx;    // the esp_timer task and the automation task
+static int8_t s_tone_owner = -1;
+
+// Boot-loop guard, buzzer marker: which scripts' buzzers are playing, kept across a soft
+// reset. If the hub resets abnormally while one plays (a loose buzzer can throw a power
+// glitch), the next boot disables that script instead of playing into the same reset again.
+#define BUZ_MAGIC      0x42555a31u
+#define BUZ_MAX        (MAX_PATTERNS + 1)
+typedef struct {
+    uint32_t magic;
+    uint8_t n;
+    char names[BUZ_MAX][AUTO_NAME_MAX + 1];
+} rtc_buz_t;
+static RTC_NOINIT_ATTR rtc_buz_t s_rtc_buz;
+static portMUX_TYPE s_buz_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// Recomputes the marker from the playing patterns and tone. Called after every change
+// (automation task and esp_timer task); reads the flags without s_pat_mtx on purpose (the
+// callers may hold it), the last call after a change leaves it right.
+static void marker_update(void)
+{
+    int8_t own[BUZ_MAX];
+    int n = 0;
+    for (int k = 0; k < MAX_PATTERNS; k++) {
+        if (!s_pat[k].active || s_pat[k].owner < 0) continue;
+        bool dup = false;
+        for (int i = 0; i < n; i++) dup |= own[i] == s_pat[k].owner;
+        if (!dup) own[n++] = s_pat[k].owner;
+    }
+    if (s_tone_owner >= 0) {
+        bool dup = false;
+        for (int i = 0; i < n; i++) dup |= own[i] == s_tone_owner;
+        if (!dup && n < BUZ_MAX) own[n++] = s_tone_owner;
+    }
+    portENTER_CRITICAL_SAFE(&s_buz_lock);
+    s_rtc_buz.n = (uint8_t)n;
+    for (int i = 0; i < n; i++) strlcpy(s_rtc_buz.names[i], g_scripts[own[i]].name, sizeof(s_rtc_buz.names[i]));
+    s_rtc_buz.magic = BUZ_MAGIC;
+    portEXIT_CRITICAL_SAFE(&s_buz_lock);
+}
+
+int agpio_take_marker(char names[][AUTO_NAME_MAX + 1], int max)
+{
+    int n = 0;
+    if (s_rtc_buz.magic == BUZ_MAGIC && s_rtc_buz.n <= BUZ_MAX) {
+        for (int i = 0; i < s_rtc_buz.n && n < max; i++) {
+            s_rtc_buz.names[i][AUTO_NAME_MAX] = '\0';
+            strlcpy(names[n++], s_rtc_buz.names[i], AUTO_NAME_MAX + 1);
+        }
+    }
+    s_rtc_buz.n = 0;
+    s_rtc_buz.magic = BUZ_MAGIC;
+    return n;
+}
 
 static void pat_cb(void *arg)
 {
@@ -82,6 +154,7 @@ static void pat_cb(void *arg)
         if (p->round >= p->rounds) {
             for (int i = 0; i < p->npins; i++) gpio_set_level(p->pins[i], 0);
             p->active = false;
+            marker_update();
         } else {
             uint8_t m = p->mask[p->step];
             uint32_t ms = p->ms[p->step];
@@ -113,8 +186,18 @@ static void pat_stop_pin(int owner, int pin)
         for (int i = 0; i < p->npins && !hit; i++) hit = p->pins[i] == pin;
         if (hit) pat_stop_locked(p);
     }
+    marker_update();
     xSemaphoreGive(s_pat_mtx);
 }
+
+// RGB LED state (see the RGB LED section)
+static int8_t s_led_owner = -1;        // script index, -1 = nobody
+static uint8_t s_led_want[3];          // r, g, b requested
+static bool s_led_pending;             // s_led_want not shown yet
+static uint8_t s_led_shown[3];
+static bool s_led_shown_valid;         // false until the first frame after boot
+static void led_try(void);
+static void led_request(uint8_t r, uint8_t g, uint8_t b);
 
 bool agpio_busy(void)
 {
@@ -126,7 +209,6 @@ bool agpio_busy(void)
 // ---- tone (passive buzzers, LEDC) --------------------------------------------------------------
 
 static int s_tone_pin = -1;
-static int8_t s_tone_owner = -1;
 static esp_timer_handle_t s_tone_tmr;
 
 static void out_low(int pin)
@@ -145,6 +227,7 @@ static void tone_stop(void)
     out_low(s_tone_pin);
     s_tone_pin = -1;
     s_tone_owner = -1;
+    marker_update();
 }
 
 static void tone_off_cb(void *arg)
@@ -156,18 +239,23 @@ static void tone_off_cb(void *arg)
     if (pin >= 0) out_low(pin);
     s_tone_pin = -1;
     s_tone_owner = -1;
+    marker_update();
 }
 
 // ---- config -----------------------------------------------------------------------------------
 
-static bool pin_allowed(int pin)
+static bool pin_allowed(int pin, uint8_t mode)
 {
     for (size_t i = 0; i < sizeof(ALLOWED); i++) if (ALLOWED[i] == pin) return true;
+    for (size_t i = 0; i < sizeof(GROUND_ONLY); i++) if (GROUND_ONLY[i] == pin) return mode == M_GROUND;
     return false;
 }
 
 static void apply_pin(int pin, uint8_t mode)
 {
+    // The LED's data line idles low (a WS2812 needs a low line between frames; the board's
+    // 10 k pull-up would hold it high), so unconfigured it is held low like a ground.
+    if (pin == LED_PIN && mode == M_NONE) mode = M_GROUND;
     gpio_config_t io = {.pin_bit_mask = 1ULL << pin, .intr_type = GPIO_INTR_DISABLE};
     switch (mode) {
     case M_OUT:
@@ -204,14 +292,14 @@ static esp_err_t parse_cfg(const cJSON *pins, pincfg_t *out, int *n, char *err, 
         const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(e, "name"));
         const char *mode = cJSON_GetStringValue(cJSON_GetObjectItem(e, "mode"));
         int pin = cJSON_IsNumber(jp) ? jp->valueint : -1;
-        if (!pin_allowed(pin)) {
-            snprintf(err, cap, "GPIO %d is not usable (allowed: 3 4 5 6 8 9 10 15 23 24 26)", pin);
-            return ESP_ERR_INVALID_ARG;
-        }
         pincfg_t c = {.pin = (uint8_t)pin};
         for (int m = M_OUT; m <= M_GROUND && mode; m++) if (strcmp(mode, MODE_NAMES[m]) == 0) c.mode = (uint8_t)m;
         if (!c.mode) {
             snprintf(err, cap, "GPIO %d: mode must be out, in, in_pullup, in_pulldown or ground", pin);
+            return ESP_ERR_INVALID_ARG;
+        }
+        if (!pin_allowed(pin, c.mode)) {
+            snprintf(err, cap, "GPIO %d is not usable (allowed: 0-10, 23-26; 27 as ground only)", pin);
             return ESP_ERR_INVALID_ARG;
         }
         if (name && name[0]) {
@@ -227,6 +315,18 @@ static esp_err_t parse_cfg(const cJSON *pins, pincfg_t *out, int *n, char *err, 
             }
             strlcpy(c.name, name, sizeof(c.name));
         }
+        const char *gfor = cJSON_GetStringValue(cJSON_GetObjectItem(e, "for"));
+        if (gfor && gfor[0]) {
+            if (c.mode != M_GROUND) {
+                snprintf(err, cap, "GPIO %d: \"ground for\" is only for ground pins", pin);
+                return ESP_ERR_INVALID_ARG;
+            }
+            if (strlen(gfor) >= sizeof(c.gfor)) {
+                snprintf(err, cap, "GPIO %d: \"ground for\" names an output (1-15 characters)", pin);
+                return ESP_ERR_INVALID_ARG;
+            }
+            strlcpy(c.gfor, gfor, sizeof(c.gfor));
+        }
         for (int i = 0; i < *n; i++) {
             if (out[i].pin == c.pin || (c.name[0] && strcmp(out[i].name, c.name) == 0)) {
                 snprintf(err, cap, "GPIO %d / '%s' listed twice", pin, c.name);
@@ -234,6 +334,16 @@ static esp_err_t parse_cfg(const cJSON *pins, pincfg_t *out, int *n, char *err, 
             }
         }
         out[(*n)++] = c;
+    }
+    // A ground's "for" must name an output in the same config.
+    for (int i = 0; i < *n; i++) {
+        if (!out[i].gfor[0]) continue;
+        bool found = false;
+        for (int k = 0; k < *n && !found; k++) found = out[k].mode == M_OUT && strcmp(out[k].name, out[i].gfor) == 0;
+        if (!found) {
+            snprintf(err, cap, "GPIO %d: ground for '%s', but no output has that name", out[i].pin, out[i].gfor);
+            return ESP_ERR_INVALID_ARG;
+        }
     }
     return ESP_OK;
 }
@@ -265,6 +375,7 @@ static cJSON *cfg_to_json(const pincfg_t *cfg, int n)
         cJSON_AddStringToObject(o, "name", cfg[i].name);
         cJSON_AddNumberToObject(o, "pin", cfg[i].pin);
         cJSON_AddStringToObject(o, "mode", MODE_NAMES[cfg[i].mode]);
+        if (cfg[i].gfor[0]) cJSON_AddStringToObject(o, "for", cfg[i].gfor);
         cJSON_AddItemToArray(arr, o);
     }
     return arr;
@@ -290,13 +401,29 @@ void agpio_init(void)
     if (r != ESP_OK && r != ESP_ERR_INVALID_STATE) ESP_LOGW(TAG, "gpio isr service: %s", esp_err_to_name(r));
 
     FILE *f = fopen(AUTO_GPIO_CFG, "r");
-    if (!f) return;
-    char buf[1024];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    if (!f) {
+        apply_pin(LED_PIN, M_NONE);
+        led_request(0, 0, 0);    // the LED keeps its colour through a reset: off at every boot
+        return;
+    }
+    // Runs on the main task (3.5 KB of stack): the file and the parsed table go on the heap.
+    const size_t cap = 2048;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    pincfg_t *cfg = heap_caps_calloc(MAX_CFG, sizeof(pincfg_t), MALLOC_CAP_SPIRAM);
+    if (!buf || !cfg) {
+        fclose(f);
+        free(buf);
+        free(cfg);
+        ESP_LOGE(TAG, "gpio config: out of memory");
+        apply_pin(LED_PIN, M_NONE);
+        led_request(0, 0, 0);
+        return;
+    }
+    size_t n = fread(buf, 1, cap - 1, f);
     fclose(f);
     buf[n] = '\0';
     cJSON *j = cJSON_Parse(buf);
-    pincfg_t cfg[MAX_CFG];
+    free(buf);
     int ncfg;
     char err[96];
     if (parse_cfg(j, cfg, &ncfg, err, sizeof(err)) == ESP_OK) {
@@ -306,6 +433,11 @@ void agpio_init(void)
         ESP_LOGW(TAG, "gpio config ignored: %s", err);
     }
     cJSON_Delete(j);
+    free(cfg);
+    bool led_cfg = false;
+    for (int i = 0; i < s_ncfg; i++) led_cfg |= s_cfg[i].pin == LED_PIN;
+    if (!led_cfg) apply_pin(LED_PIN, M_NONE);
+    led_request(0, 0, 0);        // the LED keeps its colour through a reset: off at every boot
 }
 
 esp_err_t agpio_set_config(const cJSON *pins, char *err, size_t cap)
@@ -352,6 +484,7 @@ cJSON *agpio_json(void)
         cJSON_AddStringToObject(o, "name", c->name);
         cJSON_AddNumberToObject(o, "pin", c->pin);
         cJSON_AddStringToObject(o, "mode", MODE_NAMES[c->mode]);
+        cJSON_AddStringToObject(o, "for", c->gfor);
         cJSON_AddNumberToObject(o, "level", gpio_get_level(c->pin));
         int owner = s_owner[c->pin];
         cJSON_AddStringToObject(o, "owner", owner >= 0 ? g_scripts[owner].name : "");
@@ -386,6 +519,10 @@ void agpio_on_isr_event(uint8_t pin, int64_t now_us)
 int64_t agpio_tick(int64_t now_us)
 {
     int64_t next = 0;
+    if (s_led_pending) {
+        led_try();
+        if (s_led_pending) next = now_us + 20 * 1000;   // an output that shares GPIO27 is busy
+    }
     for (int pin = 0; pin < NPINS; pin++) {
         if (!s_watched[pin] || !s_check_at[pin]) continue;
         if (now_us < s_check_at[pin]) {
@@ -401,6 +538,143 @@ int64_t agpio_tick(int64_t now_us)
         }
     }
     return next;
+}
+
+// ---- RGB LED (WS2812B on GPIO27) -------------------------------------------------------------
+// Everything here runs on the automation task (led.* calls, agpio_tick, agpio_release) or
+// on the main task at boot, before the engine runs: never two at once.
+
+
+// One RGB frame at 800 kHz via RMT, then the pin goes back to a GPIO held low. Frames are
+// rare (a script's led.set), so the channel lives only for the frame.
+static esp_err_t led_frame(const uint8_t rgb[3])
+{
+    rmt_channel_handle_t ch = NULL;
+    rmt_encoder_handle_t enc = NULL;
+    rmt_tx_channel_config_t cc = {.gpio_num = LED_PIN, .clk_src = RMT_CLK_SRC_DEFAULT,
+                                  .resolution_hz = 10000000, .mem_block_symbols = 48,
+                                  .trans_queue_depth = 1};
+    rmt_bytes_encoder_config_t ec = {
+        .bit0 = {.level0 = 1, .duration0 = 3, .level1 = 0, .duration1 = 9},   // 0.3 / 0.9 us
+        .bit1 = {.level0 = 1, .duration0 = 9, .level1 = 0, .duration1 = 3},   // 0.9 / 0.3 us
+        .flags.msb_first = 1};
+    esp_err_t r = rmt_new_tx_channel(&cc, &ch);
+    if (r == ESP_OK) r = rmt_new_bytes_encoder(&ec, &enc);
+    if (r == ESP_OK) r = rmt_enable(ch);
+    if (r == ESP_OK) {
+        // This board's LED (WS2812B-0807) takes R, G, B, not the usual WS2812B G, R, B.
+        // Values go out as given, no white balance (equal values look a little bluish).
+        rmt_transmit_config_t tc = {.loop_count = 0};
+        r = rmt_transmit(ch, enc, rgb, 3, &tc);
+        if (r == ESP_OK) r = rmt_tx_wait_all_done(ch, 100);
+        rmt_disable(ch);
+    }
+    if (ch) rmt_del_channel(ch);
+    if (enc) rmt_del_encoder(enc);
+    apply_pin(LED_PIN, M_GROUND);       // back to a GPIO, low (> 50 us low latches the colour)
+    return r;
+}
+
+// The outputs that may be wired to GPIO27 as their ground: the output its "ground for"
+// names, or, when it names none (or 27 isn't configured), every configured output.
+static int led_outputs(uint8_t *pins, int max)
+{
+    int n = 0;
+    xSemaphoreTake(s_cfg_mtx, portMAX_DELAY);
+    const char *gfor = "";
+    for (int i = 0; i < s_ncfg; i++) if (s_cfg[i].pin == LED_PIN && s_cfg[i].mode == M_GROUND) gfor = s_cfg[i].gfor;
+    for (int i = 0; i < s_ncfg && n < max; i++) {
+        if (s_cfg[i].mode != M_OUT) continue;
+        if (gfor[0] && strcmp(s_cfg[i].name, gfor) != 0) continue;
+        pins[n++] = s_cfg[i].pin;
+    }
+    xSemaphoreGive(s_cfg_mtx);
+    return n;
+}
+
+static bool pin_playing(int pin)
+{
+    if (s_tone_pin == pin) return true;
+    for (int k = 0; k < MAX_PATTERNS; k++) {
+        for (int i = 0; i < s_pat[k].npins && s_pat[k].active; i++) if (s_pat[k].pins[i] == pin) return true;
+    }
+    return false;
+}
+
+// Shows s_led_want if every output that may share GPIO27 is low and idle; otherwise it
+// stays pending and agpio_tick tries again. Those outputs are inputs for the ~80 us frame.
+static void led_try(void)
+{
+    if (!s_led_pending) return;
+    uint8_t outs[MAX_CFG];
+    int n = led_outputs(outs, MAX_CFG);
+    for (int i = 0; i < n; i++) {
+        if (pin_playing(outs[i]) || gpio_get_level(outs[i])) return;   // wait
+    }
+    for (int i = 0; i < n; i++) gpio_set_direction(outs[i], GPIO_MODE_INPUT);
+    esp_err_t r = led_frame(s_led_want);
+    for (int i = 0; i < n; i++) gpio_set_direction(outs[i], GPIO_MODE_INPUT_OUTPUT);  // output register still 0
+    s_led_pending = false;
+    if (r == ESP_OK) {
+        memcpy(s_led_shown, s_led_want, 3);
+        s_led_shown_valid = true;
+    } else {
+        ESP_LOGW(TAG, "RGB LED frame failed: %s", esp_err_to_name(r));
+    }
+}
+
+static void led_request(uint8_t r, uint8_t g, uint8_t b)
+{
+    s_led_want[0] = r;
+    s_led_want[1] = g;
+    s_led_want[2] = b;
+    s_led_pending = true;
+    led_try();
+}
+
+static void led_claim(lua_State *L)
+{
+    int me = auto_script_index(auto_script_of(L));
+    if (s_led_owner == me) return;
+    if (!auto_loading(L)) luaL_error(L, "led: not claimed by this script: add led.claim() at the top of the script");
+    if (s_led_owner >= 0) luaL_error(L, "led: used by script '%s'", g_scripts[s_led_owner].name);
+    s_led_owner = (int8_t)me;
+}
+
+static int l_led_set(lua_State *L)
+{
+    lua_Integer r = luaL_checkinteger(L, 1), g = luaL_checkinteger(L, 2), b = luaL_checkinteger(L, 3);
+    luaL_argcheck(L, r >= 0 && r <= 255, 1, "0..255");
+    luaL_argcheck(L, g >= 0 && g <= 255, 2, "0..255");
+    luaL_argcheck(L, b >= 0 && b <= 255, 3, "0..255");
+    led_claim(L);
+    led_request((uint8_t)r, (uint8_t)g, (uint8_t)b);
+    return 0;
+}
+
+static int l_led_off(lua_State *L)
+{
+    led_claim(L);
+    led_request(0, 0, 0);
+    return 0;
+}
+
+static int l_led_claim(lua_State *L)
+{
+    if (!auto_loading(L)) return luaL_error(L, "led.claim: only at the top of the script (when it loads)");
+    led_claim(L);
+    return 0;
+}
+
+cJSON *agpio_led_json(void)
+{
+    cJSON *o = cJSON_CreateObject();
+    int owner = s_led_owner;
+    cJSON_AddStringToObject(o, "owner", owner >= 0 ? g_scripts[owner].name : "");
+    cJSON *c = cJSON_AddArrayToObject(o, "rgb");
+    for (int i = 0; i < 3; i++) cJSON_AddItemToArray(c, cJSON_CreateNumber(s_led_shown_valid ? s_led_shown[i] : 0));
+    cJSON_AddBoolToObject(o, "pending", s_led_pending);
+    return o;
 }
 
 // ---- Lua API ----------------------------------------------------------------------------------
@@ -548,6 +822,7 @@ static void pat_start(lua_State *L, const uint8_t *pins, int npins, const uint8_
         p->active = true;
         esp_timer_stop(p->tmr);
         esp_timer_start_once(p->tmr, 1);  // first step now (from the timer task)
+        marker_update();
     }
     xSemaphoreGive(s_pat_mtx);
     if (!p) luaL_error(L, "gpio: %d patterns already playing", MAX_PATTERNS);
@@ -696,6 +971,7 @@ static int l_tone(lua_State *L)
     }
     s_tone_pin = pin;
     s_tone_owner = (int8_t)me;
+    marker_update();
     esp_timer_start_once(s_tone_tmr, (uint64_t)ms * 1000);
     return 0;
 }
@@ -709,6 +985,9 @@ void agpio_open_lib(lua_State *L)
     };
     luaL_newlib(L, fns);
     lua_setglobal(L, "gpio");
+    static const luaL_Reg led[] = {{"set", l_led_set}, {"off", l_led_off}, {"claim", l_led_claim}, {NULL, NULL}};
+    luaL_newlib(L, led);
+    lua_setglobal(L, "led");
 }
 
 // Fail-safe: the script stopped (disabled, error, timeout, out of memory, deleted).
@@ -728,5 +1007,9 @@ void agpio_release(int script)
             gpio_set_level(pin, 0);
         }
         s_owner[pin] = -1;
+    }
+    if (s_led_owner == script) {
+        s_led_owner = -1;
+        led_request(0, 0, 0);    // waits for the outputs sharing GPIO27 if they're busy
     }
 }

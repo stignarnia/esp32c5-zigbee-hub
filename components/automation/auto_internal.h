@@ -128,6 +128,10 @@ void agpio_release(int script);                  // fail-safe: outputs low, patt
 void agpio_on_isr_event(uint8_t pin, int64_t now_us);
 int64_t agpio_tick(int64_t now_us);              // debounce; returns next check (0 = none)
 bool agpio_busy(void);                           // a pattern is playing
+// Boot-loop guard: names of the scripts whose buzzer was playing when the previous boot
+// ended (RTC memory); clears the marker. Call once at boot, before scripts start.
+int agpio_take_marker(char names[][AUTO_NAME_MAX + 1], int max);
+cJSON *agpio_led_json(void);                     // RGB LED: owner, rgb shown, pending
 
 // ---- HTTP (auto_http.c) --------------------------------------------------------------------
 void ahttp_start(void);

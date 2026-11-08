@@ -76,10 +76,9 @@ static struct {
 } s;
 
 // No early auth abort. After an abrupt reset the AP still holds our old (PMF)
-// association and ignores new auths for ~4 s (measured 2026-11-06 with Zigbee up:
-// first auth 1.7 s -> AUTH_EXPIRE 5.8 s -> pinned retry associates at once, IP 5.9 s).
-// Aborting 2 s in and retrying was also ignored and cost another 4 s (IP ~8.5 s), so
-// the driver's own timeout plus the pinned retry is the fastest. Clean boots: 1.7 s.
+// association and ignores new auths for ~4 s; an aborted-and-retried auth is ignored
+// too and costs another 4 s, so the driver's own timeout plus a BSSID-pinned retry is
+// the fastest (IP ~5.9 s after an abrupt reset, ~1.7 s on a clean boot).
 
 const char *wifi5g_reason_str(uint8_t r)
 {
@@ -130,7 +129,7 @@ static void apply_net_ex(uint8_t idx, const uint8_t *bssid)
     wc.sta.channel = s_ch_hint[idx];
     wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     // A floor, not an exact match; WPA3 is still used when the AP offers it.
-    // (WPA2_WPA3 here rejected plain-WPA3 APs in the reference repo.)
+    // (WPA2_WPA3 as the threshold rejects plain-WPA3 APs.)
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     wc.sta.pmf_cfg.required = false;
     wc.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
@@ -159,10 +158,8 @@ static void radio_up_and_connect(void)
 {
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY));
-    // No power save (mains powered). Modem sleep was used because "Zigbee never got air
-    // time with PS_NONE", but that was measured with the coex boost stuck at HIGH (fixed
-    // in zb.c). Re-measured 2026-11-06 with PS_NONE: ping 19 ms avg (modem sleep ~60 ms),
-    // 80/80 contact-sensor events received under Wi-Fi load, boot -> IP unchanged.
+    // No power save (mains powered): ping ~19 ms avg vs ~60 ms with modem sleep, and
+    // Zigbee still gets its air time (contact-sensor events all received under Wi-Fi load).
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     try_connect();
 }
@@ -432,8 +429,8 @@ static void refresh_link(void)
 
 // One task owns every recovery action, ticking once a second. Nothing here is
 // reset by the events it reacts to: downtime is measured from the first
-// disconnect, not the latest one (the reference repo's watchdog never fired
-// because each failed retry re-armed it).
+// disconnect, not the latest one (re-arming it on each failed retry would mean
+// it never fires).
 static void wifi_task(void *arg)
 {
     for (;;) {
@@ -626,8 +623,8 @@ static esp_err_t request_trial(const wifi5g_net_t nets[WIFI5G_MAX_NETS], uint8_t
     s_trial.target = target;
     s_trial.trial_s = trial_s;
     s_trial.reset_defaults = reset_defaults;
-    // Measured: switching 30 ms after replying lost the reply in flight; the
-    // client got it only when the board came back (60 s later on a failed trial).
+    // Switching right after replying loses the reply in flight (the client would get it
+    // only when the board comes back, 60 s later on a failed trial): start 800 ms later.
     s_trial.start_at_us = esp_timer_get_time() + 800 * 1000;
     s_trial.pending = true;
     // Visible immediately: a status read right after the request must never show

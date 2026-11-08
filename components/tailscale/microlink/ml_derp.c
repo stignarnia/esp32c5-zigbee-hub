@@ -245,9 +245,9 @@ static int derp_tls_write_all(ml_derp_conn_t *c, const uint8_t *data, size_t len
 }
 
 /* Write a complete DERP frame via TLS.
- * Hub port: header and payload go out in ONE write = one TLS record = one TCP segment.
- * Upstream wrote them separately: two records, and with Nagle the second waited for
- * the server's (delayed) ACK of the first. `prefix` (optional) goes between header and
+ * Header and payload go out in ONE write = one TLS record = one TCP segment (two
+ * records would make Nagle hold the second for the server's delayed ACK of the
+ * first). `prefix` (optional) goes between header and
  * payload, so SendPacket needs no extra copy for the destination key. */
 static int derp_write_frame2(ml_derp_conn_t *c, uint8_t type, const uint8_t *prefix,
                              uint32_t prefix_len, const uint8_t *payload, uint32_t len) {
@@ -805,11 +805,10 @@ static esp_err_t derp_connect_conn(microlink_t *ml, ml_derp_conn_t *c, uint16_t 
     }
 
     /* TLS setup.
-     * Hub port: mbedTLS 4 takes randomness from PSA (no entropy/CTR-DRBG contexts),
-     * and the server certificate is now verified against the IDF CA bundle
-     * (upstream used VERIFY_NONE). Every failure from here on frees the context
-     * via derp_tls_abort() — upstream leaked it (~20 KB) on each failed attempt,
-     * which a long uplink outage turns into heap exhaustion. */
+     * mbedTLS 4 takes randomness from PSA (no entropy/CTR-DRBG contexts), and the
+     * server certificate is verified against the IDF CA bundle. Every failure from
+     * here on frees the context via derp_tls_abort(): ~20 KB per failed attempt
+     * would turn a long uplink outage into heap exhaustion. */
     mbedtls_ssl_init(&c->ssl);
     mbedtls_ssl_config_init(&c->ssl_conf);
     c->sockfd = sock;

@@ -4,5 +4,5 @@ idf_component_register(
     PRIV_INCLUDE_DIRS "."
     REQUIRES esp_common espressif__cjson
     PRIV_REQUIRES lua zb wifi5g hublog log esp_timer esp_system nvs_flash vfs esp_driver_gpio
-                  esp_driver_ledc esp_http_client mbedtls lwip freertos heap
+                  esp_driver_ledc esp_driver_rmt esp_http_client mbedtls lwip freertos heap
 )

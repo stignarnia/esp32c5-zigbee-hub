@@ -1,6 +1,5 @@
-// esp32c5-zigbee-hub — boot sequence.
-// Phase 0: report hardware/build. Phase 1: provisioning + 5 GHz Wi-Fi + mDNS.
-// Later phases add Zigbee (before Wi-Fi), web UI, Tailscale, automations.
+// esp32c5-zigbee-hub — boot sequence: hardware/build report, provisioning, Zigbee
+// (before Wi-Fi), automations, 5 GHz Wi-Fi + mDNS, web UI, Tailscale.
 
 #include <inttypes.h>
 #include <stdio.h>

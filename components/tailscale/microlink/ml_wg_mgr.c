@@ -43,18 +43,18 @@ static const char *TAG = "ml_wg_mgr";
  * (CONFIG_LWIP_TCPIP_CORE_LOCKING). The TCP/IP thread holds the same lock while it
  * runs — including wireguardif_output() encrypting outgoing packets — so WireGuard
  * state (peers, keypairs, nonces) and lwIP's raw API (ip_input of decrypted packets,
- * udp_sendto of encrypted ones) are never used by two tasks at once. Upstream called
- * them unlocked from here: the decrypted-packet ip_input ran TCP in this task and
- * crashed in tcp_output. Never call BSD socket functions while holding the lock. */
+ * udp_sendto of encrypted ones) are never used by two tasks at once (unlocked, the
+ * decrypted-packet ip_input would run TCP in this task and crash in tcp_output).
+ * Never call BSD socket functions while holding the lock. */
 #include "lwip/tcpip.h"
 #if !LWIP_TCPIP_CORE_LOCKING
 #error "the WireGuard glue needs CONFIG_LWIP_TCPIP_CORE_LOCKING=y"
 #endif
 
-/* Hub port: DISCO shared-key cache. Every DISCO message is a NaCl box, whose key is
- * X25519(our disco key, peer's disco key) — constant per peer, but upstream computed
- * it for every packet: tens of ms on the C5, during which tunnel packets waited in
- * this task's queue (one ~50 ms stall in most HTTP requests). Used only from this task. */
+/* DISCO shared-key cache. Every DISCO message is a NaCl box, whose key is
+ * X25519(our disco key, peer's disco key): constant per peer, and tens of ms on the
+ * C5, during which tunnel packets would wait in this task's queue. Used only from
+ * this task. */
 #define DISCO_KEY_CACHE_N 24
 static struct {
     uint8_t pub[32];
@@ -336,13 +336,12 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
     IP4_ADDR(&mask, 255, 192, 0, 0);
     IP4_ADDR(&gw, 0, 0, 0, 0);
 
-    /* Hub port: upstream linked the netif into netif_list by hand from this task
-     * (no core lock, no interface number). netifapi runs netif_add — which calls
-     * wireguardif_init — on the TCP/IP thread. tcpip_input: decrypted packets are
+    /* netifapi runs netif_add, which calls wireguardif_init, on the TCP/IP thread
+     * (core lock, interface number). tcpip_input: decrypted packets are
      * handed to the TCP/IP thread (TCP PCBs, e.g. the web server's, live there). */
     /* Added with no address first: netif_add() sets the address *before* calling the
      * init function, while netif->state still points at our init data — and ESP-IDF's
-     * netif callback reads netif->state as an esp_netif_t (crashed). 0.0.0.0 is no
+     * netif callback reads netif->state as an esp_netif_t (it would crash). 0.0.0.0 is no
      * change, so no callback; wireguardif_init() then leaves state NULL and the real
      * address is set below. */
     ip4_addr_t any;
@@ -626,7 +625,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     }
 
     /* Send CallMeMaybe to trigger peer-initiated handshake (NAT traversal).
-     * (Upstream skipped this on its cellular transport; the hub has none.) */
+     */
     {
         disco_send_call_me_maybe(ml, idx);
     }
@@ -634,7 +633,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     /* Immediately probe known endpoints (throttled to avoid flooding with 100s of peers).
      * Only force-ping if fewer than 5 peers added in the last second;
      * the periodic probe (every 15s) will handle the rest.
-     * (Upstream skipped this on its cellular transport; the hub has none.) */
+     */
     {
         static uint64_t last_burst_ms = 0;
         static int burst_count = 0;
@@ -968,10 +967,10 @@ static void process_disco_ping(microlink_t *ml, const ml_rx_packet_t *pkt,
         }
     }
 
-    /* 3. Via DERP when the ping came that way (tailscaled answers on the ping's own
-     * path). Hub port: upstream always added a DERP copy; with per-region connections
-     * that kept a TLS session open (and re-opened, ~1.5 s of handshake crypto) for every
-     * peer pinging us directly from another region. */
+    /* 3. Via DERP only when the ping came that way (tailscaled answers on the ping's
+     * own path): a DERP copy of every pong would keep a TLS session open (and re-open
+     * it, ~1.5 s of handshake crypto) for every peer pinging us directly from another
+     * region. */
     if (pkt->via_derp || !direct_sent) {
         ml_derp_queue_send_traced(ml, p->public_key, pong, pong_len, pkt->via_derp ? pkt->t_rx_ms : 0);
     }
@@ -981,10 +980,9 @@ static void process_disco_ping(microlink_t *ml, const ml_rx_packet_t *pkt,
 
     /* Hub port: a direct ping from a peer we have no direct path to proves its packets
      * reach us from that address, and its NAT now expects traffic back from us there.
-     * Ping it back (tailscaled does the same) — in a short burst: measured with a peer
-     * (behind a home router), a single ping-back right after its ping never got an
-     * answer, and tailscaled on the dev machine needs ~8 pings 1 s apart to the same
-     * peer. disco_pingback_tick() sends the rest. */
+     * Ping it back (tailscaled does the same), in a short burst: a peer behind a home
+     * router doesn't answer a single ping-back sent right after its ping (tailscaled
+     * sends ~8 pings 1 s apart). disco_pingback_tick() sends the rest. */
     if (!pkt->via_derp && pkt->src_ip != 0 && !p->has_direct_path &&
         p->pingback_ip == 0 && ml_get_time_ms() - p->last_pingback_ms > 1000) {
         p->pingback_ip = pkt->src_ip;
@@ -1046,10 +1044,9 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
         ml_peer_t *p = &ml->peers[peer_idx];
         uint64_t rtt_ms = now - pending_probes[i].sent_ms;
 
-        /* Hub port: a ping goes to every endpoint, so a peer on the LAN answers twice:
-         * from its LAN address and via the router's public address (hairpin, through the
-         * ISP's CGNAT here: 90-280 ms instead of a few ms). Whichever pong arrived first
-         * used to become the path. While a LAN path is trusted, a public-address pong
+        /* A ping goes to every endpoint, so a peer on the LAN answers twice: from its
+         * LAN address and via the router's public address (hairpin, through the ISP's
+         * CGNAT: 90-280 ms instead of a few ms). While a LAN path is trusted, a public-address pong
          * neither replaces it nor consumes the probe, so the LAN pong still matches. */
         if (!pkt->via_derp && pkt->src_ip != 0 &&
             p->has_direct_path && now < p->trust_until_ms &&
@@ -1100,11 +1097,10 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
                     /* Check if endpoint actually changed */
                     uint32_t cur_ip_u32 = ip4_addr_get_u32(ip_2_ip4(&cur_ip));
                     uint32_t new_ip_u32 = htonl(pkt->src_ip);
-                    /* Hub port: a peer often answers DISCO on both its LAN address and
-                     * its router's public address (hairpin). Upstream forced a new
-                     * handshake on every change, so the session flapped between the two
-                     * with a handshake every few seconds. Now: keep a LAN path once we
-                     * have one, and move the session without a handshake (WG roams). */
+                    /* A peer often answers DISCO on both its LAN address and its
+                     * router's public address (hairpin). Keep a LAN path once we have
+                     * one, and move the session without a handshake (WG roams): a
+                     * handshake per change would flap the session between the two. */
                     bool cur_lan = ip_is_private_hbo(ntohl(cur_ip_u32));
                     bool new_lan = ip_is_private_hbo(pkt->src_ip);
                     if ((cur_ip_u32 != new_ip_u32 || cur_port != pkt->src_port) &&
@@ -1234,13 +1230,13 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
                      disco_has_udp_path(ml));
 
             /* Reply with our own CallMeMaybe (bidirectional NAT traversal).
-             * (Upstream skipped this on its cellular transport; the hub has none.) */
+             */
             {
                 disco_send_call_me_maybe(ml, peer_idx);
             }
 
             /* Probe each endpoint with a DISCO ping.
-             * (Upstream skipped this on its cellular transport; the hub has none.) */
+             */
             for (int i = 0; i < ep_count && i < ML_MAX_ENDPOINTS; i++) {
                 const uint8_t *entry = ep_data + (i * 18);
                 uint16_t port = (entry[16] << 8) | entry[17];
@@ -1464,7 +1460,7 @@ static void disco_send_call_me_maybe(microlink_t *ml, int peer_idx) {
 }
 
 /* Public wrapper for UDP API to trigger CallMeMaybe.
- * (Upstream skipped this on its cellular transport; the hub has none.) */
+ */
 void ml_wg_mgr_send_cmm(microlink_t *ml, uint32_t peer_vpn_ip) {
     int idx = find_peer_by_ip(ml, peer_vpn_ip);
     if (idx >= 0) {
@@ -1615,8 +1611,7 @@ static void disco_periodic_probes(microlink_t *ml) {
          *  - idle, UI open (someone looks at the paths): direct heartbeat 10 s (inside
          *    the 15 s trust), relay probe tapering 15 -> 30 -> 45 s;
          *  - idle, no UI: nothing. Traffic starting again restarts discovery at once.
-         * Upstream: heartbeat every 3 s and relay probes every 15 s, for every peer,
-         * forever. Offline peers are never probed: the control server pushes their
+         * Offline peers are never probed: the control server pushes their
          * return live (ML_PEER_SET_ONLINE), and a peer that wants us contacts us. */
         bool active = peer_has_recent_data(ml, p);
         if (active && !p->was_active) {
@@ -1655,13 +1650,12 @@ static void disco_periodic_probes(microlink_t *ml) {
         if (!peer_allowed) continue;
 
         /* Probe for direct path upgrade (every UPGRADE_INTERVAL when on DERP).
-         * (Upstream skipped this on its cellular transport; the hub has none.)
          * Throttled to DISCO_PROBES_PER_TICK to spread load and reduce jitter. */
-        /* Hub port: not for peers the control server says are offline (DERP can only
+        /* Not for peers the control server says are offline (DERP can only
          * answer PeerGone). With each probe goes a CallMeMaybe, as tailscaled sends with
          * every discovery round: a peer behind a NAT that drops unsolicited UDP (a home
          * router) only gets a direct path if it pings our endpoints while we ping its
-         * own. Upstream sent CallMeMaybe once, at startup. */
+         * own. */
         uint32_t upgrade_ms = active ? ML_DISCO_ACTIVE_UPGRADE_MS
                             : watched ? ML_DISCO_UPGRADE_INTERVAL_MS * (1 + p->upgrade_fails)
                             : 0;
@@ -1819,9 +1813,8 @@ void ml_wg_mgr_task(void *arg) {
             ESP_LOGD(TAG, "disco_periodic_probes: %llu ms", (unsigned long long)dt);
         }
 
-        /* Hub port: sleep until a packet is queued (net_io/DERP notify this task)
-         * or 10 ms pass for the periodic work. Upstream slept a fixed 10 ms, so
-         * every received packet waited up to 10 ms. */
+        /* Sleep until a packet is queued (net_io/DERP notify this task) or 10 ms pass
+         * for the periodic work, so a received packet never waits for a fixed sleep. */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
     }
 

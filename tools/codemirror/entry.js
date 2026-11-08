@@ -51,6 +51,7 @@ const API = [
   ['gpio.write(pin, v)', ''], ['gpio.read(pin)', ''], ['gpio.on(pin, edge, fn)', '"rising" | "falling" | "both"'],
   ['gpio.beep(pin, ms)', 'active buzzer'], ['gpio.pattern(pins, steps, {rounds = n})', '{{mask, ms}, …}'],
   ['gpio.stop(pins)', ''], ['gpio.tone(pin, hz, ms)', 'passive buzzer'],
+  ['led.set(r, g, b)', 'board RGB LED, 0..255 each'], ['led.off()', ''], ['led.claim()', 'take the LED at load (for handlers)'],
   ['net.online()', 'Wi-Fi up with an IP'], ['net.on("up" | "down", fn)', ''],
   ['json.encode(v)', ''], ['json.decode(s)', ''], ['log(...)', 'script log'],
 ].map(([label, detail]) => ({ label: label.replace(/\(.*$|\{.*$/, ''), detail: label.slice(label.search(/[({]/)) + (detail ? '  ' + detail : ''), type: 'function', apply: label.replace(/\(.+\)$/, '(').replace(/\{.+\}$/, '{') }));

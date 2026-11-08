@@ -1,4 +1,4 @@
-// "Tailnet only, no password" access mode (Phase 4).
+// "Tailnet only, no password" access mode.
 //
 // When on, the web server accepts connections only over Tailscale and doesn't ask for
 // the password there: being on the tailnet is the login. Two layers enforce it:

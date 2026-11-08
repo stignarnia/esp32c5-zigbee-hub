@@ -33,8 +33,8 @@ extern "C" {
  * Constants
  * ========================================================================== */
 
-/* Hub port: build-time settings that were Kconfig options upstream. Runtime
- * settings (auth key, hostname, control server) come from the hub's UI/prov. */
+/* Build-time settings. Runtime settings (auth key, hostname, control server) come
+ * from the hub's UI/prov. */
 #define CONFIG_ML_MAX_PEERS             16
 #define CONFIG_ML_H2_BUFFER_SIZE_KB     512
 #define CONFIG_ML_JSON_BUFFER_SIZE_KB   512
@@ -399,8 +399,8 @@ struct microlink_s {
     uint8_t derp_region_count;
     uint16_t derp_home_region;      /* Our PreferredDERP region */
     volatile bool ui_watching;      /* hub port: UI open, keep idle peer paths fresh */
-    bool derp_home_measured;        /* hub port: chosen by latency; the server's HomeDERP
-                                     * (our previous report) no longer overrides it */
+    bool derp_home_measured;        /* chosen by latency; the server's HomeDERP (our own
+                                     * previous report) doesn't override it */
 
     /* Key expiry (parsed from MapResponse self-node) */
     int64_t key_expiry_epoch;       /* Unix epoch seconds, 0 = no expiry */
@@ -503,8 +503,7 @@ int ml_h2_build_window_update(uint8_t *out, size_t out_size,
 uint64_t ml_get_time_ms(void);
 
 /* ============================================================================
- * Network socket wrappers. Upstream routed these through a cellular AT-socket
- * bridge; the hub has Wi-Fi only, so they are the plain lwIP socket calls.
+ * Network socket wrappers: the plain lwIP socket calls (Wi-Fi only).
  * ========================================================================== */
 
 #define ml_socket       socket

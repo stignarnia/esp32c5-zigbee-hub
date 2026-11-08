@@ -31,6 +31,7 @@ main { max-width: 1400px; margin: 0 auto; padding: 1rem; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; }
 .card + .card, .grid + .card, .card + .grid, .grid + .grid { margin-top: 1rem; }
 .grid .card + .card { margin-top: 0; }
+.grid .card.wide { grid-column: 1 / -1; }
 #wifi-area + .grid { margin-top: 1rem; }
 #wifi-note .note { margin-bottom: 1rem; }
 
@@ -90,10 +91,13 @@ td.actions { white-space: nowrap; text-align: right; }
 td.actions > * { margin-left: .3rem; }
 .small { font-size: .85rem; }
 /* GPIO pins: one grid row each; on a phone the name gets its own line */
-.gp { display: grid; grid-template-columns: minmax(0, 1fr) 7em minmax(0, 12em) auto; gap: .5rem; align-items: center;
+.gp { display: grid; grid-template-columns: minmax(7em, 1fr) max-content max-content auto; gap: .5rem; align-items: center;
       padding: .45rem 0; border-bottom: 1px solid var(--line); }
 .gp input, .gp select { margin: 0; width: 100%; min-width: 0; }
 .gp-head { color: var(--muted); font-size: .9rem; padding-top: 0; }
+.gp .gp-for { grid-column: 1 / -1; display: flex; gap: .5rem; align-items: center; color: var(--muted); font-size: .9rem; }
+.gp .gp-for select { flex: 1; }
+.swatch { display: inline-block; width: .9em; height: .9em; border-radius: 50%; vertical-align: -.1em; border: 1px solid var(--line); }
 /* Script list: name, state and numbers, then the actions; wraps on a phone */
 .srow { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; padding: .6rem 0;
         border-bottom: 1px solid var(--line); }
@@ -110,7 +114,7 @@ td.actions > * { margin-left: .3rem; }
   header { gap: .5rem; } nav { order: 3; flex-basis: 100%; }
   nav a { padding: .35rem .5rem; }
   main { padding: .75rem; }
-  .gp { grid-template-columns: 7em minmax(0, 1fr) auto; }
+  .gp { grid-template-columns: max-content minmax(0, 1fr) auto; }
   .gp .gp-name { grid-column: 1 / -1; }
   .gp-head { display: none; }
 }

@@ -5,7 +5,7 @@
 // makes "move the hub to a new router remotely" work: switch to the hotspot, fix
 // the primary, turn the hotspot off, and it returns to the primary by itself.
 //
-// Recovery when no network is reachable (see CLAUDE.md, Phase 1):
+// Recovery when no network is reachable:
 //   reconnect with backoff (1 s .. 30 s)
 //   -> driver restart every 5 min of continuous downtime
 //   -> after 3 driver restarts, a reboot once the downtime passes 20 / 30 / 60 min

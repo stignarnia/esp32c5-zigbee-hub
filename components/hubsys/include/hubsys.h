@@ -10,7 +10,6 @@
 // ---- planned reboot -------------------------------------------------------------
 // Reboots after `delay_ms` (lets an HTTP response flush), disconnecting Wi-Fi
 // cleanly first. `reason` is logged and shown as the last reboot reason.
-// Phase 5 adds the "safe moment" gate (pending timers / pairing).
 void hubsys_reboot(const char *reason, uint32_t delay_ms);
 
 // Reason the previous boot ended, if it was a planned reboot ("" otherwise).

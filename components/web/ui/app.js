@@ -310,10 +310,12 @@ pages.automations = {
   stop() { clearInterval(this.timer); clearInterval(this.logTimer); this.timer = this.logTimer = null; },
   async render() {
     $('#view').innerHTML = `
+      <div id="au-safe"></div>
       <div class="grid">
         <section class="card"><h2>Scripts</h2><div id="au-clock" class="muted"></div><div id="au-list" class="muted">Loading…</div>
           <div class="row"><button id="au-new">New script</button></div></section>
         <section class="card" id="au-pins-card"><h2>Pins</h2><div id="au-pins" class="muted">—</div></section>
+        <section class="card" id="au-secrets"><h2>Secrets</h2></section>
       </div>
       <section class="card" id="au-editor" hidden></section>
       <div class="grid" id="auto-settings"></div>
@@ -341,8 +343,20 @@ pages.automations = {
     const have = new Set([...sel.options].map((o) => o.value));
     this.data.scripts.forEach((s) => { if (!have.has(s.name)) sel.add(new Option(s.name, s.name)); });
   },
+  drawSafe() {
+    const b = this.data.boot || {};
+    const el = $('#au-safe');
+    if (!b.safe_mode) { el.innerHTML = ''; return; }
+    el.innerHTML = `<div class="note bad"><b>Safe mode:</b> the hub reset ${b.abnormal_resets || 3} times in a row
+      soon after starting (last: ${esc(b.last_reset)}), so scripts were not started. Zigbee and everything
+      else run normally. <button id="au-safe-go">Start scripts</button></div>`;
+    $('#au-safe-go').addEventListener('click', async () => {
+      try { await api('/api/auto/safe', { method: 'POST', json: {} }); this.poll(); } catch (e) { alert(e.message); }
+    });
+  },
   drawList() {
     const d = this.data;
+    this.drawSafe();
     $('#au-clock').innerHTML = d.clock_set ? `Clock: ${esc(d.local_time)}`
       : '<span class="badge warn">clock not set</span> cron jobs wait until the hub gets the time from the network';
     const el = $('#au-list');
@@ -375,6 +389,15 @@ pages.automations = {
         <td>${p.playing ? '<span class="badge warn">playing</span>' : p.level ? '<span class="badge ok">high</span>' : 'low'}</td>
         <td>${esc(p.owner || '—')}</td></tr>`).join('')}</table>`
       : 'No pins enabled yet (GPIO, below).';
+    const led = this.data.led;
+    if (led) {
+      const [r, g, b] = led.rgb;
+      const on = r || g || b;
+      $('#au-pins').insertAdjacentHTML('beforeend', `<p class="small">RGB LED (GPIO 27):
+        ${on ? `<span class="swatch" style="background: rgb(${r}, ${g}, ${b})"></span> ${r}, ${g}, ${b}` : 'off'}
+        ${led.pending ? '<span class="badge warn">waiting for a buzzer to finish</span>' : ''}
+        · used by ${esc(led.owner || '—')}</p>`);
+    }
   },
   async enable(name, on) {
     try { await api('/api/auto/enable', { method: 'POST', json: { name, enabled: on } }); } catch (e) { alert(e.message); }
@@ -492,12 +515,13 @@ const TZ_PRESETS = [
   ['US Eastern', 'EST5EDT,M3.2.0,M11.1.0'], ['US Central', 'CST6CDT,M3.2.0,M11.1.0'],
   ['US Mountain', 'MST7MDT,M3.2.0,M11.1.0'], ['US Pacific', 'PST8PDT,M3.2.0,M11.1.0'],
 ];
-const GPIO_PINS = [3, 4, 5, 6, 8, 9, 10, 15, 23, 24, 26];
+const GPIO_PINS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 23, 24, 25, 26, 27];
+const GPIO_GROUND_ONLY = [27];  // strapping pin + RGB LED: buzzer ground only
 const GPIO_MODES = [['out', 'output'], ['in', 'input'], ['in_pullup', 'input, pull-up'], ['in_pulldown', 'input, pull-down'], ['ground', 'ground (always low)']];
 
 const autoset = {
   data: null,
-  // Secrets + GPIO live on the Automations page (#auto-settings), the time zone on the
+  // Secrets (#au-secrets) + GPIO (#auto-settings) live on the Automations page, the time zone on the
   // Settings page (#tz-settings); each page has one of the two areas.
   async render() {
     const area = $('#auto-settings'), tzArea = $('#tz-settings');
@@ -506,28 +530,28 @@ const autoset = {
     const d = this.data;
     if (tzArea) this.renderTz(tzArea, d);
     if (!area) return;
-    area.innerHTML = `
-      <section class="card"><h2>Secrets</h2>
+    $('#au-secrets').innerHTML = `<h2>Secrets</h2>
         <p class="muted">Values scripts read with <code>secret("name")</code>, e.g. a URL with a token. Write-only:
         they never leave the hub, and the script log masks them.</p>
         ${d.secrets.length ? `<table>${d.secrets.map((n) => `<tr><td><code>${esc(n)}</code></td>
           <td class="actions"><button class="danger" data-sdel="${esc(n)}">Delete</button></td></tr>`).join('')}</table>` : '<p class="muted">None yet.</p>'}
         <label>Name <input type="text" id="sec-name" maxlength="15" placeholder="alexa_alarm_url" autocomplete="off"></label>
         <label>Value <input type="password" id="sec-val" maxlength="512" autocomplete="new-password" placeholder="saved as is; replaces the old value"></label>
-        <div class="row"><button id="sec-save">Save secret</button><span id="sec-msg"></span></div>
-      </section>
-      <section class="card"><h2>GPIO</h2>
+        <div class="row"><button id="sec-save">Save secret</button><span id="sec-msg"></span></div>`;
+    area.innerHTML = `
+      <section class="card wide"><h2>GPIO</h2>
         <p class="muted">Pins scripts may use, by name or number. Outputs start low, drive strength 3; a
-        stopped script's outputs go low. “Ground” holds a pin low for a buzzer's second leg.</p>
+        stopped script's outputs go low. “Ground” holds a pin low for a buzzer's second leg; say which
+        output it's the ground for. GPIO 27 (the RGB LED's pin) can only be a ground.</p>
         <div id="gp-table"><div class="gp gp-head"><span>Name</span><span>Pin</span><span>Mode</span><span></span></div></div>
         <div class="row"><button class="ghost" id="gp-add">Add pin</button><button id="gp-save">Save pins</button><span id="gp-msg"></span></div>
       </section>`;
-    this.rows = d.gpio.map((p) => ({ name: p.name, pin: p.pin, mode: p.mode }));
+    this.rows = d.gpio.map((p) => ({ name: p.name, pin: p.pin, mode: p.mode, for: p.for || '' }));
     this.drawRows();
     $('#gp-add').addEventListener('click', () => { this.readRows(); this.rows.push({ name: '', pin: GPIO_PINS.find((p) => !this.rows.some((r) => r.pin === p)) || 3, mode: 'out' }); this.drawRows(); });
     $('#gp-save').addEventListener('click', () => this.saveGpio());
     $('#sec-save').addEventListener('click', () => this.saveSecret());
-    area.querySelectorAll('[data-sdel]').forEach((b) => b.addEventListener('click', () => this.delSecret(b.dataset.sdel)));
+    $('#au-secrets').querySelectorAll('[data-sdel]').forEach((b) => b.addEventListener('click', () => this.delSecret(b.dataset.sdel)));
   },
   renderTz(tzArea, d) {
     const preset = TZ_PRESETS.find((p) => p[1] === d.tz);
@@ -548,18 +572,30 @@ const autoset = {
       const row = document.createElement('div');
       row.className = 'gp row-pin';
       row.innerHTML = `<input type="text" class="gp-name" data-k="name" value="${esc(r.name)}" maxlength="15" placeholder="name, e.g. buzzer1" aria-label="Name">
-        <select data-k="pin" aria-label="Pin">${GPIO_PINS.map((p) => `<option value="${p}" ${p === r.pin ? 'selected' : ''}>GPIO ${p}</option>`).join('')}</select>
-        <select data-k="mode" aria-label="Mode">${GPIO_MODES.map(([v, n]) => `<option value="${v}" ${v === r.mode ? 'selected' : ''}>${n}</option>`).join('')}</select>
-        <button class="danger" data-rm="${i}" aria-label="Remove">×</button>`;
+        <select data-k="pin" aria-label="Pin">${GPIO_PINS.map((p) => `<option value="${p}" ${p === r.pin ? 'selected' : ''}>GPIO ${p}${GPIO_GROUND_ONLY.includes(p) ? ' (ground only)' : ''}</option>`).join('')}</select>
+        <select data-k="mode" aria-label="Mode">${(GPIO_GROUND_ONLY.includes(r.pin) ? GPIO_MODES.filter(([v]) => v === 'ground') : GPIO_MODES).map(([v, n]) => `<option value="${v}" ${v === r.mode ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        <button class="danger" data-rm="${i}" aria-label="Remove">×</button>
+        ${r.mode === 'ground' ? `<label class="gp-for">Ground for <select data-k="for" aria-label="Ground for">
+          <option value="">— (not said: treated as possibly any output)</option>
+          ${this.rows.filter((o) => o.mode === 'out' && o.name).map((o) => `<option value="${esc(o.name)}" ${o.name === r.for ? 'selected' : ''}>${esc(o.name)} (GPIO ${o.pin})</option>`).join('')}
+        </select></label>` : ''}`;
       t.appendChild(row);
     });
     t.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', () => { this.readRows(); this.rows.splice(+b.dataset.rm, 1); this.drawRows(); }));
+    // Switching to a ground-only pin leaves only the "ground" mode: redraw the row's modes.
+    // Pin, mode or a name changed: redraw (ground-only pins, the "ground for" choices).
+    t.querySelectorAll('[data-k=pin], [data-k=mode], [data-k=name]').forEach((el) => el.addEventListener('change', () => {
+      this.readRows();
+      this.rows.forEach((r) => { if (GPIO_GROUND_ONLY.includes(r.pin)) r.mode = 'ground'; });
+      this.drawRows();
+    }));
   },
   readRows() {
     this.rows = [...$('#gp-table').querySelectorAll('.gp.row-pin')].map((tr) => ({
       name: tr.querySelector('[data-k=name]').value.trim(),
       pin: +tr.querySelector('[data-k=pin]').value,
       mode: tr.querySelector('[data-k=mode]').value,
+      for: tr.querySelector('[data-k=for]') ? tr.querySelector('[data-k=for]').value : '',
     }));
   },
   async post(path, json, msgSel) {

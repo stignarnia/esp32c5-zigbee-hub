@@ -204,8 +204,8 @@ esp_err_t microlink_start(microlink_t *ml) {
 
     ml->state = ML_STATE_WIFI_WAIT;
 
-    /* Hub port: microlink never touches the Wi-Fi driver (wifi5g owns it: 5 GHz only,
-     * its own watchdog). Upstream could set the TX power here. */
+    /* microlink never touches the Wi-Fi driver (wifi5g owns it: 5 GHz only, its own
+     * watchdog). */
 
     /* Create DISCO/magicsock UDP socket (port 51820 = WireGuard standard)
      * This is the single socket for ALL direct UDP traffic: DISCO pings/pongs,

@@ -250,6 +250,8 @@ The Automations page has everything scripts need, top to bottom:
 | `gpio.pattern(pins, steps, {rounds = n})` | play several buzzers in step: `steps = {{mask, ms}, …}`, bit *i* of `mask` turns `pins[i]` on |
 | `gpio.tone(pin, hz, ms)` | a tone on a **passive** buzzer |
 | `gpio.stop(pins)` | end a beep, pattern or tone |
+| `led.set(r, g, b)` / `led.off()` | the board's RGB LED, 0–255 per colour |
+| `led.claim()` | take the LED for this script when it loads (needed if only handlers use it) |
 
 Device attributes: `open` (contact sensors), `motion`, `water`, `smoke`, `co`,
 `vibration` (or `alarm` for any of these), `tamper`, `battery_low`, `battery` (%),
@@ -279,11 +281,51 @@ zb.on("Front door", "open", function(open)
 end)
 ```
 
-Only pins you've enabled are usable: GPIO 3, 4, 5, 6, 8, 9, 10, 15, 23, 24 and 26.
-The rest are taken by the board itself (flash, PSRAM, USB, the serial console,
-boot-mode pins, the 32 kHz crystal) and can't be enabled at all. Outputs start
-low. A pin set to **ground** stays low, for a buzzer whose second leg sits on a
-GPIO instead of GND.
+Only pins you've enabled are usable: GPIO 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 23, 24,
+25 and 26, plus GPIO 27 as a ground only. The rest are taken by the board itself and
+can't be enabled at all. Outputs start low. A pin set to **ground** stays low, for a
+buzzer whose second leg sits on a GPIO instead of GND; say which output it's the
+**ground for**.
+
+**The RGB LED** (GPIO 27) can be used together with a buzzer grounded on GPIO 27:
+the hub sends a colour only while that buzzer is silent, and lets go of the buzzer's
+output during the ~80 µs it takes, so no current flows through the buzzer. A colour
+set while the buzzer plays is shown as soon as it stops. If a ground pin doesn't say
+which output it's for, the hub waits for every output to be low. The LED turns off
+when the script that owns it stops, and at every start of the hub (it would
+otherwise keep its last colour through a restart).
+
+Every GPIO of the Waveshare ESP32-C5-WIFI6-KIT-NXRX (N16R8), from its
+[schematic](https://files.waveshare.com/wiki/ESP32-C5-WIFI6-KIT-NXRX/ESP32-C5-WIFI6-KIT-NXRX-Schematic.pdf)
+and the [ESP32-C5 datasheet](https://documentation.espressif.com/esp32-c5_datasheet_en.pdf)
+v1.5 (§2 Pins, §3 Boot Configurations). "At reset" is what the chip reads from the pin
+at the moment of reset, on this chip's eFuses (all factory: `UART_PRINT_CONTROL` 0,
+`JTAG_SEL_ENABLE` 0, `DIS_PAD_JTAG` 0, `DIS_USB_JTAG` 0, read from the board):
+
+| GPIO | On the board | Chip function | At reset | Scripts |
+|---|---|---|---|---|
+| 0 | header; 32 kHz crystal Y1 **not fitted** | 32 kHz crystal pad | — | yes |
+| 1 | header; crystal not fitted | 32 kHz crystal pad, ADC | — | yes |
+| 2 | header | JTAG TMS, ADC | strapping, but no boot setting uses it | yes |
+| 3 | header | JTAG TDI, ADC | SDIO-slave clock edge (with 25): never used | yes |
+| 4 | header | JTAG TCK, ADC | — | yes |
+| 5 | header | JTAG TDO, ADC | — | yes |
+| 6 | header **and the battery-voltage divider** (200 k/100 k, 100 nF) | ADC | — | yes; with a battery fitted, driving it loses the battery reading |
+| 7 | header, no pull resistor | — | JTAG source: ignored (`JTAG_SEL_ENABLE` 0) | yes |
+| 8, 9, 10 | header | — | — | yes |
+| 11 | header "TX" → USB-serial chip (CH343, "UART" port) | UART0 TX: logs, flashing | — | **no** |
+| 12 | header "RX" ← driven by the CH343 | UART0 RX | — | **no** |
+| 13, 14 | header → "USB" USB-C port (D−, D+) | native USB | — | **no** |
+| 15 | header "NC/GPIO15" | PSRAM chip select | — | **no**: driving it crashes the chip |
+| 16–22 | inside the module | flash/PSRAM bus, flash supply (19) | — | **no** |
+| 23, 24 | header | — | — | yes |
+| 25 | header | — | SDIO-slave clock edge (with 3): never used | yes |
+| 26 | header | — | boot mode, only while BOOT is held | yes |
+| 27 | header, 10 k pull-up, **RGB LED** (WS2812B) data | — | ROM log printing (ignored, eFuse 0); boot mode with BOOT held (pull-up keeps it high) | ground only |
+| 28 | header, 10 k pull-up, **BOOT button**, auto-download circuit | — | **run or wait to be flashed** | **no** |
+
+GPIO 0 and 1 are free only because this board leaves the 32 kHz crystal out. On a
+board that fits one, leave them alone.
 
 Each pin belongs to one script at a time, and a script takes its pins when it
 loads: any `gpio` call at the top of the script claims that pin, and
@@ -347,6 +389,17 @@ returning (an endless loop), runs out of memory or nests calls too deeply is
 stopped and its error is shown with the line number; the other scripts keep
 running. If a script ever manages to crash the hub itself, the hub restarts with
 that script switched off and says why, instead of crashing again on every boot.
+
+The same goes for buzzers: if the hub resets unexpectedly (a crash, a watchdog, a
+power glitch, a brownout) while a script's buzzer is playing, that script is switched
+off at the next start, with the reason shown. A buzzer with a bad contact can throw a
+voltage spike that resets the chip; this keeps it from doing so again on every boot.
+
+**Safe mode**: if the hub resets unexpectedly three times in a row, each time less
+than a minute after starting, it starts the next time without running any script
+(nothing is switched off or deleted). Zigbee, Wi-Fi, the web UI and Tailscale run as
+usual, and the Automations page shows a banner with **Start scripts**. Restarts you
+cause (power on, the RST button, Settings → Restart, a firmware update) never count.
 
 | Limit | |
 |---|---|

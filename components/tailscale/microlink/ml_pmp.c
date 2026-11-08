@@ -6,9 +6,9 @@
  * same ISP) don't leave through the CGNAT at all: they go out on the ISP's internal
  * network from the router's WAN address (10.x) and a port the router picks per flow.
  * That peer's router only accepts replies from the exact address:port it sent to, and
- * the hub never advertised one, so no direct path could form. Measured 2026-11-07:
- * a NAT-PMP-mapped port goes out as <router WAN>:<mapped port>, unchanged, and arrives.
- * tailscaled on the dev machine does the same (advertises <router WAN>:41641).
+ * the hub never advertised one, so no direct path could form. A NAT-PMP-mapped port
+ * goes out as <router WAN>:<mapped port>, unchanged, and arrives (tailscaled does the
+ * same: it advertises <router WAN>:41641).
  *
  * So: map disco_local_port on the gateway, advertise <WAN>:<port> as a "portmapped"
  * endpoint (tailcfg type 3), renew at half the lifetime. A router without NAT-PMP

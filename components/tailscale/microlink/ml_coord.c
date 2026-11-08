@@ -947,8 +947,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
     parse_start[parse_len] = saved;
     free(resp_buf);
 
-    /* Hub port: upstream ignored these and carried on to a MapRequest that could
-     * only fail, retrying forever without saying why. */
+    /* An error or an auth URL here means a MapRequest can only fail: stop and say why. */
     {
         const cJSON *err = cJSON_GetObjectItem(resp_json, "Error");
         const cJSON *auth_url = cJSON_GetObjectItem(resp_json, "AuthURL");
@@ -1064,7 +1063,7 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
 
         update->action = ML_PEER_ADD;
 
-        /* Hub port: node ID and online state (upstream ignored both) */
+        /* Node ID and online state */
         update->online = -1;
         const cJSON *jid = cJSON_GetObjectItem(peer, "ID");
         if (cJSON_IsNumber(jid)) update->node_id = (int64_t)jid->valuedouble;

@@ -34,6 +34,7 @@
 #include "hublog.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include "nvs.h"
 #include "wifi5g.h"
 
 static const char *TAG = "auto";
@@ -50,10 +51,11 @@ static const char *TAG = "auto";
 #define STATE_KEYS_MAX   64
 #define STATE_STR_MAX    1024
 #define GATE_HORIZON_US  (120LL * 1000000)   // reboot gate: nothing due within 2 min
+#define MAX_BUZ_BLAME    5
 // PSRAM. Lua limits nesting to LUAI_MAXCCALLS=100 C levels, but not their size: the
 // heaviest level (a string.gsub callback: gsub's own frame is 880 B) costs ~1.15 KB.
-// Measured worst case (gsub nested to the limit, uncaught, so the traceback runs at the
-// deepest point): 116.4 KB. 32 KB overflowed and crashed the hub.
+// Worst case (gsub nested to the limit, uncaught, so the traceback runs at the deepest
+// point): 116.4 KB.
 #define TASK_STACK       (160 * 1024)
 
 script_t *g_scripts;
@@ -77,6 +79,45 @@ typedef struct {
     char name[AUTO_NAME_MAX + 1];
 } rtc_run_t;
 static RTC_NOINIT_ATTR rtc_run_t s_rtc_run;
+
+// Boot-loop guard. Abnormal = the hub didn't mean to restart: a crash,
+// a watchdog, a power glitch (a loose buzzer throws one), a brownout, a CPU lockup.
+// Power-on, the RST button / serial reset and esp_restart() (OTA, planned reboots, the
+// Wi-Fi watchdog) are normal.
+static bool reset_abnormal(esp_reset_reason_t r)
+{
+    return r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT || r == ESP_RST_WDT ||
+           r == ESP_RST_BROWNOUT || r == ESP_RST_PWR_GLITCH || r == ESP_RST_CPU_LOCKUP;
+}
+
+static const char *reset_words(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_PANIC: return "crash";
+    case ESP_RST_INT_WDT: case ESP_RST_TASK_WDT: case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_PWR_GLITCH: return "power glitch";
+    case ESP_RST_CPU_LOCKUP: return "CPU lockup";
+    default: return "normal";
+    }
+}
+
+// Did RTC memory survive the last reset? A canary written at every boot; reported in the
+// log and the API, so the first real power-glitch reset tells whether the buzzer marker
+// (RTC memory) can catch one. The safe-mode counter is in NVS and doesn't depend on it.
+#define CANARY 0x43414e59u
+static RTC_NOINIT_ATTR uint32_t s_rtc_canary[2];
+static bool s_rtc_kept;
+
+// Safe mode: NVS "autoboot": n = abnormal resets in a row that came < 60 s after boot,
+// up = the boot before reached 60 s. Written by the main task at boot and by a small
+// internal-stack task at 60 s (the engine task's stack is in PSRAM: no flash writes there).
+#define BOOT_NS          "autoboot"
+#define SAFE_AFTER       3
+#define BOOT_OK_US       (60LL * 1000000)
+static bool s_safe_mode;
+static uint8_t s_boot_resets;
+static const char *s_last_reset = "normal";
 
 // ---- log ring (script log in the UI) --------------------------------------------------------
 
@@ -1505,6 +1546,12 @@ cJSON *automation_json(void)
     // the deepest script so far (parser nesting, pattern matching, nested calls).
     cJSON_AddNumberToObject(o, "stack_free_min", s_task ? (double)uxTaskGetStackHighWaterMark(s_task) : -1);
     cJSON_AddItemToObject(o, "gpio", agpio_json());
+    cJSON_AddItemToObject(o, "led", agpio_led_json());
+    cJSON *b = cJSON_AddObjectToObject(o, "boot");
+    cJSON_AddBoolToObject(b, "safe_mode", s_safe_mode);
+    cJSON_AddNumberToObject(b, "abnormal_resets", s_boot_resets);
+    cJSON_AddStringToObject(b, "last_reset", s_last_reset);
+    cJSON_AddBoolToObject(b, "rtc_kept", s_rtc_kept);
     return o;
 }
 
@@ -1646,6 +1693,34 @@ static void *psram_malloc(size_t n)
 // Boot: was a script running when the previous boot ended in a crash or a watchdog
 // reset? Then disable it (persisted) and say why. A power glitch or brownout isn't the
 // script's fault (a loose buzzer can cause one), so those don't count.
+static void disable_for_reset(int idx, const char *why)
+{
+    script_t *s = &g_scripts[idx];
+    if (!s->enabled) return;
+    s->enabled = false;
+    s->status = ST_ERROR;
+    snprintf(s->err, sizeof(s->err),
+             "the hub reset (%s) while this script's buzzer was playing; the script was disabled so it can't "
+             "happen again. Check the buzzer's contacts, then enable it again", why);
+    ESP_LOGE(TAG, "the hub reset (%s) while script '%s' had a buzzer playing: script disabled", why, s->name);
+    auto_log(s->name, 'E', "disabled: the hub reset (%s) while its buzzer was playing", why);
+    if (store_write_meta() != ESP_OK) ESP_LOGE(TAG, "could not save the disabled state");
+}
+
+// Boot-loop guard, buzzer marker: scripts whose buzzer was playing when an abnormal reset
+// ended the previous boot are disabled (crash guard below only sees Lua running; a pattern
+// plays in C after the script returned).
+static void blame_buzzer(esp_reset_reason_t r)
+{
+    char names[MAX_BUZ_BLAME][AUTO_NAME_MAX + 1];
+    int n = agpio_take_marker(names, MAX_BUZ_BLAME);
+    if (!reset_abnormal(r)) return;
+    for (int i = 0; i < n; i++) {
+        int idx = find_script(names[i]);
+        if (idx >= 0) disable_for_reset(idx, reset_words(r));
+    }
+}
+
 static void blame_previous_crash(void)
 {
     if (s_rtc_run.magic != RUN_MAGIC) return;
@@ -1669,6 +1744,100 @@ static void blame_previous_crash(void)
     if (store_write_meta() != ESP_OK) ESP_LOGE(TAG, "could not save the disabled state");
 }
 
+static void boot_ok_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(BOOT_OK_US / 1000));
+    nvs_handle_t h;
+    if (nvs_open(BOOT_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "n", 0);
+        nvs_set_u8(h, "up", 1);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    s_boot_resets = 0;
+    vTaskDelete(NULL);
+}
+
+// Counts abnormal resets that came less than 60 s after boot (main task, at boot).
+static void boot_count(esp_reset_reason_t r)
+{
+    s_rtc_kept = s_rtc_canary[0] == CANARY && s_rtc_canary[1] == ~CANARY;
+    s_rtc_canary[0] = CANARY;
+    s_rtc_canary[1] = ~CANARY;
+    s_last_reset = reset_words(r);
+    uint8_t n = 0, up = 1;
+    nvs_handle_t h;
+    if (nvs_open(BOOT_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_get_u8(h, "n", &n);
+        nvs_get_u8(h, "up", &up);
+        n = (reset_abnormal(r) && !up) ? (uint8_t)(n < 250 ? n + 1 : n) : 0;
+        nvs_set_u8(h, "n", n);
+        nvs_set_u8(h, "up", 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    s_boot_resets = n;
+    s_safe_mode = n >= SAFE_AFTER;
+    ESP_LOGI(TAG, "reset: %s; RTC memory %s; abnormal resets in a row: %u%s", s_last_reset,
+             s_rtc_kept ? "kept" : "not kept", n, s_safe_mode ? " -> SAFE MODE, scripts not started" : "");
+    if (xTaskCreate(boot_ok_task, "boot_ok", 3072, NULL, 1, NULL) != pdPASS) ESP_LOGW(TAG, "boot_ok task not created");
+}
+
+static int start_enabled(void)
+{
+    int n = 0;
+    for (int i = 0; i < AUTO_MAX_SCRIPTS; i++) {
+        script_t *s = &g_scripts[i];
+        if (!s->used || !s->enabled || s->L) continue;
+        size_t len;
+        char *src = store_read_script(s->name, &len);
+        if (!src) {
+            auto_log(s->name, 'E', "not started: its file is missing");
+            continue;
+        }
+        if (run_cmd(CMD_START, i, s->name, src, len, 0, NULL, 0) == ESP_OK) n++;
+    }
+    return n;
+}
+
+bool automation_safe_mode(void)
+{
+    return s_safe_mode;
+}
+
+esp_err_t automation_leave_safe_mode(void)
+{
+    if (!s_safe_mode) return ESP_OK;
+    s_safe_mode = false;
+    int n = start_enabled();
+    ESP_LOGI(TAG, "safe mode left: %d script(s) starting", n);
+    auto_log("hub", 'I', "safe mode left by the user: %d script(s) starting", n);
+    return ESP_OK;
+}
+
+#ifdef HUB_TEST_HOOKS
+// Test builds only: /api/debug/crash {"boots": N} makes each of the next N boots abort 5 s
+// in (safe-mode test). Main task: NVS is fine here.
+static void test_crash_cb(void *arg) { abort(); }
+static void test_boot_crash(void)
+{
+    nvs_handle_t h;
+    uint8_t n = 0;
+    if (nvs_open("hubtest", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_get_u8(h, "crashn", &n);
+    if (n) {
+        nvs_set_u8(h, "crashn", (uint8_t)(n - 1));
+        nvs_commit(h);
+        static esp_timer_handle_t t;
+        esp_timer_create_args_t a = {.callback = test_crash_cb, .name = "testboot"};
+        esp_timer_create(&a, &t);
+        esp_timer_start_once(t, 5000000);
+        ESP_LOGW(TAG, "TEST: this boot aborts in 5 s (%u more after it)", n - 1);
+    }
+    nvs_close(h);
+}
+#endif
+
 esp_err_t automation_start(void)
 {
     cJSON_Hooks hooks = {.malloc_fn = psram_malloc, .free_fn = free};
@@ -1691,6 +1860,9 @@ esp_err_t automation_start(void)
     setenv("TZ", store_tz(), 1);
     tzset();
     store_load_meta();
+    esp_reset_reason_t rr = esp_reset_reason();
+    boot_count(rr);
+    blame_buzzer(rr);
     blame_previous_crash();
     for (int i = 0; i < AUTO_MAX_SCRIPTS; i++) if (g_scripts[i].used) store_state_load(i);
     agpio_init();
@@ -1704,18 +1876,19 @@ esp_err_t automation_start(void)
     store_io_start();
     esp_register_shutdown_handler(on_shutdown);
 
-    int n = 0;
-    for (int i = 0; i < AUTO_MAX_SCRIPTS; i++) {
-        script_t *s = &g_scripts[i];
-        if (!s->used || !s->enabled) continue;
-        size_t len;
-        char *src = store_read_script(s->name, &len);
-        if (!src) {
-            auto_log(s->name, 'E', "not started: its file is missing");
-            continue;
-        }
-        if (run_cmd(CMD_START, i, s->name, src, len, 0, NULL, 0) == ESP_OK) n++;
+    if (s_safe_mode) {
+        ESP_LOGW(TAG, "safe mode: %u abnormal resets in a row soon after starting; scripts not started", s_boot_resets);
+        auto_log("hub", 'W', "safe mode: the hub reset %u times in a row soon after starting (last: %s); scripts were "
+                 "not started", s_boot_resets, s_last_reset);
+#ifdef HUB_TEST_HOOKS
+        test_boot_crash();
+#endif
+        return ESP_OK;
     }
+    int n = start_enabled();
     ESP_LOGI(TAG, "%d script(s) starting%s", n, s_restore ? " (timers from before the restart pending)" : "");
+#ifdef HUB_TEST_HOOKS
+    test_boot_crash();
+#endif
     return ESP_OK;
 }

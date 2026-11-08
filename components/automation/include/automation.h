@@ -32,7 +32,13 @@ esp_err_t automation_save(const char *name, const char *src, size_t len, bool en
 esp_err_t automation_set_enabled(const char *name, bool enabled);
 esp_err_t automation_restart(const char *name);  // after an error
 esp_err_t automation_delete(const char *name);
-int automation_enabled_count(void);              // Phase 6 mode rule
+int automation_enabled_count(void);              // Home Assistant mode rule
+
+// Boot-loop guard, safe mode: after 3 abnormal resets in a row, each less than 60 s after
+// boot, the engine starts no scripts this boot (nothing is disabled or deleted). The UI
+// shows it; this starts the enabled scripts and leaves safe mode.
+bool automation_safe_mode(void);
+esp_err_t automation_leave_safe_mode(void);
 
 // Script log lines with seq > `after` (at most `max`), as a JSON array of
 // {seq, t (epoch s or -uptime s), script, level, msg}. *last = newest seq.

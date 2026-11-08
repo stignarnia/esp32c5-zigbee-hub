@@ -2,7 +2,7 @@
 //
 // Everything runs on the httpd task, including WebSocket sends (queued with
 // httpd_queue_work), so no locking is needed and no socket is ever touched by a
-// task other than the one that owns it (lesson 8 in CLAUDE.md).
+// task other than the one that owns it (closing a socket another task reads crashes lwIP).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -157,7 +157,7 @@ static esp_err_t ws_post_handshake(httpd_req_t *req)
     int fd = httpd_req_to_sockfd(req);
     // Pushes are sent from the server's only task: a client that stops reading (a
     // frozen tab, a phone asleep) must not hold it for send_wait_timeout (10 s), or
-    // every page and login waits behind it (measured: 12 s + 7 s stalls). A push that
+    // every page and login waits behind it. A push that
     // can't be handed over in 0.5 s closes that client; the browser reconnects.
     struct timeval tv = {.tv_sec = 0, .tv_usec = 500 * 1000};
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -247,7 +247,7 @@ static void on_close(httpd_handle_t hd, int fd)
     close(fd);
 }
 
-// ---- cJSON in PSRAM (lesson 6: internal RAM is the bottleneck) ---------------------
+// ---- cJSON in PSRAM (internal RAM is the bottleneck) -------------------------------
 
 static void *psram_malloc(size_t n)
 {
@@ -271,7 +271,7 @@ esp_err_t web_start(const web_config_t *cfg)
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size = 8192;           // PBKDF2 + JSON building
-    hc.max_uri_handlers = 40;     // 36 in use (Phase 5)
+    hc.max_uri_handlers = 56;       // ~40 in use; too few aborts the boot (ESP_ERR_HTTPD_HANDLERS_FULL)
     hc.lru_purge_enable = true;     // a stuck client can't lock others out
     hc.recv_wait_timeout = 10;      // OTA uploads stream for seconds
     hc.send_wait_timeout = 10;

@@ -12,7 +12,7 @@ typedef struct {
     char psk2[65];
     char hostname[33];
     char country[3];       // ISO 3166 alpha-2 from the flashing machine, "" = keep default
-    char admin_hash[128];  // "pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>", checked in Phase 2
+    char admin_hash[128];  // "pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>", checked by the web login
     char lan_reset[33];    // nonce from flash.sh --lan-access: turns tailnet-only access off once
     bool has_wifi;         // ssid present
 } prov_t;

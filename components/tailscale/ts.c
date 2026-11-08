@@ -36,8 +36,7 @@ static bool s_registered;
 static char s_auth_key[128];        // read by microlink's coord task on each registration
 static char s_hostname[33];
 
-// Crash guard. Tailscale is the newest code on the board; a bug in it must not
-// crash-loop the hub (each loop takes Zigbee down). Two consecutive crash resets
+// Crash guard. A bug in Tailscale must not crash-loop the hub (each loop takes Zigbee down). Two consecutive crash resets
 // while the node was running suspend it on the next boot. Kept in RTC memory,
 // which survives a crash reset; cleared by a clean boot or 10 min of running.
 #define CRASH_MAGIC     0x54534352u
@@ -242,7 +241,7 @@ static void maybe_start(void)
 // ---- diagnostics: who holds lwIP's core lock ----------------------------------------
 // Every socket call in the system (the web server included) waits while another task
 // holds lwIP's core lock. Sampled every 50 ms; a holder that keeps it > 200 ms is logged
-// with its name, and again when it lets go. (Added 2026-11-07 to find an 8 s web stall.)
+// with its name, and again when it lets go.
 
 extern sys_mutex_t lock_tcpip_core;
 

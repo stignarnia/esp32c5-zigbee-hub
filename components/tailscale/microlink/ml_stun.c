@@ -611,9 +611,9 @@ bool ml_stun_parse_response_ipv6(const uint8_t *data, size_t len,
 /* ============================================================================
  * Home DERP region by latency (hub port)
  *
- * Upstream reported region 9 (Dallas) as PreferredDERP, hard-coded. From Italy that
- * put every relayed packet ~130 ms away, and peers homed elsewhere were never reached
- * (see ml_derp.c). This is a small version of tailscaled's netcheck: a STUN binding
+ * A fixed PreferredDERP far away puts every relayed packet ~130 ms away, and peers
+ * homed elsewhere are never reached (see ml_derp.c). This is a small version of
+ * tailscaled's netcheck: a STUN binding
  * request to every region, a few rounds, the lowest RTT per region wins. The minimum
  * over rounds matters on this board: Wi-Fi sleeps 56 ms of every 102 ms while
  * 802.15.4 has the radio, which adds 0-58 ms to any single sample.

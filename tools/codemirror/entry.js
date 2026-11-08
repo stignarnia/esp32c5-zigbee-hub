@@ -3,7 +3,7 @@
 // failed to load, it falls back to the plain textarea.
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
          drawSelection } from '@codemirror/view';
-import { EditorState } from '@codemirror/state';
+import { EditorState, Compartment } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { StreamLanguage, syntaxHighlighting, HighlightStyle, bracketMatching, indentOnInput,
          indentUnit } from '@codemirror/language';
@@ -23,31 +23,22 @@ const hubHighlight = HighlightStyle.define([
   { tag: t.operator, color: 'var(--muted)' },
 ]);
 
-const theme = EditorView.theme({
+// Only what makes the editor sit in the page; everything else (cursor, selection, panels,
+// tooltips, highlights) is CodeMirror's own light or dark default.
+const THEME = {
   '&': { height: '100%', fontSize: '13px', backgroundColor: 'var(--bg)', color: 'var(--fg)' },
   '.cm-scroller': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', lineHeight: '1.5' },
-  '.cm-content': { caretColor: 'var(--fg)' },
-  // CodeMirror draws its own cursor, black unless it thinks the editor is dark.
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--fg) !important' },
   '.cm-gutters': { backgroundColor: 'var(--bg)', color: 'var(--muted)', borderRight: '1px solid var(--line)' },
-  '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'color-mix(in srgb, var(--accent) 8%, transparent)' },
-  '&.cm-focused': { outline: 'none' },
-  // !important: CodeMirror's own light-theme rule for a focused editor (#d7d4f0) is more
-  // specific than any theme selector, and light text vanishes on it in dark mode.
-  '.cm-selectionLayer .cm-selectionBackground, .cm-content ::selection':
-    { background: 'color-mix(in srgb, var(--accent) 35%, transparent) !important' },
-  '.cm-matchingBracket': { outline: '1px solid var(--muted)', backgroundColor: 'transparent' },
-  '.cm-tooltip': { backgroundColor: 'var(--card)', color: 'var(--fg)', border: '1px solid var(--line)' },
-  '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'var(--accent)', color: 'var(--accent-fg)' },
-  '.cm-panels': { backgroundColor: 'var(--card)', color: 'var(--fg)' },
-  // Search panel and match highlights: CodeMirror's own are light-theme colours.
-  '.cm-textfield': { backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--line)' },
-  '.cm-button': { backgroundImage: 'none', backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--line)' },
-  '.cm-panel.cm-search [name=close]': { color: 'var(--muted)' },
-  '.cm-searchMatch': { backgroundColor: 'color-mix(in srgb, var(--warn) 25%, transparent)', outline: '1px solid color-mix(in srgb, var(--warn) 60%, transparent)' },
-  '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: 'color-mix(in srgb, var(--warn) 45%, transparent)' },
-  '.cm-selectionMatch': { backgroundColor: 'color-mix(in srgb, var(--ok) 22%, transparent)' },
-});
+};
+
+// CodeMirror picks its light or dark defaults by the theme's `dark` flag. The colours above
+// follow the page by themselves, so the flag is kept in step with the page: the header
+// toggle (data-theme) or the system.
+const themeFor = (dark) => EditorView.theme(THEME, { dark });
+const pageDark = () => {
+  const t = document.documentElement.dataset.theme;
+  return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+};
 
 // Completions: the hub's script API (keep in sync with the Template in app.js) + Lua.
 const API = [
@@ -73,6 +64,7 @@ const KEYWORDS = 'and break do else elseif end false for function goto if in loc
 window.HubEditor = {
   // Creates an editor in `parent`; returns a small handle app.js uses.
   create(parent, doc, onChange) {
+    const mode = new Compartment();
     const view = new EditorView({
       parent,
       state: EditorState.create({
@@ -88,10 +80,15 @@ window.HubEditor = {
                      ...completionKeymap, indentWithTab]),
           EditorView.contentAttributes.of({ autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' }),
           EditorView.updateListener.of((u) => { if (u.docChanged && onChange) onChange(); }),
-          theme,
+          mode.of(themeFor(pageDark())),
         ],
       }),
     });
+    const follow = () => view.dispatch({ effects: mode.reconfigure(themeFor(pageDark())) });
+    const watch = new MutationObserver(follow);
+    watch.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    const mq = matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', follow);
     return {
       get: () => view.state.doc.toString(),
       set: (text) => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } }),
@@ -101,7 +98,7 @@ window.HubEditor = {
         view.focus();
       },
       focus: () => view.focus(),
-      destroy: () => view.destroy(),
+      destroy() { watch.disconnect(); mq.removeEventListener('change', follow); view.destroy(); },
     };
   },
 };

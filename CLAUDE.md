@@ -21,6 +21,8 @@ One ESP32-C5 board that is, on its own:
    When it's on, the board speaks the **ESPHome native API**: every Zigbee device
    appears in Home Assistant as a native sub-device of the hub, and the hub adds its own
    entities plus whatever the enabled scripts publish (see Phase 6).
+7. **A motion sensor itself** (added 2026-11-08) — Wi-Fi sensing (CSI) of the router's
+   signal says moving / not moving, for scripts and later for Home Assistant (Phase 5b).
 
 ## Priorities (user decision, 2026-11-04)
 
@@ -165,7 +167,7 @@ The user's personal tailnet (not a work account). The board will be
 
 ```
             ┌──────────────────── Web UI (static, gzipped in flash) ───────────────┐
-            │  Devices · Enroll · Automations · Network · Tailscale · System       │
+            │  Devices (+ enrollment) · Automations · Status · Settings            │
             └──────────────────────────────┬───────────────────────────────────────┘
                               REST + WebSocket (esp_http_server, port 80)
             ┌──────────────────────────────┴───────────────────────────────────────┐
@@ -177,18 +179,19 @@ The user's personal tailnet (not a work account). The board will be
             │              │  (LittleFS)    │  ESPHome API    │  in lwIP           │
             │              │                │  (HA, :6053)    │                    │
             ├──────────────┴────────────────┴─────────────────┴────────────────────┤
-            │  Wi-Fi manager (STA, 5 GHz only)  ·  coex  ·  provisioning (NVS)     │
+            │  Wi-Fi (STA, 5 GHz only) · motion (CSI) · coex · provisioning (NVS)  │
             └──────────────────────────────────────────────────────────────────────┘
 ```
 
 The HTTP server binds to all interfaces. microlink adds its WireGuard interface to
 lwIP's netif list, so the same server answers on the LAN IP and on the `100.x`
-tailnet IP without extra code (to verify in Phase 4).
+tailnet IP without extra code (verified in Phase 4).
 
-### Source layout (as built, 2026-11-07)
+### Source layout (as built, 2026-11-08)
 
 ```
 CMakeLists.txt  sdkconfig.defaults  partitions.csv  flash.sh  env.sh
+.luarc.json      Lua language server settings for editors (points at tools/lua)
 main/            app_main, boot order, Wi-Fi watchdog's reboot gate
 components/
   prov/          read provisioning NVS partition
@@ -197,9 +200,10 @@ components/
   hublog/        on-board diagnostic log (LittleFS)
   zb/            coordinator, enrollment, interview, ZCL helpers, and the device
                  registry with persistence (zb_dev.c; no separate devices/ component)
-  web/           http server, REST (web_api.c, web_auto.c), WebSocket, auth, access mode
-  web/ui/        index.html, app.js, style.css (no build step, gzipped by CMake), and
-                 cm.js (CodeMirror editor, prebuilt by tools/codemirror, committed)
+  web/           http server, REST (web_api.c, web_auto.c, web_motion.c), WebSocket, auth,
+                 access mode
+  web/ui/        index.html, app.js, style.css, favicon.svg (no build step, gzipped by
+                 CMake), and cm.js (CodeMirror editor, prebuilt by tools/codemirror, committed)
   automation/    Lua engine (auto_engine.c), store, GPIO, HTTP
   lua/           Lua 5.5.1 source (MIT), vendored unmodified
   tailscale/     microlink (MIT) ported to IDF v6, wrapped
@@ -211,6 +215,7 @@ tools/
   mkprov.py      provisioning image for flash.sh
   gpio_probe/    Phase 1b buzzer/GPIO probe firmware
   codemirror/    editor bundle: pinned package.json + lockfile, entry.js, build.sh, LICENSE
+  lua/hub.lua    the hub's Lua API as LuaLS definitions (completion, no "undefined global")
 ```
 
 ### Partition table (16 MB)
@@ -541,6 +546,12 @@ OTA bookkeeping), `wifi5g` (runtime network API).
       password → offline 60 s → reverted + reconnected; correct one → OK in < 2 s,
       saved; reset → back to `prov`
 - [x] Vanilla JS, no framework, no build step
+- [x] 2026-11-08: header **light/dark toggle** (follows the system until used; kept in
+      `localStorage`, `data-theme` on `<html>`; CSS tokens for both, `color-scheme` set);
+      **`/favicon.svg`**; links themed (browser defaults were 2.0:1 / 1.7:1 on the dark
+      card, now 7.9:1 / 8.1:1; light 6.3:1 / 6.8:1). Tailscale status line rewritten only
+      when it changes (it was rewritten on every 2 s push, and a re-created link flashes
+      from unvisited to visited colour). Verified by the user
 
 #### Remote firmware updates (OTA)
 - [x] `POST /api/ota`: streams into the inactive slot in 4 KB chunks (PSRAM
@@ -756,7 +767,8 @@ For long tests without a serial cable: log on the board, download later.
 - UI: three tabs since 2026-11-06 — Devices, Status (read-only: Wi-Fi, recovery
   counters with the last disconnect reason in words, memory, system, firmware),
   Settings (everything that changes something: Wi-Fi networks, firmware update,
-  log download, restart)
+  log download, restart). Automations became the fourth tab in Phase 5; Settings also
+  holds Tailscale (Phase 4) and Motion (2026-11-08)
 - [x] Zigbee lock around every stack call from other tasks — audited 2026-11-06, none
       missing. All `ezb_*` calls in `zb_dev.c` (interview, enroll, bind/report,
       availability pings) are reached only from the Zigbee task (signal/ZCL/ZDO callbacks,
@@ -1202,8 +1214,13 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
       Automations page = scripts, pins, editor, script log, **Secrets, GPIO** (moved from
       Settings 2026-11-07; Time zone stays in Settings)
   - **Editor = CodeMirror 6** (user decision 2026-11-07; Monaco rejected: no mobile support,
-    MBs). Lua highlighting, search, bracket matching, completion of the hub's API, colours
-    from the page's CSS variables (dark mode). Sources + pinned versions in
+    MBs). Lua highlighting, search, bracket matching, completion of the hub's API. Theme =
+    only background, text, font, gutter and syntax colours from the page's CSS variables;
+    everything else is CodeMirror's own light or dark default, chosen by the page's mode
+    and switched live with the toggle / the system (2026-11-08: the theme had been
+    declared light, so CodeMirror's light defaults — black cursor, near-white selection,
+    light search panel — showed in dark mode; per-part overrides were tried, then removed
+    for this). Sources + pinned versions in
     `tools/codemirror/` (`build.sh` → `components/web/ui/cm.js`, committed; npm cache and
     `node_modules` under `.esp/`), so the firmware build needs no Node. **120 KB gzipped**
     (view 177 KB + state 46 KB minified are most of it; search + autocomplete ~15 KB gz).
@@ -1234,6 +1251,7 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
     10 s. A door reopened right after closing starts a new alarm and a new Alexa call
     (two calls 2 s apart) — 5b should hold off repeat calls
   - [ ] `morning-check.lua` not run yet
+  - [x] `keys-alarm.lua`: the user's alarm, see Phase 5b
 
 #### Phase 5 findings (2026-11-07)
 - **A script crashed the hub into a boot loop.** The engine task had 32 KB of stack "sized
@@ -1283,7 +1301,7 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
 - **`espefuse` leaves the chip in download mode**: the hub stays down until reset (RTS
   pulse). The CH343 auto-reset resets the chip whenever DTR and RTS differ, even briefly
 
-### Phase 5b — The user's own alarm script (user request 2026-11-07)
+### Phase 5b — The user's own alarm script (user request 2026-11-07; built and verified 2026-11-08, router-off test pending)
 Built on Phase 5, before Home Assistant: it runs entirely on the hub, so it needs
 nothing from Phase 6.
 - [x] **The script is the keys alarm** (`examples/keys-alarm.lua`, installed on the hub as
@@ -1526,7 +1544,10 @@ All measured there on the same chip; re-verify, don't assume.
   entities and whatever enabled scripts publish come on top. Scripts never hide devices.
 - **Lua** for automations (see Phase 5).
 - **Script editor = CodeMirror 6**, prebuilt and committed (2026-11-07; Monaco rejected:
-  no mobile support, several MB).
+  no mobile support, several MB). Committed so the firmware build needs no Node.
+- **No overrides of CodeMirror's own styles** (2026-11-08): the theme sets only what makes
+  the editor sit in the page; CodeMirror is told light or dark and uses its own defaults.
+- **Light/dark**: follows the system, with a header toggle that overrides it (2026-11-08).
 - **GPIO pins are claimed only while a script loads** (2026-11-07), so conflicts show at
   Save. Secrets and GPIO settings live on the Automations page (2026-11-07).
 - **Commanding Zigbee devices: not yet, not never** (2026-11-07, clarified 2026-11-08): in

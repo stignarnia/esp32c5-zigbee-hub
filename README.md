@@ -4,9 +4,9 @@
 > 5 GHz-only Wi-Fi with backup network and recovery, provisioning via `flash.sh`,
 > the web UI, over-the-air updates with rollback, the Zigbee coordinator with
 > enrollment of battery sensors (tested with contact sensors), Tailscale (direct
-> paths, relays, the "tailnet only, no password" mode), and Lua automations with
-> buzzers and HTTP calls. Home Assistant, network backup and signed updates are
-> next. [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
+> paths, relays, the "tailnet only, no password" mode), Lua automations with
+> buzzers and HTTP calls, and Wi-Fi motion sensing (with the keys alarm built on it).
+> Home Assistant, network backup and signed updates are next. [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
 
 A Zigbee 3.0 coordinator, automation engine and web UI on a single ESP32-C5,
 reachable from anywhere over your tailnet. No cloud, no Home Assistant, no MQTT
@@ -20,6 +20,8 @@ broker, no Raspberry Pi.
   the Wi-Fi credentials of the machine you're flashing from.
 - **On your tailnet.** The board joins Tailscale as `zigbee-hub`, so the UI works
   from your phone on cellular just like it does at home.
+- **The hub is a motion sensor too.** It senses people moving from how they disturb
+  the Wi-Fi signal between it and your router. No extra hardware.
 - **Made for battery sensors.** Contact, motion, leak, smoke, temperature and
   humidity sensors. Mains-powered Zigbee devices (plugs, bulbs, other routers) are
   untested and not what this hub is built for.
@@ -133,14 +135,16 @@ can't strand it. The hotspot must be on **5 GHz** (iPhone: turn off
 Log in with the admin password (or not at all, in *tailnet only* mode). The UI
 updates live over a WebSocket and works on a phone. Four tabs: **Devices**,
 **Automations**, **Status** (read-only) and **Settings** (everything that changes
-something).
+something). Light or dark follows your system; the ☾/☀ button in the header switches
+it, and the browser remembers your choice.
 
 ### Devices
 
 Every paired sensor with its live state: contact, motion, water leak, smoke,
 temperature, humidity and battery. Each device shows signal strength, last seen
 and availability. Rename, re-interview or remove them. The UI only shows state;
-there are no switches in it, and the hub never sends commands to devices.
+there are no switches in it. The sensors the hub is built for take no commands, so
+nothing sends them any.
 
 The last known state of each sensor is kept across restarts, so a door that was
 open before a reboot still reads open after it.
@@ -216,11 +220,12 @@ The Automations page has everything scripts need, top to bottom:
 
 - **Scripts**: each with its state (running, off, stopped by an error and why),
   memory, how often it ran, its timers and cron jobs; switch on/off, edit, restart,
-  delete. With the Home Assistant integration on, it also shows which mode is active.
+  delete.
 - **Pins**: every enabled GPIO, its level, and the script that owns it.
 - **Editor**: syntax highlighting, search, bracket matching, and completion of the
-  hub's own functions (CodeMirror). Built-in examples to start from (the files in
-  [`examples/`](examples/), offered in the editor; none is installed until you save it). If a script
+  hub's own functions (CodeMirror), in the page's light or dark theme. Built-in
+  examples to start from (the files in [`examples/`](examples/), offered in the editor;
+  none is installed until you save it), among them the keys alarm below. If a script
   fails to load (a syntax error, a pin another script owns), the error is shown
   right there and its line is selected.
 - **Secrets** and **GPIO** settings (below).
@@ -424,6 +429,46 @@ zone database: `CET-1CEST,M3.5.0,M10.5.0/3` reads "standard time *CET*, 1 hour
 ahead of UTC (the sign is inverted), summer time *CEST* (one more hour) from the
 last (5) Sunday (0) of March (3) until the last Sunday of October at 03:00".
 
+#### The keys alarm
+
+[`examples/keys-alarm.lua`](examples/keys-alarm.lua) makes sure nobody walks out and
+gets locked out without a warning. It needs a contact sensor on the front door
+("Door"), a second one on the inside of the door with no magnet of its own ("Keys"), and
+a magnet glued to the key. Touching the key to "Keys" means "I'm leaving with it".
+
+- The door opens within 60 s of a Keys tap: silent.
+- The door opens and nothing moved inside in the minute before: silent (someone
+  coming home, seen by the hub's motion sensing).
+- Anything else: buzzers and the Alexa routine for 10 s. A Keys tap or closing the door
+  stops it. Alexa isn't called again within 30 s.
+- No motion signal (Wi-Fi down, hub just started) counts as movement, so it sounds.
+
+Nothing is remembered from one opening to the next, so whatever went wrong, closing the
+door puts it back to normal. It can sound when it didn't need to (someone home moved
+just before you came in). It stays silent when it shouldn't only if someone taps and
+then puts the key down, if the motion sensing misses someone walking to the door (or
+they stand still by the door for over a minute before opening it), or if the hub can't
+hear the door at all.
+
+### Wi-Fi motion sensing
+
+The hub pings your router 20 times a second and watches how the router's signal
+changes on the way back. A person moving changes it a lot; a still room barely at all.
+**Settings → Motion** shows **Moving** or **Not moving**, and scripts read it with
+`motion.moving()` and `motion.moved(from_s, to_s)`.
+
+- **What it sees**: movement anywhere along the line between the hub and the router,
+  strongest near either end. To watch the walk to the front door, place the hub so that
+  walk crosses that line.
+- **Calibration**: two buttons. **Not moving**: stay still for 30 s. **Moving**: move
+  around for 15 s. The threshold goes between the two and is kept across restarts.
+  Without calibrating, a default is used (it matched the calibrated value where the hub
+  was developed).
+- **No signal** (Wi-Fi down, a few seconds after a restart): it says so, and scripts get
+  `nil` instead of "not moving".
+- **Cost**: tiny pings (about 2 KB/s each way) the router answers without noticing,
+  and some internal RAM, paid for by fewer fixed Wi-Fi receive buffers.
+
 ### Home Assistant (optional)
 
 Off by default. Turn it on under **Settings → Home Assistant integration** (or with
@@ -440,8 +485,9 @@ as its own device, with its name, area, manufacturer and model:
 | contact, motion, leak, smoke sensor | binary sensors |
 | any device | battery, link quality, last seen (diagnostic) |
 
-The hub itself adds a **Permit join** button, so you can pair new devices from
-Home Assistant too.
+The hub itself adds a **Permit join** button (so you can pair new devices from Home
+Assistant too), the Zigbee channel, device count, Wi-Fi signal and uptime, and its own
+**motion sensor** (unavailable, not "clear", while it has no Wi-Fi signal).
 
 **Your automations add to this, they never replace it.** Every Zigbee device is always
 there. Each script gets an on/off switch, and a script can publish its own entities
@@ -496,8 +542,8 @@ still on trial, the last update's result).
 Everything you can change that isn't about scripts: the primary and backup Wi-Fi
 networks, Tailscale (auth key, on/off, log out, tailnet-only access), the Home
 Assistant integration, firmware updates, the Zigbee network backup (download, and
-restore onto a replacement board), the time zone, restarting the hub, and the
-diagnostic log download. Script secrets and GPIO pins are on the Automations page.
+restore onto a replacement board), the time zone, restarting the hub, the diagnostic
+log download, and **Motion** (moving / not moving, and its two calibration buttons). Script secrets and GPIO pins are on the Automations page.
 
 **Diagnostic log.** The hub keeps its own log on flash: warnings, errors, Wi-Fi
 events, updates and reboots (with the reason), plus a status sample every 5
@@ -549,7 +595,7 @@ USB flashing always works either way.
                │                 │ ESPHome API    │
                │                 │ (HA, optional) │
  ─────────────────────────────────────────────────────────────
- Wi-Fi station, 5 GHz only · radio coexistence · provisioning
+ Wi-Fi station, 5 GHz only · motion sensing · radio coexistence · provisioning
 ```
 
 - **Zigbee**: Espressif's Zigbee stack (`esp-zigbee-lib`) running as coordinator
@@ -578,11 +624,17 @@ USB flashing always works either way.
   Zigbee never waits for a script: if the queue is ever full, events are dropped
   and counted rather than blocking. HTTP requests run on their own task, one at a
   time.
+- **Motion sensing**: the channel state information (CSI) of the router's replies to
+  the hub's pings, scored every half second (how much each subcarrier's amplitude
+  varies). Only frames addressed to the hub, of one format, go into the score; the last
+  10 minutes are kept for `motion.moved`. It runs on its own low-priority task and
+  drops frames rather than ever getting in Zigbee's way.
 - **Home Assistant**: ESPHome native API on TCP 6053 with Noise encryption, Zigbee
   devices as ESPHome sub-devices (needs Home Assistant 2025.7 or newer). It uses
   no memory unless the integration is on and active.
-- **Commanding devices**: scripts and Home Assistant can set devices that take
-  commands (switches, lights); devices that only report (sensors) are read.
+- **Commanding devices**: none of the sensors the hub is built for takes commands, so
+  there is nothing to send yet. Scripts and Home Assistant get to set devices once one
+  that takes commands is paired.
 
 ### Flash layout (16 MB)
 
@@ -615,6 +667,11 @@ there and rebuild; `template.lua` is what a new script starts from. The one exce
 `cm.js`: a prebuilt CodeMirror bundle, committed. To change or update it, edit
 `tools/codemirror/` (pinned versions in `package.json`) and run
 `tools/codemirror/build.sh`; it needs Node and keeps npm's files in `.esp/`.
+
+Writing scripts in your own editor: [`tools/lua/hub.lua`](tools/lua/hub.lua) describes
+the hub's Lua API for the Lua language server, and `.luarc.json` points it there, so
+VS Code (with the Lua extension) and other LuaLS editors complete the hub's functions
+instead of flagging them as undefined globals.
 
 | | |
 |---|---|
@@ -653,10 +710,14 @@ when it loaded. Add `gpio.claim("name")` at the top of the script.
 the Automations page: after a power cut, cron waits until the hub has the time from
 the internet.
 
-**Home Assistant shows one hub device instead of my sensors.** A script is
-enabled, so the hub is the brain and Home Assistant sees the hub as one device.
-Disable all scripts on the Automations page to get the individual devices back. If
-nothing shows up at all, check that the integration is on under Settings.
+**Home Assistant shows nothing.** Check that the integration is on under Settings, and
+that you pasted the key it shows. Over Tailscale, add the hub by name (see Home
+Assistant above): discovery doesn't cross the tailnet.
+
+**Motion says Moving all the time, or never.** Press the two calibration buttons
+under Settings → Motion (still for 30 s, then moving for 15 s). If it still misses
+people, move the hub so the area you care about lies between the hub and the router.
+A fan or curtain on that line reads as movement.
 
 **UI not reachable over Tailscale.** The Tailscale page shows the connection
 state. The auth key must be valid and the device approved in the admin console if

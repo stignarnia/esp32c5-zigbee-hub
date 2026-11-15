@@ -213,7 +213,7 @@ static bool complete(const zdev_t *d)
     return d->done == IV_ALL && (d->zone_type || !has_server(d, EZB_ZCL_CLUSTER_ID_IAS_ZONE, NULL));
 }
 
-// ---- state changes for consumers (zb_set_event_cb) --------------------------------------
+// ---- state changes for consumers (zb_add_event_cb) --------------------------------------
 // Each handler that can change live state takes a snapshot first and emits the
 // differences after. The callback only copies (see zb.h): nothing here can block.
 
@@ -228,11 +228,14 @@ typedef struct {
     uint8_t occ;          bool has_occ;
 } live_t;
 
-static zb_event_cb_t s_event_cb;
+static zb_event_cb_t s_event_cbs[ZB_MAX_EVENT_CBS];
+static int s_n_event_cbs;
 
-void zb_set_event_cb(zb_event_cb_t cb)
+esp_err_t zb_add_event_cb(zb_event_cb_t cb)
 {
-    s_event_cb = cb;
+    if (s_n_event_cbs >= ZB_MAX_EVENT_CBS) return ESP_ERR_NO_MEM;
+    s_event_cbs[s_n_event_cbs++] = cb;
+    return ESP_OK;
 }
 
 static void live_of(const zdev_t *d, live_t *l)
@@ -265,7 +268,7 @@ static void emit(const zdev_t *d, const char *attr, const char *alias, bool is_b
     zb_event_t e = {.attr = attr, .alias = alias, .is_bool = is_bool, .value = v};
     snprintf(e.ieee, sizeof(e.ieee), "%016llx", (unsigned long long)d->ieee);
     strlcpy(e.device, d->name[0] ? d->name : d->model[0] ? d->model : e.ieee, sizeof(e.device));
-    s_event_cb(&e);
+    for (int i = 0; i < s_n_event_cbs; i++) s_event_cbs[i](&e);
 }
 
 // What changed decides how soon the registry file is written: zone status, on/off and
@@ -286,7 +289,7 @@ static void persist_diff(const zdev_t *d, const live_t *b)
 static void emit_diff(const zdev_t *d, const live_t *b)
 {
     persist_diff(d, b);
-    if (!s_event_cb) return;
+    if (!s_n_event_cbs) return;
     if (d->offline != b->offline) emit(d, "available", NULL, true, !d->offline);
     if (d->has_zone_status && (!b->has_zone_status || d->zone_status != b->zone_status)) {
         uint16_t now = d->zone_status, was = b->has_zone_status ? b->zone_status : (uint16_t)~now;
@@ -1096,6 +1099,42 @@ cJSON *zb_devices_json(void)
     }
     UNLOCK();
     return arr;
+}
+
+int zb_snapshot(zb_dev_info_t *out, int max)
+{
+    int n = 0;
+    LOCK();
+    for (int i = 0; i < ZB_MAX_DEVICES && n < max; i++) {
+        const zdev_t *d = &s_dev[i];
+        if (!d->used) continue;
+        zb_dev_info_t *o = &out[n++];
+        memset(o, 0, sizeof(*o));
+        ieee_hex(d->ieee, o->ieee);
+        strlcpy(o->name, d->name, sizeof(o->name));
+        strlcpy(o->manuf, d->manuf, sizeof(o->manuf));
+        strlcpy(o->model, d->model, sizeof(o->model));
+        o->ias = has_server(d, EZB_ZCL_CLUSTER_ID_IAS_ZONE, NULL);
+        o->power_cfg = has_server(d, EZB_ZCL_CLUSTER_ID_POWER_CONFIG, NULL);
+        o->temp_meas = has_server(d, EZB_ZCL_CLUSTER_ID_TEMPERATURE_MEASUREMENT, NULL);
+        o->hum_meas = has_server(d, EZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, NULL);
+        o->occ_sensing = has_server(d, EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING, NULL);
+        o->on_off = has_server(d, EZB_ZCL_CLUSTER_ID_ON_OFF, NULL);
+        o->zone_type = d->zone_type;
+        o->available = !d->offline;
+        o->sleepy = !(d->cap & 0x08);
+        o->rssi = d->rssi;
+        o->last_seen_us = d->last_seen_us;
+        o->has_zone = d->has_zone_status; o->zone_status = d->zone_status;
+        o->has_batt = d->has_batt;        o->batt = d->batt / 2.0f;
+        o->has_batt_v = d->has_batt_v;    o->batt_v = d->batt_v / 10.0f;
+        o->has_temp = d->has_temp;        o->temp = d->temp / 100.0f;
+        o->has_hum = d->has_hum;          o->hum = d->hum / 100.0f;
+        o->has_on = d->has_on;            o->on = d->on;
+        o->has_occ = d->has_occ;          o->occ = d->occ & 1;
+    }
+    UNLOCK();
+    return n;
 }
 
 esp_err_t zb_rename(const char *ieee_hex, const char *name)

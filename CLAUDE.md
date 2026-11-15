@@ -204,11 +204,15 @@ components/
                  access mode
   web/ui/        index.html, app.js, style.css, favicon.svg (no build step, gzipped by
                  CMake), and cm.js (CodeMirror editor, prebuilt by tools/codemirror, committed)
-  automation/    Lua engine (auto_engine.c), store, GPIO, HTTP
+  automation/    Lua engine (auto_engine.c), store, GPIO, HTTP, ha.* entities (auto_ha.c)
   lua/           Lua 5.5.1 source (MIT), vendored unmodified
   tailscale/     microlink (MIT) ported to IDF v6, wrapped
+  hubcrypto/     X25519 (STROBE, MIT) + ChaCha20-Poly1305 via PSA, shared by tailscale and
+                 esphome_api
   motion/        Wi-Fi motion sensing (CSI): moving / not moving, two-button calibration
-  esphome_api/   (Phase 6, not yet) ESPHome native API server (Noise), HA integration
+  esphome_api/   ESPHome native API server (Noise), HA integration: ha_server.c (task,
+                 sockets, messages, settings), ha_model.c (entities + states), ha_noise.c,
+                 ha_pb.c (protobuf subset)
 examples/        example Lua scripts offered in the editor (*.lua; put into app.js at
                  build time by components/web/gen_app_js.py; template.lua = new-script text)
 tools/
@@ -322,7 +326,7 @@ Notes from the first boot:
     window are lost. Hence the gating
 - [x] Log channel + RSSI + band on connect; `HUB_READY ip=… net=… ch=… rssi=… boot_ms=…`
       line for tools
-- [x] mDNS `zigbee-hub.local` (espressif/mdns 1.15.0) — resolves from the dev machine
+- [x] mDNS `zigbee-hub.local` (espressif/mdns 1.15.0; 1.15.1 since 2026-11-15) — resolves from the dev machine
 - [x] Verified on the home network **as-is, DFS**: see measurements. 22 min serial soak: 0 disconnects.
       **`hublog` soak 2026-11-04 21:18 → 2026-11-06 15:43 UTC (42.4 h, 508 samples, no gaps):
       0 disconnects, 0 NO_AP_FOUND, 0 failovers, 0 driver restarts, 0 watchdog reboots,
@@ -768,7 +772,8 @@ For long tests without a serial cable: log on the board, download later.
   counters with the last disconnect reason in words, memory, system, firmware),
   Settings (everything that changes something: Wi-Fi networks, firmware update,
   log download, restart). Automations became the fourth tab in Phase 5; Settings also
-  holds Tailscale (Phase 4) and Motion (2026-11-08)
+  holds Tailscale (Phase 4) and Motion (2026-11-08; moved to Devices as the hub's motion
+  sensor card 2026-11-15, user: "at the end of the day it's a device")
 - [x] Zigbee lock around every stack call from other tasks — audited 2026-11-06, none
       missing. All `ezb_*` calls in `zb_dev.c` (interview, enroll, bind/report,
       availability pings) are reached only from the Zigbee task (signal/ZCL/ZDO callbacks,
@@ -1374,7 +1379,7 @@ stops it and changes nothing else.
   closed the next opening is judged fresh: closing the door is the reset
 
 #### Wi-Fi motion sensing (`components/motion`; built and installed 2026-11-08)
-Settings → Motion shows **Moving** / **Not moving**; two buttons are the only calibration:
+The motion sensor card (Settings until 2026-11-15, now first on Devices) shows **Moving** / **Not moving**; two buttons are the only calibration:
 "Not moving" (stay still 30 s → still level = p99) and "Moving" (move 15 s → moving level =
 p25); threshold = geometric mean of the two (still only: 2.5 × still; neither: 800), kept in
 NVS. "Moving" = a 500 ms score above the threshold within the last 2 s. Not used by the
@@ -1405,7 +1410,7 @@ removed at the user's request once the live test below was convincing.
 - [x] both calibration buttons used by the user: learned threshold **798** (geometric mean of
   the two levels; the individual levels aren't exposed), next to the hand-picked 800
 
-### Phase 6 — Home Assistant integration (ESPHome native API)
+### Phase 6 — Home Assistant integration (ESPHome native API) (built 2026-11-15; verified with aioesphomeapi and with the user's Home Assistant 2026.11.1)
 **One entity set, additive (user decision 2026-11-08; replaces the two modes of
 2026-11-07).** With the integration on, Home Assistant always sees every Zigbee device as
 its own sub-device of the hub, plus the hub's own entities, plus whatever enabled scripts
@@ -1417,54 +1422,198 @@ nothing commands devices, so HA and scripts can't conflict; once devices can be 
 (`zb.set`, commands from HA), both may command the same device, and the last command wins —
 the same as two people at two switches.
 
-- [ ] **Setting** "Home Assistant integration", **off by default**, in the UI
-      (Settings) and as `flash.sh --ha` at provisioning. Off → the API server
-      never starts, port 6053 closed, nothing advertised
-- [ ] **Script entities (user decision 2026-11-07)**, in addition to the devices: one
+Verified two ways: **aioesphomeapi 46.30.0** (the library Home Assistant's ESPHome integration
+uses; latest release, `uv run --with aioesphomeapi==46.30.0`) from the dev machine over the
+tailnet (the hub is in tailnet-only mode), and the **user's Home Assistant 2026.11.1** (which
+pins aioesphomeapi 46.25.0). Upstream read for the protocol: ESPHome 2026.10.2 `api.proto`, its
+Noise helper and noise component; HA core `esphome/` (entity identity, timestamp handling,
+connect sequence).
+
+**Still open in Phase 6** (details in the items below):
+- [ ] `flash.sh --prov-only --ha` run once (built; the board wasn't on USB)
+- [ ] the Settings → Home Assistant card and the motion sensor card on Devices looked at in a
+      browser
+- [ ] optional: ESPHome's outgoing connection (HA listens on 6054; the hub would knock when it
+      is back after a restart: reconnect ~3 s instead of 25 s). Not built
+- auto discovery cannot be tested yet (see mDNS below)
+
+- [x] **Real Home Assistant** (2026-11-15): the user's HAOS VM (2026.11.1, on another LAN) joined
+      the tailnet with the Tailscale **app** (community `a0d7b954_tailscale`, defaults: kernel
+      networking, no routes); `ha dns options --servers dns://100.100.100.100` (the app's
+      documented step) so `*.ts.net` resolves in HA core. ESPHome integration added through HA's
+      config flow (host `zigbee-hub.<tailnet>.ts.net`, port 6053, key) → 5 devices (hub, motion
+      sensor, Door, Keys, Script keys-alarm), 24 entities; then, per the user's HA rules: all in
+      area Soggiorno, entity names in Italian (Apertura, Batteria, Ultimo contatto, Attivo, …),
+      entity ids regenerated to match, the user's own names (Door, Keys, keys-alarm) kept
+  - HA's ESPHome integration hard-depends on `bluetooth` (manifest `dependencies`); the user had
+    removed it. Accepted by the user for this case: the VM has no Bluetooth adapter
+  - HA copies the hub's manufacturer/model ("Espressif / ESP32-C5 Zigbee hub") onto every
+    sub-device; the protocol has no per-sub-device fields. Firmware shown: our build version
+    "(ESPHome 2026.10.2)"
+  - **bug found by HA, fixed**: `project_name` "esp32c5-zigbee-hub" made HA's connect routine
+    raise `IndexError` (`async_get_manufacturer_model` splits it at "."; ESPHome's format is
+    `author.project`), silently: no log line, no devices, the connection stayed up answering
+    pings. Found by reading the exception stored on aioesphomeapi's connect task inside the
+    running HA (Python 3.14 `sys.remote_exec`, read-only). Now "Espressif.ESP32-C5 Zigbee hub"
+  - measured through HA (state-change listener inside HA): script saved → HA reloads 3.5 s later,
+    reconnects in 0.4 s with the new sub-device and entities; first use of a new event type → a
+    second reload (by design); script switch off from HA → `off` 1.4 s later, values unknown; on
+    → back; permit-join button from HA → Abbinamento on 0.1 s later; script deleted → HA removes
+    the device and its entities by itself (nothing orphaned in the registries)
+  - **planned reboots now say goodbye**: before, a restart dropped the TCP connection silently
+    and HA showed stale states for 38.8 s (until its keepalive timed out). Now
+    `hubsys_reboot_pending()` makes the server send DisconnectRequest (as ESPHome does on
+    shutdown), close its clients and stop accepting: HA marks everything unavailable 0.1 s
+    after the request. Reconnect took 25 s (hub listening again after 2.5 s): HA's retry
+    backoff, with no zeroconf to hear the hub come back. ESPHome's outgoing-connection feature
+    (HA listens on 6054, the device knocks when back) would cut that to ~3 s: not built
+- [x] **Setting** "Home Assistant integration", **off by default**, in the UI
+      (Settings → Home Assistant) and as `flash.sh --prov-only --ha` at provisioning (one-shot
+      like `--lan-access`: a fresh `ha_nonce` + `ha_key` in `prov`; a nonce not seen before
+      turns it on with that key once, then the UI's choice holds). Off → the API server
+      never starts, port 6053 closed, nothing advertised. Verified 2026-11-15: off → port
+      closed (`nc`), on → listening, off again frees 6.3 KB internal + 279 KB PSRAM
+  - [ ] `flash.sh --prov-only --ha`: built, **not run** (the board's USB wasn't connected on
+    2026-11-15). `.esp/secrets/ha_key` already holds the hub's current key, so running it
+    re-applies the same key and HA keeps working; check the log for "turned on by flash.sh --ha"
+- [x] **Script entities (user decision 2026-11-07)**, in addition to the devices: one
       switch per script (enable/disable); entities a script publishes through a small Lua
       API (e.g. `ha.sensor(name, value)`, `ha.binary(name, on)`, `ha.event(name)`), so a
       script can expose "alarm armed", "doors open: 2", "alarm triggered". A disabled
       script's entities stay, unavailable (history kept); deleting the script removes them
-- [ ] Entity set changes (a device paired or removed, a script publishing a new entity, a
+  - built: each script is its **own sub-device** "Script <name>" (Claude's choice: short
+    entity names, the switch next to what it publishes) with switch "Enabled" (config
+    category); `ha.sensor(name, value, {unit, device_class, decimals, state_class, icon})`,
+    `ha.binary(name, on, {device_class, icon})`, `ha.event(name, type)` (default "fired", up
+    to 4 types), `ha.remove(name)`; 8 per script, 32 in all. Definitions persisted in
+    `/storage/auto/ha.json` (written by `auto_io`, never by the PSRAM-stack engine task);
+    values in RAM, unknown after a restart until published, and when the script stops
+  - "unavailable" isn't possible per entity: the ESPHome API only has `missing_state`, which
+    HA shows as **unknown** (HA `esphome/sensor.py`: `missing_state` → `None`). Stopped
+    scripts and offline devices show unknown
+  - an event type (or event entity) used for the first time changes the entity set, so that
+    first event doesn't reach HA (it isn't listed yet); documented in `tools/lua/hub.lua`
+  - verified with a throwaway script (counter every 2 s, flag, event with two types): sensor,
+    binary sensor and event listed with the right types; 7 events in 16 s; switch off → state
+    false 0.29 s later and the values unknown; on → back; script deleted → client dropped
+    3.3 s later, reconnect lists 24 entities without it
+- [x] Entity set changes (a device paired or removed, a script publishing a new entity, a
       script deleted): the API server keeps running; the hub closes its API clients (each
       client task closes its own socket — lesson 8) and HA reconnects and lists the new
       set by itself. Entity keys come from IEEE address + attribute (devices), script name
       + entity name (scripts) and fixed names (hub), so HA entity IDs and history survive
       every change
-- [ ] ESPHome native API on TCP 6053, **Noise encryption mandatory** (no plaintext).
+  - HA's entity identity is `<mac>/<device_id>/<type>/<name>` (aioesphomeapi
+    `build_unique_id` v3), not the key. So: sub-device id = FNV-1a of `zb:<ieee>` /
+    `script:<name>`, entity names fixed ("Contact", "Battery", …) — renaming a device in our
+    UI renames only the HA device. Keys: FNV-1a of type + device id + name, collisions
+    resolved in a fixed order
+  - one task owns every socket (lesson 8 by construction). The set is compared by a hash of
+    everything ListEntities/DeviceInfo carry; it must be unchanged for 3 s before clients are
+    dropped (an interview adds clusters one by one: one reload, not five)
+  - an IAS sensor's main entity is listed only once its zone type is known, so a contact
+    sensor never appears first as "Alarm" and then changes identity
+- [x] ESPHome native API on TCP 6053, **Noise encryption mandatory** (no plaintext).
       Key generated by the board the first time the setting is turned on (or by
       `flash.sh --ha`, stored in `.esp/secrets/` and written to `prov`); shown
       in the UI for pasting into HA, regenerable
-- [ ] mDNS `_esphomelib._tcp` so HA discovers the hub automatically on the LAN.
+  - `Noise_NNpsk0_25519_ChaChaPoly_SHA256` written from the spec (`ha_noise.c`, ~150 lines):
+    X25519 and ChaCha20-Poly1305 from `components/hubcrypto` — microlink's refc X25519 and
+    its PSA AEAD wrappers moved there from `tailscale/`, so both Noise implementations share
+    them (user: "there is already chacha in this codebase") — SHA-256/HMAC from PSA
+  - API version reported 1.19 (ESPHome 2026.10.2); DeviceCapabilitiesRequest (149, sent by
+    clients ≥ 1.15) answered with an empty response; AuthenticationRequest ignored (clients
+    don't wait for it); unknown messages ignored; subscriptions to logs / HA states /
+    services accepted and not served
+  - verified: connect + handshake 0.49 s over the tailnet; wrong key →
+    `InvalidEncryptionKeyAPIError` ("Handshake MAC failure"); plaintext client →
+    `RequiresEncryptionAPIError` ("Bad indicator byte"). 200 s connected with keepalive 15 s:
+    still connected after 200 s with aioesphomeapi keepalive 15 s, 27 state messages in
+    total (initial set + uptime/signal once a minute)
+- [x] mDNS `_esphomelib._tcp` so HA discovers the hub automatically on the LAN.
       Over the tailnet (HA elsewhere) mDNS doesn't cross: add it in HA by
       MagicDNS name, `zigbee-hub.<tailnet>.ts.net:6053`. In tailnet-only access mode
       the API accepts only tailnet connections (same check as the web server) and
       nothing is advertised
-- [ ] **Sub-devices** (HA/ESPHome 2025.7+): hub = main device, each
+  - built: service added when the server starts and on every mDNS (re)start
+    (`ha_mdns_announce`), TXT as ESPHome (`mac`, `version`, `api_encryption`, …).
+    **Auto discovery cannot be tested yet**: there is no Home Assistant on the LAN, and the
+    hub is in tailnet-only mode (mDNS off)
+  - [x] tailnet-only: `web_fd_allowed()` (= `access_lan_open() || access_fd_via_tailnet()`)
+    right after accept(). Verified: from the LAN IP → reset, logged "refused: tailnet-only
+    access"; over the tailnet → connects
+- [x] **Sub-devices** (HA/ESPHome 2025.7+): hub = main device, each
       Zigbee device = sub-device with its own name/area/manufacturer/model from the
       interview. `device_id` field numbers per entity type are in the reference
       repo's CLAUDE.md ("Protobuf device_id Field Numbers") — verify against the
       current `api.proto` before relying on them
-- [ ] Capability → entity mapping (same capabilities as the UI uses):
+  - the protocol's `DeviceInfo` has only id, name and area: **no manufacturer or model per
+    sub-device**. Name only; no areas (rooms: not doing). Field numbers taken from
+    `api.proto` 2026.10.2 (they match the reference's table); state messages carry
+    `device_id` too (HA keys states by device id + key)
+  - verified: Door, Keys, "Script keys-alarm" listed as sub-devices, entities attached
+- [x] Capability → entity mapping (same capabilities as the UI uses):
       sensors → sensor with device_class, IAS zone → binary_sensor,
       battery/LQI/last seen → diagnostic entities. Read-only for now: no paired device
       takes commands. Commandable devices get switch/light/... entities when they come
-- [ ] Hub entities: permit-join button (pairing works from HA too),
+  - from the server clusters (`zb_snapshot`): IAS → "Contact" (`opening`) / "Motion" /
+    "Smoke" / "Water leak" / "Carbon monoxide" / "Vibration" + "Tamper", "Battery low";
+    Power Config → "Battery" %, "Battery voltage" (disabled by default); Temperature,
+    Humidity, Occupancy, On/Off ("Power", binary); every device: "Online" (connectivity),
+    "Signal" dBm (RSSI: the registry has no LQI; disabled by default), "Last seen" (text
+    sensor, class `timestamp`, ISO UTC; made once per frame so it doesn't wobble)
+  - offline device → its values unknown (Online / Last seen still reported)
+  - verified: both contact sensors with 8 entities each, states right (Door closed, Keys
+    open, battery 100 % / 3.0 V), with aioesphomeapi and in HA
+  - [x] a live door change reaching HA (2026-11-15, the user tapping the key on Keys, a
+    state-change listener inside HA): 8 open/close changes in strict alternation, taps
+    0.2–0.5 s apart all delivered, in the same second as the hub's log; `keys-alarm` reacted
+    to the same taps at the same time. "Last seen" filled on the first frame, then each new
+    second (it stays unknown until a device sends a frame after the hub's boot)
+- [x] Hub entities: permit-join button (pairing works from HA too),
       Zigbee channel, device count, Wi-Fi RSSI, uptime
-- [ ] **The hub is a motion sensor itself** (user, 2026-11-08): Wi-Fi motion sensing
+  - plus "Pairing" (binary, network open). Wi-Fi signal and uptime refreshed once a minute
+    (no ±1 dBm history spam). Verified: button → pairing open (120 s) 0.09 s later, closed
+    again from the UI API
+- [x] **The hub is a motion sensor itself** (user, 2026-11-08): Wi-Fi motion sensing
       (`components/motion`, Phase 5b) exposed as a `binary_sensor` with
       device_class `motion` on the hub's own device (Moving = on), with "no signal" (Wi-Fi
       down, no frames) reported as unavailable, not as "not moving"
-- [ ] Wire-format safety: every length off the socket bounded before use
+  - "no signal" = `missing_state` → HA shows unknown (see script entities)
+  - since 2026-11-15 a sub-device of its own, "Motion sensor" (user: it's a device), with
+    one unnamed entity so HA shows the device name; was "Motion" on the hub device. In the
+    user's HA: "Sensore di movimento", `binary_sensor.sensore_di_movimento`, reporting off
+  - [x] moving ↔ not moving seen in HA (2026-11-15, the user walking and stopping): off → on →
+    off → on → off → on within a minute, as they moved
+- [x] Wire-format safety: every length off the socket bounded before use
       (reference had a pre-auth overflow on the hello frame — lesson 9)
-- [ ] Entity table in PSRAM (reference: 54 KB, moving it freed half the internal heap)
-- [ ] The web UI is unchanged by the integration (devices, enrollment, network, status)
-- [ ] When the setting is off, the ESPHome API code costs no runtime RAM (server
-      task and entity table only allocated when it's on)
-- [ ] Verified: HA discovers the hub, adopts with the key, shows each paired device as
+  - frame length checked before buffering (handshake ≤ 128, data ≤ 4096), inner message
+    length ≤ decrypted size, protobuf reader bounds every varint/length. Verified pre-auth:
+    `01 FF FF` + 300 bytes → "Bad handshake packet len", closed; 200 random bytes → "Bad
+    indicator byte", closed; empty hello + 128-byte handshake → server hello, "Handshake MAC
+    failure", closed. Hub stayed up
+- [x] Entity table in PSRAM (reference: 54 KB, moving it freed half the internal heap)
+  - everything of the server (two entity models of 384, states, 3 clients' buffers, inputs)
+    is one PSRAM block: 279 KB. Internal: the task's stack only (5 KB; it must be internal
+    because a switch command saves the script list to flash; high-water 2.5 KB with that
+    path and a handshake included)
+- [x] The web UI is unchanged by the integration (devices, enrollment, network, status);
+      it gains the Settings → Home Assistant card (on/off, key + copy, new key, how to add
+      it, connection state). Its API is verified (on/off/new key from curl)
+  - [ ] the card itself, and the motion sensor card moved to Devices, not looked at in a
+    browser yet
+- [x] When the setting is off, the ESPHome API code costs no runtime RAM (server
+      task and entity table only allocated when it's on). Measured: off 70.5 KB internal
+      free / on 64.2 KB (6 KB stack + sockets); PSRAM +279 KB on. A tiny event queue
+      (8 entries, PSRAM) stays after the first time it's on
+- [x] Verified: HA discovers the hub, adopts with the key, shows each paired device as
       a sub-device and the hub's own entities; enabling a script that publishes entities
       adds them and leaves every device and its history in place; disabling it leaves
       its entities unavailable
+  - in the user's HA 2026.11.1 (2026-11-15, see "Real Home Assistant" above): adopted with the
+    key, devices and entities right, a script's new entities added while every device stayed,
+    switched off → its entities unknown (the protocol has no per-entity unavailable). **Auto
+    discovery cannot be tested yet** (see mDNS above)
 
 ### Phase 7 — Hardening
 - [ ] Soak test 24 h+ (reference repo's worst bugs needed 9 h of uptime)
@@ -1490,6 +1639,11 @@ With the Lua engine (Phase 5, 2026-11-07, no scripts): **74 KB free, lowest 37�
 the engine's 160 KB stack is in PSRAM, so it cost ~4 KB internal, not the 8–16 KB expected.
 With Wi-Fi CSI compiled in (2026-11-08) the lowest fell to 14.7 KB; lever 2 pulled (static RX
 buffers 16 → 8): **69 KB free, lowest 32.9 KB** with motion sensing on.
+With the Home Assistant API on and a client connected (2026-11-15): **62–64 KB free, lowest
+26.1 KB** when it starts at boot (28.7 KB when switched on later); off it gives the ~6 KB
+back. Its 5 KB stack is internal only because a switch command saves the script list to
+flash: handing that write to another task (e.g. `auto_io`) would let the stack move to PSRAM
+if RAM gets short.
 
 Levers, roughly cheapest first — pull only what's needed:
 1. Wi-Fi code out of IRAM (`CONFIG_ESP_WIFI_IRAM_OPT`, `_RX_IRAM_OPT`,

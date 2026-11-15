@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "auto_engine.c" "auto_store.c" "auto_gpio.c" "auto_http.c"
+    SRCS "auto_engine.c" "auto_store.c" "auto_gpio.c" "auto_http.c" "auto_ha.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     REQUIRES esp_common espressif__cjson

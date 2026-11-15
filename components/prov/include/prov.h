@@ -14,6 +14,8 @@ typedef struct {
     char country[3];       // ISO 3166 alpha-2 from the flashing machine, "" = keep default
     char admin_hash[128];  // "pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>", checked by the web login
     char lan_reset[33];    // nonce from flash.sh --lan-access: turns tailnet-only access off once
+    char ha_nonce[33];     // nonce from flash.sh --ha: turns the Home Assistant API on once, with ha_key
+    char ha_key[45];       // base64 Noise key for the Home Assistant API (never log this)
     bool has_wifi;         // ssid present
 } prov_t;
 

@@ -5,6 +5,8 @@ Secrets come from environment variables (never argv, which `ps` shows):
   PROV_SSID2, PROV_PSK2          backup Wi-Fi (optional)
   PROV_HOSTNAME, PROV_COUNTRY    optional
   PROV_LANRESET                  optional nonce: turns tailnet-only access off once
+  PROV_HA_NONCE, PROV_HA_KEY     optional: turn the Home Assistant API on once, with this
+                                 base64 Noise key
   PROV_ADMIN_PW                  admin password (stored only as a PBKDF2 hash)
 
 Usage: python -I mkprov.py <idf_path> <out.bin> <size>
@@ -30,6 +32,8 @@ FIELDS = [
     ("hostname", "PROV_HOSTNAME", 32),
     ("country", "PROV_COUNTRY", 2),
     ("lanreset", "PROV_LANRESET", 32),
+    ("ha_nonce", "PROV_HA_NONCE", 32),
+    ("ha_key", "PROV_HA_KEY", 44),
 ]
 
 

@@ -15,3 +15,6 @@ esp_err_t web_start(const web_config_t *cfg);
 bool web_is_running(void);
 // False while tailnet-only access keeps LAN clients out (see web/access.c).
 bool web_lan_open(void);
+// The access rule for other servers (the Home Assistant API): with tailnet-only access
+// on, only connections over Tailscale; otherwise any. `fd` = an accepted socket.
+bool web_fd_allowed(int fd);

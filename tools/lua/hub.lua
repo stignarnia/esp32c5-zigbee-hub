@@ -85,7 +85,7 @@ function net.online() end
 function net.on(event, fn) end
 
 motion = {}
----Wi-Fi motion sensing (Settings -> Motion): moving now; nil when not sensing.
+---Wi-Fi motion sensing (the motion sensor on Devices): moving now; nil when not sensing.
 ---@return boolean|nil
 function motion.moving() end
 ---Any movement between from_s and to_s seconds ago (0 <= to_s < from_s <= 600); nil when the
@@ -94,6 +94,42 @@ function motion.moving() end
 ---@param to_s? number default 0
 ---@return boolean|nil
 function motion.moved(from_s, to_s) end
+
+---Home Assistant (Settings -> Home Assistant, ESPHome integration). Each script is a device
+---there with an "Enabled" switch; these add entities to it. The first call with a name defines
+---the entity (options given later change it); it stays in Home Assistant, with its history,
+---until the script is deleted or calls ha.remove. Values are unknown until the script
+---publishes them after starting, and again while it is stopped. Limits: 8 per script, 32 in
+---all. Works the same with the integration off (nothing is sent then).
+ha = {}
+---@class HaSensorOpts
+---@field unit? string e.g. "°C", "%"
+---@field device_class? string Home Assistant sensor device class, e.g. "temperature"
+---@field decimals? integer 0..6 digits shown
+---@field state_class? "measurement"|"total_increasing"|"total"|""
+---@field icon? string e.g. "mdi:door"
+---@param name string 1..32 characters
+---@param value number|nil nil = unknown
+---@param opts? HaSensorOpts
+function ha.sensor(name, value, opts) end
+---@class HaBinaryOpts
+---@field device_class? string e.g. "door", "problem", "safety"
+---@field icon? string
+---@param name string 1..32 characters
+---@param on boolean|nil nil = unknown
+---@param opts? HaBinaryOpts
+function ha.binary(name, on, opts) end
+---Fires an event entity. Home Assistant must know every type in advance: a type (or an event
+---entity) used for the first time makes it reload the hub's entities, and that first event
+---doesn't reach it. Up to 4 types per event.
+---@param name string 1..32 characters
+---@param type? string a-z 0-9 _, default "fired"
+---@param opts? HaBinaryOpts
+function ha.event(name, type, opts) end
+---Removes one of this script's entities from Home Assistant (with its history).
+---@param name string
+---@return boolean removed false if there was none
+function ha.remove(name) end
 
 json = {}
 ---@param v any

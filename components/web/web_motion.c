@@ -1,4 +1,4 @@
-// REST API for Wi-Fi motion sensing (Settings → Motion). Both handlers need a session.
+// REST API for Wi-Fi motion sensing (the motion sensor card on Devices). Both handlers need a session.
 #include "cJSON.h"
 #include "motion.h"
 #include "web_internal.h"

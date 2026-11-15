@@ -21,6 +21,7 @@
 #define AUTO_STATE_DIR  AUTO_DIR "/state"
 #define AUTO_META       AUTO_DIR "/scripts.json"
 #define AUTO_GPIO_CFG   AUTO_DIR "/gpio.json"
+#define AUTO_HA_DEFS    AUTO_DIR "/ha.json"
 #define AUTO_SCRIPT_DIR "/storage/scripts"
 
 #define AUTO_MEM_CAP    (256 * 1024)   // Lua heap per script (PSRAM)
@@ -98,6 +99,8 @@ void auto_mask_secrets(char *msg, size_t cap);
 
 // ---- store (auto_store.c) ------------------------------------------------------------------
 void store_init_dirs(void);
+esp_err_t store_write_file(const char *path, const char *data, size_t len);  // atomic (tmp + rename)
+char *store_read_file(const char *path, size_t max, size_t *len);           // PSRAM, NUL-terminated
 bool store_valid_name(const char *name);
 esp_err_t store_load_meta(void);                 // fills g_scripts (names, enabled)
 esp_err_t store_write_meta(void);
@@ -136,3 +139,10 @@ cJSON *agpio_led_json(void);                     // RGB LED: owner, rgb shown, p
 // ---- HTTP (auto_http.c) --------------------------------------------------------------------
 void ahttp_start(void);
 void ahttp_open_lib(lua_State *L);
+
+// ---- Home Assistant entities published by scripts (auto_ha.c) ---------------------------------
+void aha_init(void);                             // main task: load the definitions
+void aha_open_lib(lua_State *L);
+void aha_script_stopped(const char *script);     // its values become unknown
+void aha_script_deleted(const char *script);     // its entities are removed
+void aha_flush(void);                            // auto_io task: write the definitions if changed

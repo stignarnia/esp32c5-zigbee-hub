@@ -11,6 +11,9 @@
 // Reboots after `delay_ms` (lets an HTTP response flush), disconnecting Wi-Fi
 // cleanly first. `reason` is logged and shown as the last reboot reason.
 void hubsys_reboot(const char *reason, uint32_t delay_ms);
+// A planned reboot is under way (>= 500 ms away): servers say goodbye to their clients and
+// stop accepting new ones, so those notice at once instead of after their keepalive timeout.
+bool hubsys_reboot_pending(void);
 
 // Reason the previous boot ended, if it was a planned reboot ("" otherwise).
 const char *hubsys_last_planned_reason(void);

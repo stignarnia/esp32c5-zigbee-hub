@@ -1151,6 +1151,7 @@ static void open_libs(lua_State *L)
     lua_setglobal(L, "motion");
     agpio_open_lib(L);
     ahttp_open_lib(L);
+    aha_open_lib(L);
 }
 
 // ---- script lifecycle (automation task) ----------------------------------------------------------
@@ -1160,6 +1161,7 @@ static void stop_script(script_t *s, uint8_t status, const char *err)
     int idx = auto_script_index(s);
     agpio_release(idx);
     timers_drop(idx);
+    aha_script_stopped(s->name);
     if (s->L) lua_close(s->L);
     xSemaphoreTake(g_mtx, portMAX_DELAY);
     s->L = NULL;
@@ -1587,11 +1589,18 @@ char *automation_source(const char *name)
     return store_read_script(name, &len);
 }
 
-int automation_enabled_count(void)
+int automation_list(auto_brief_t *out, int max)
 {
     int n = 0;
     xSemaphoreTake(g_mtx, portMAX_DELAY);
-    for (int i = 0; i < AUTO_MAX_SCRIPTS; i++) n += g_scripts[i].used && g_scripts[i].enabled;
+    for (int i = 0; i < AUTO_MAX_SCRIPTS && n < max; i++) {
+        const script_t *s = &g_scripts[i];
+        if (!s->used) continue;
+        strlcpy(out[n].name, s->name, sizeof(out[n].name));
+        out[n].enabled = s->enabled;
+        out[n].running = s->status == ST_RUNNING;
+        n++;
+    }
     xSemaphoreGive(g_mtx);
     return n;
 }
@@ -1687,6 +1696,7 @@ esp_err_t automation_delete(const char *name)
     if (r != ESP_OK) return r;
     store_delete_script(name);
     store_state_forget(idx, true);
+    aha_script_deleted(name);
     xSemaphoreTake(g_mtx, portMAX_DELAY);
     g_scripts[idx].used = false;
     xSemaphoreGive(g_mtx);
@@ -1885,13 +1895,14 @@ esp_err_t automation_start(void)
     setenv("TZ", store_tz(), 1);
     tzset();
     store_load_meta();
+    aha_init();
     esp_reset_reason_t rr = esp_reset_reason();
     boot_count(rr);
     blame_buzzer(rr);
     blame_previous_crash();
     for (int i = 0; i < AUTO_MAX_SCRIPTS; i++) if (g_scripts[i].used) store_state_load(i);
     agpio_init();
-    zb_set_event_cb(on_zb_event);
+    zb_add_event_cb(on_zb_event);
 
     if (xTaskCreateWithCaps(auto_task, "auto", TASK_STACK, NULL, 3, &s_task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "engine task not created");

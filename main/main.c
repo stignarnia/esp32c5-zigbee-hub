@@ -1,5 +1,5 @@
 // esp32c5-zigbee-hub — boot sequence: hardware/build report, provisioning, Zigbee
-// (before Wi-Fi), automations, 5 GHz Wi-Fi + mDNS, web UI, Tailscale.
+// (before Wi-Fi), automations, 5 GHz Wi-Fi + mDNS, web UI, Home Assistant API, Tailscale.
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -8,6 +8,7 @@
 #include "automation.h"
 #include "esp_app_desc.h"
 #include "esp_netif.h"
+#include "esphome_api.h"
 #include "mdns.h"
 #include "motion.h"
 #include "nvs_flash.h"
@@ -147,6 +148,7 @@ static void start_mdns(const char *hostname)
     mdns_hostname_set(hostname);
     mdns_instance_name_set("Zigbee Hub");
     mdns_service_add("Zigbee Hub", "_http", "_tcp", 80, NULL, 0);
+    ha_mdns_announce();  // _esphomelib._tcp, if the Home Assistant API is on
     ESP_LOGI(TAG, "mdns: %s.local", hostname);
 }
 
@@ -272,6 +274,12 @@ void app_main(void)
         // In tailnet-only mode nothing is announced on the LAN.
         if (web_lan_open()) start_mdns(s_mdns_host);
         else ESP_LOGI(TAG, "mdns: off (tailnet-only access)");
+
+        // Home Assistant API (off unless turned on in the UI or by flash.sh --ha). Same
+        // access rule as the web UI: tailnet only when tailnet-only access is on.
+        ha_set_conn_filter(web_fd_allowed);
+        if (ha_init(prov.hostname, prov.ha_nonce, prov.ha_key) != ESP_OK) ESP_LOGE(TAG, "Home Assistant API failed to start");
+        memset(prov.ha_key, 0, sizeof(prov.ha_key));
 
         // Tailscale last: it waits for an IP on its own task and nothing depends on it.
         // Its settings (auth key, on/off) come from the web UI, not from prov.

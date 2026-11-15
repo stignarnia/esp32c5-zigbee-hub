@@ -5,8 +5,9 @@
 > the web UI, over-the-air updates with rollback, the Zigbee coordinator with
 > enrollment of battery sensors (tested with contact sensors), Tailscale (direct
 > paths, relays, the "tailnet only, no password" mode), Lua automations with
-> buzzers and HTTP calls, and Wi-Fi motion sensing (with the keys alarm built on it).
-> Home Assistant, network backup and signed updates are next. [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
+> buzzers and HTTP calls, Wi-Fi motion sensing (with the keys alarm built on it), and
+> the Home Assistant integration (tested with Home Assistant 2026.11; discovery on the LAN not
+> yet). Network backup and signed updates are next. [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
 
 A Zigbee 3.0 coordinator, automation engine and web UI on a single ESP32-C5,
 reachable from anywhere over your tailnet. No cloud, no Home Assistant, no MQTT
@@ -103,7 +104,7 @@ erases it.
 | `./flash.sh --hostname kitchen-hub` | different hostname on the LAN and the tailnet |
 | `./flash.sh --ssid X --psk Y` | provision a network other than the one you're on |
 | `./flash.sh --monitor` | stay attached to the serial log after flashing |
-| `./flash.sh --ha` | turn on the Home Assistant integration and print its encryption key |
+| `./flash.sh --prov-only --ha` | turn on the Home Assistant integration and print its encryption key (kept in `.esp/secrets/ha_key`) |
 | `./flash.sh --ota` | update over the network instead of USB (see below) |
 | `./flash.sh --gen-signing-key` | create a key so the board only accepts updates you signed |
 
@@ -140,8 +141,9 @@ it, and the browser remembers your choice.
 
 ### Devices
 
-Every paired sensor with its live state: contact, motion, water leak, smoke,
-temperature, humidity and battery. Each device shows signal strength, last seen
+First the hub's own **Motion sensor** (Wi-Fi motion sensing: moving / not moving, and its
+two calibration buttons), then every paired sensor with its live state: contact, motion,
+water leak, smoke, temperature, humidity and battery. Each device shows signal strength, last seen
 and availability. Rename, re-interview or remove them. The UI only shows state;
 there are no switches in it. The sensors the hub is built for take no commands, so
 nothing sends them any.
@@ -246,7 +248,9 @@ The Automations page has everything scripts need, top to bottom:
 | `http.get(url, opts)` / `http.post(url, body, opts)` | shorthands for the above |
 | `secret(name)` | a value stored under **Automations → Secrets**, so it never appears in script text |
 | `net.online()` / `net.on("up" or "down", fn)` | whether the hub has Wi-Fi with an address now / be told when that changes |
-| `motion.moving()` / `motion.moved(from_s, to_s)` | Wi-Fi motion sensing (Settings → Motion): moving now / any movement between `from_s` and `to_s` seconds ago (up to 600). `nil` when the hub couldn't see (no Wi-Fi signal, just started) |
+| `motion.moving()` / `motion.moved(from_s, to_s)` | Wi-Fi motion sensing (the motion sensor on Devices): moving now / any movement between `from_s` and `to_s` seconds ago (up to 600). `nil` when the hub couldn't see (no Wi-Fi signal, just started) |
+| `ha.sensor(name, value, opts)` / `ha.binary(name, on, opts)` | publish a sensor / binary sensor to Home Assistant on this script's device; `nil` = unknown. `opts`: `unit`, `device_class`, `decimals`, `state_class`, `icon` |
+| `ha.event(name, type)` / `ha.remove(name)` | fire a Home Assistant event (`type` default `"fired"`) / remove one of this script's entities |
 | `json.encode(v)` / `json.decode(s)` | |
 | `log(...)` (or `print`) | to the script log |
 | `gpio.claim(pin, ...)` | take pins for this script when it loads (needed for pins only used in handlers) |
@@ -454,7 +458,8 @@ hear the door at all.
 
 The hub pings your router 20 times a second and watches how the router's signal
 changes on the way back. A person moving changes it a lot; a still room barely at all.
-**Settings → Motion** shows **Moving** or **Not moving**, and scripts read it with
+The hub shows up as a device of its own on the **Devices** page, the **Motion sensor**:
+**Moving** or **Not moving**, and scripts read it with
 `motion.moving()` and `motion.moved(from_s, to_s)`.
 
 - **What it sees**: movement anywhere along the line between the hub and the router,
@@ -471,35 +476,58 @@ changes on the way back. A person moving changes it a lot; a still room barely a
 
 ### Home Assistant (optional)
 
-Off by default. Turn it on under **Settings → Home Assistant integration** (or with
-`flash.sh --ha`), copy the encryption key it shows, and Home Assistant discovers
-the hub on its own (**Settings → Devices & services → ESPHome**). Paste the key
-when asked.
+Off by default. Turn it on under **Settings → Home Assistant** (or with
+`flash.sh --prov-only --ha`), copy the encryption key it shows, and Home Assistant
+discovers the hub on its own (**Settings → Devices & services → ESPHome**). Paste the
+key when asked.
 
-The hub appears as one device, and every paired Zigbee device appears under it
-as its own device, with its name, area, manufacturer and model:
+Home Assistant's ESPHome integration needs its `bluetooth` integration loaded; if you
+removed `bluetooth` from your configuration, adding ESPHome brings it back (with no
+adapter it does nothing).
+
+The hub appears as one device, and every paired Zigbee device appears under it as its
+own device, named as in the hub's UI (renaming it there renames it in Home Assistant).
+The ESPHome protocol carries no manufacturer, model or area for these: Home Assistant
+shows the hub's ("Espressif, ESP32-C5 Zigbee hub") on each, and you set the area there.
 
 | Zigbee device | In Home Assistant |
 |---|---|
-| temperature/humidity sensor | sensors with the right device class |
-| contact, motion, leak, smoke sensor | binary sensors |
-| any device | battery, link quality, last seen (diagnostic) |
+| contact, motion, leak, smoke, CO, vibration sensor | a binary sensor of the right class (listed once the interview knows which it is) |
+| temperature / humidity sensor | sensors of the right class |
+| any IAS sensor | tamper, battery low (diagnostic) |
+| any battery device | battery %, battery voltage (diagnostic; voltage disabled by default) |
+| any device | online, last seen, signal strength (diagnostic; signal disabled by default) |
 
-The hub itself adds a **Permit join** button (so you can pair new devices from Home
-Assistant too), the Zigbee channel, device count, Wi-Fi signal and uptime, and its own
-**motion sensor** (unavailable, not "clear", while it has no Wi-Fi signal).
+A device that goes offline shows its values as *unknown* until it reports again (online
+and last seen keep working).
+
+The hub itself adds a **Permit join** button (pairing for 120 s, so you can pair new
+devices from Home Assistant too), **Pairing** (whether the network is open), and the Zigbee
+channel, device count, Wi-Fi signal and uptime (diagnostic; signal and uptime update
+once a minute). Its Wi-Fi motion sensing is a device of its own, **Motion sensor**
+(*unknown*, not "clear", while it has no Wi-Fi signal).
 
 **Your automations add to this, they never replace it.** Every Zigbee device is always
-there. Each script gets an on/off switch, and a script can publish its own entities
-("alarm armed", "doors open: 2", "alarm triggered"). A disabled script's entities show
-as unavailable and keep their history; deleting the script removes them. When the set
-changes, Home Assistant reconnects by itself and picks it up. Entity IDs and history
-never change, because they're derived from each device's hardware address (or the
-script's name).
+there. Each script appears as a device of its own, *Script <name>*, with an **Enabled**
+switch and whatever the script publishes with `ha.sensor`, `ha.binary` and `ha.event`
+("alarm armed", "doors open: 2", "alarm triggered"). While a script is stopped its
+entities show *unknown* and keep their history; deleting the script removes them. When
+the set changes (a device paired or removed, a script added or publishing something new),
+the hub drops its Home Assistant connection a few seconds later and Home Assistant
+reconnects by itself with the new set. Entity IDs and history don't change, because
+they're derived from each device's hardware address (or the script's name) and fixed
+entity names.
 
-The connection is encrypted (ESPHome's Noise protocol, no plaintext fallback). If
-Home Assistant runs somewhere else on your tailnet, add the hub manually as
-`zigbee-hub.<tailnet>.ts.net`, port 6053; LAN discovery doesn't cross Tailscale.
+When the hub restarts (an update, Settings → Restart) it tells Home Assistant first, so
+its entities show *unavailable* at once rather than stale values; Home Assistant connects
+again by itself, within about half a minute.
+
+The connection is encrypted (ESPHome's Noise protocol, no plaintext fallback). **New
+key** under Settings replaces it (Home Assistant then asks for the new one). If Home
+Assistant runs somewhere else on your tailnet, add the hub manually as
+`zigbee-hub.<tailnet>.ts.net`, port 6053; LAN discovery doesn't cross Tailscale. On Home
+Assistant OS with the Tailscale app, run `ha dns options --servers dns://100.100.100.100`
+once (the app's documented step), or tailnet names won't resolve in Home Assistant.
 
 ### Tailscale
 
@@ -542,8 +570,9 @@ still on trial, the last update's result).
 Everything you can change that isn't about scripts: the primary and backup Wi-Fi
 networks, Tailscale (auth key, on/off, log out, tailnet-only access), the Home
 Assistant integration, firmware updates, the Zigbee network backup (download, and
-restore onto a replacement board), the time zone, restarting the hub, the diagnostic
-log download, and **Motion** (moving / not moving, and its two calibration buttons). Script secrets and GPIO pins are on the Automations page.
+restore onto a replacement board), the time zone, restarting the hub, and the diagnostic
+log download. Script secrets and GPIO pins are on the Automations page; the motion sensor
+is on Devices.
 
 **Diagnostic log.** The hub keeps its own log on flash: warnings, errors, Wi-Fi
 events, updates and reboots (with the reason), plus a status sample every 5
@@ -629,9 +658,11 @@ USB flashing always works either way.
   varies). Only frames addressed to the hub, of one format, go into the score; the last
   10 minutes are kept for `motion.moved`. It runs on its own low-priority task and
   drops frames rather than ever getting in Zigbee's way.
-- **Home Assistant**: ESPHome native API on TCP 6053 with Noise encryption, Zigbee
-  devices as ESPHome sub-devices (needs Home Assistant 2025.7 or newer). It uses
-  no memory unless the integration is on and active.
+- **Home Assistant**: ESPHome native API (version 1.19, as ESPHome 2026.10) on TCP 6053
+  with Noise encryption (`Noise_NNpsk0_25519_ChaChaPoly_SHA256`), Zigbee devices and
+  scripts as ESPHome sub-devices (needs Home Assistant 2025.7 or newer). One task reads
+  snapshots of the device registry and pushes what changed; Zigbee never waits for it.
+  Off, it uses no memory; on, about 6 KB of internal RAM and 280 KB of PSRAM.
 - **Commanding devices**: none of the sensors the hub is built for takes commands, so
   there is nothing to send yet. Scripts and Home Assistant get to set devices once one
   that takes commands is paired.
@@ -711,11 +742,12 @@ the Automations page: after a power cut, cron waits until the hub has the time f
 the internet.
 
 **Home Assistant shows nothing.** Check that the integration is on under Settings, and
-that you pasted the key it shows. Over Tailscale, add the hub by name (see Home
-Assistant above): discovery doesn't cross the tailnet.
+that you pasted the key it shows (a wrong key shows as "refused" there). Over Tailscale,
+add the hub by name (see Home Assistant above): discovery doesn't cross the tailnet. In
+*tailnet only* mode, Home Assistant must be on the tailnet too.
 
 **Motion says Moving all the time, or never.** Press the two calibration buttons
-under Settings → Motion (still for 30 s, then moving for 15 s). If it still misses
+on the motion sensor's card under Devices (still for 30 s, then moving for 15 s). If it still misses
 people, move the hub so the area you care about lies between the hub and the router.
 A fan or curtain on that line reads as movement.
 

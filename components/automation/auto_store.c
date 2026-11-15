@@ -27,7 +27,7 @@ static const char *TAG = "auto";
 
 // ---- files ---------------------------------------------------------------------------------
 
-static esp_err_t write_file(const char *path, const char *data, size_t len)
+esp_err_t store_write_file(const char *path, const char *data, size_t len)
 {
     char tmp[96];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
@@ -50,7 +50,7 @@ static esp_err_t write_file(const char *path, const char *data, size_t len)
     return ESP_OK;
 }
 
-static char *read_file(const char *path, size_t max, size_t *len)
+char *store_read_file(const char *path, size_t max, size_t *len)
 {
     FILE *f = fopen(path, "r");
     if (!f) return NULL;
@@ -101,14 +101,14 @@ char *store_read_script(const char *name, size_t *len)
 {
     char path[64];
     script_path(path, sizeof(path), name);
-    return read_file(path, AUTO_SCRIPT_MAX, len);
+    return store_read_file(path, AUTO_SCRIPT_MAX, len);
 }
 
 esp_err_t store_write_script(const char *name, const char *src, size_t len)
 {
     char path[64];
     script_path(path, sizeof(path), name);
-    return write_file(path, src, len);
+    return store_write_file(path, src, len);
 }
 
 void store_delete_script(const char *name)
@@ -123,7 +123,7 @@ void store_delete_script(const char *name)
 esp_err_t store_load_meta(void)
 {
     size_t len;
-    char *txt = read_file(AUTO_META, 16 * 1024, &len);
+    char *txt = store_read_file(AUTO_META, 16 * 1024, &len);
     cJSON *j = txt ? cJSON_ParseWithLength(txt, len) : NULL;
     free(txt);
     int n = 0;
@@ -178,7 +178,7 @@ esp_err_t store_write_meta(void)
     cJSON_Delete(j);
     if (!txt) return ESP_ERR_NO_MEM;
     xSemaphoreTake(s_meta_mtx, portMAX_DELAY);
-    esp_err_t r = write_file(AUTO_META, txt, strlen(txt));
+    esp_err_t r = store_write_file(AUTO_META, txt, strlen(txt));
     xSemaphoreGive(s_meta_mtx);
     cJSON_free(txt);
     return r;
@@ -378,7 +378,7 @@ void store_state_load(int idx)
     char path[64];
     state_path(path, sizeof(path), g_scripts[idx].name);
     size_t len;
-    char *txt = read_file(path, 128 * 1024, &len);
+    char *txt = store_read_file(path, 128 * 1024, &len);
     cJSON *j = txt ? cJSON_ParseWithLength(txt, len) : NULL;
     free(txt);
     if (!cJSON_IsObject(j)) {
@@ -434,7 +434,7 @@ void store_state_flush(void)
         }
         xSemaphoreGive(s_state_mtx);
         if (!txt) continue;
-        if (write_file(path, txt, strlen(txt)) != ESP_OK) {
+        if (store_write_file(path, txt, strlen(txt)) != ESP_OK) {
             xSemaphoreTake(s_state_mtx, portMAX_DELAY);
             s_state_dirty[i] = true;  // retried on the next round
             xSemaphoreGive(s_state_mtx);
@@ -449,6 +449,7 @@ static void io_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         store_state_flush();
+        aha_flush();
     }
 }
 

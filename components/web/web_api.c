@@ -588,7 +588,7 @@ static esp_err_t send_cjson(httpd_req_t *req, cJSON *j)
     return err;
 }
 
-static cJSON *zb_snapshot(void)
+static cJSON *zb_ui_json(void)
 {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "type", "zb");
@@ -600,7 +600,7 @@ static cJSON *zb_snapshot(void)
 
 char *api_zb_json(void)
 {
-    cJSON *o = zb_snapshot();
+    cJSON *o = zb_ui_json();
     char *txt = cJSON_PrintUnformatted(o);
     cJSON_Delete(o);
     return txt;
@@ -609,7 +609,7 @@ char *api_zb_json(void)
 static esp_err_t h_zb_get(httpd_req_t *req)
 {
     if (!web_guard(req)) return ESP_OK;
-    return send_cjson(req, zb_snapshot());
+    return send_cjson(req, zb_ui_json());
 }
 
 // Small JSON body -> cJSON (NULL on error; the caller replies 400).
@@ -740,6 +740,7 @@ esp_err_t api_register(httpd_handle_t server)
         if (err != ESP_OK) return err;
     }
     esp_err_t err = auto_api_register(server);
-    if (err != ESP_OK) return err;
-    return motion_api_register(server);
+    if (err == ESP_OK) err = motion_api_register(server);
+    if (err == ESP_OK) err = ha_api_register(server);
+    return err;
 }

@@ -37,9 +37,17 @@ static void reboot_task(void *arg)
     esp_restart();
 }
 
+static volatile bool s_reboot_pending;
+
+bool hubsys_reboot_pending(void)
+{
+    return s_reboot_pending;
+}
+
 void hubsys_reboot(const char *reason, uint32_t delay_ms)
 {
     ESP_LOGW(TAG, "reboot in %" PRIu32 " ms: %s", delay_ms, reason);
+    s_reboot_pending = true;
     strlcpy(s_rtc_reason, reason, sizeof(s_rtc_reason));
     s_rtc_magic = RTC_MAGIC;
     xTaskCreate(reboot_task, "reboot", 3072, (void *)(uintptr_t)delay_ms, 10, NULL);

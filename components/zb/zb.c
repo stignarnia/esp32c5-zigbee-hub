@@ -323,6 +323,14 @@ uint32_t zb_permit_left(void)
     return left > 0 ? (uint32_t)((left + 999999) / 1000000) : 0;
 }
 
+uint8_t zb_channel(void)
+{
+    taskENTER_CRITICAL(&s_net_lock);
+    uint8_t ch = s_up && s_net.valid ? s_net.channel : 0;
+    taskEXIT_CRITICAL(&s_net_lock);
+    return ch;
+}
+
 cJSON *zb_network_json(void)
 {
     cJSON *o = cJSON_CreateObject();

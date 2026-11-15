@@ -7,6 +7,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "cJSON.h"
 #include "esp_err.h"
 
@@ -32,7 +33,6 @@ esp_err_t automation_save(const char *name, const char *src, size_t len, bool en
 esp_err_t automation_set_enabled(const char *name, bool enabled);
 esp_err_t automation_restart(const char *name);  // after an error
 esp_err_t automation_delete(const char *name);
-int automation_enabled_count(void);              // Home Assistant mode rule
 
 // Boot-loop guard, safe mode: after 3 abnormal resets in a row, each less than 60 s after
 // boot, the engine starts no scripts this boot (nothing is disabled or deleted). The UI
@@ -43,6 +43,48 @@ esp_err_t automation_leave_safe_mode(void);
 // Script log lines with seq > `after` (at most `max`), as a JSON array of
 // {seq, t (epoch s or -uptime s), script, level, msg}. *last = newest seq.
 cJSON *automation_log_json(unsigned after, unsigned max, unsigned *last);
+
+// Brief list of the scripts (any task): name, the user's choice, running right now.
+typedef struct {
+    char name[AUTO_NAME_MAX + 1];
+    bool enabled;
+    bool running;
+} auto_brief_t;
+int automation_list(auto_brief_t *out, int max);
+
+// ---- Home Assistant entities published by scripts (ha.sensor / ha.binary / ha.event) ---
+// Definitions are kept (in /storage/auto/ha.json) until the script is deleted or calls
+// ha.remove; values are not: they are unknown until the script publishes them after
+// it starts, and become unknown again when it stops.
+#define AUTO_HA_MAX          32   // all scripts together
+#define AUTO_HA_PER_SCRIPT   8
+#define AUTO_HA_NAME         32
+#define AUTO_HA_EVENT_TYPES  4
+#define AUTO_HA_TYPE_LEN     16
+
+typedef enum { AUTO_HA_SENSOR = 1, AUTO_HA_BINARY, AUTO_HA_EVENT } auto_ha_type_t;
+
+typedef struct {
+    char script[AUTO_NAME_MAX + 1];
+    char name[AUTO_HA_NAME + 1];
+    uint8_t type;                 // auto_ha_type_t
+    char unit[16];
+    char device_class[32];
+    char icon[48];                // "mdi:…", "" = HA's default
+    int8_t decimals;              // sensors: digits shown
+    uint8_t state_class;          // sensors: 0 none, 1 measurement, 2 total_increasing, 3 total
+    uint8_t n_types;              // events: the event types used so far
+    char types[AUTO_HA_EVENT_TYPES][AUTO_HA_TYPE_LEN];
+    bool has_value;               // sensor/binary published since the script started
+    float value;
+    bool on;
+} auto_ha_entity_t;
+
+int automation_ha_entities(auto_ha_entity_t *out, int max);  // any task
+uint32_t automation_ha_revision(void);  // changes with every definition or value change
+// Called on the automation task for every ha.event(): copy and return, never block.
+typedef void (*auto_ha_event_cb_t)(const char *script, const char *name, const char *type);
+void automation_ha_set_event_cb(auto_ha_event_cb_t cb);
 
 // ---- settings -----------------------------------------------------------------------
 // Secrets: write-only values scripts read with secret(name). value NULL = delete.

@@ -12,6 +12,8 @@
 #                                      default host: <hostname>.local, else the tailnet
 #                                      name <hostname> (tailnet-only access)
 #   ./flash.sh --prov-only --lan-access   turn tailnet-only access off (locked out)
+#   ./flash.sh --prov-only --ha        turn the Home Assistant integration on, with the key
+#                                      in .esp/secrets/ha_key (created on first use)
 #
 # Options you pass are remembered in .esp/secrets/prov.env (gitignored, 0600), so
 # the next run keeps your backup network and hostname. (The Tailscale auth key is
@@ -27,13 +29,14 @@ ok()   { printf '\e[32m✓\e[0m %s\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
 
 # ---------------------------------------------------------------- arguments
-PROV_ONLY=0 MONITOR=0 PORT="" OTA=0 OTA_HOST="" LAN_ACCESS=0
+PROV_ONLY=0 MONITOR=0 PORT="" OTA=0 OTA_HOST="" LAN_ACCESS=0 HA=0
 ARG_SSID="" ARG_PSK="" ARG_BSSID_SET=0 ARG_BSSID="" ARG_BPSK=""
 ARG_HOST=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prov-only)   PROV_ONLY=1 ;;
     --lan-access)  LAN_ACCESS=1 ;;
+    --ha)          HA=1 ;;
     --ota)         OTA=1 ;;
     --host)        OTA_HOST="$2"; shift ;;
     --monitor)     MONITOR=1 ;;
@@ -44,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     --backup-psk)  ARG_BPSK="$2"; shift ;;
     --no-backup)   ARG_BSSID_SET=1; ARG_BSSID=""; ARG_BPSK="" ;;
     --hostname)    ARG_HOST="$2"; shift ;;
-    -h|--help)     sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
   shift
@@ -213,6 +216,12 @@ else
 fi
 ADMIN_PW=$(<"$PWFILE")
 
+# Home Assistant API key (--ha): 32 random bytes, base64, generated once and kept here.
+HA_KEYFILE="$SECRETS/ha_key"
+if [[ "$HA" == 1 && ! -s "$HA_KEYFILE" ]]; then
+  "$PY" -I -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())' >"$HA_KEYFILE"
+fi
+
 COUNTRY=$(iw reg get 2>/dev/null | awk '/^global/{getline; sub(/:$/, "", $2); print $2; exit}' || true)
 [[ "$COUNTRY" =~ ^[A-Z]{2}$ ]] || COUNTRY=""
 
@@ -227,6 +236,8 @@ PROV_BIN="$SECRETS/prov.bin"
 PROV_SSID="$SSID" PROV_PSK="$PSK" PROV_SSID2="$BACKUP_SSID" PROV_PSK2="$BACKUP_PSK" \
 PROV_HOSTNAME="$HOSTNAME_" PROV_COUNTRY="$COUNTRY" PROV_ADMIN_PW="$ADMIN_PW" \
 PROV_LANRESET="$( [[ $LAN_ACCESS == 1 ]] && echo "$(date +%s)-$RANDOM" )" \
+PROV_HA_NONCE="$( [[ $HA == 1 ]] && echo "$(date +%s)-$RANDOM" )" \
+PROV_HA_KEY="$( [[ $HA == 1 ]] && cat "$HA_KEYFILE" )" \
   "$PY" -I tools/mkprov.py "$IDF_PATH" "$PROV_BIN" "$((PROV_SIZE))" || die "mkprov failed"
 
 # ---------------------------------------------------------------- flash
@@ -277,6 +288,10 @@ echo "  Web UI:   http://$HOSTNAME_.local/   (LAN, $IP)"
 [[ -n "$TS_IP" ]] && echo "            http://$HOSTNAME_/         (tailnet)"
 echo "  Password: $ADMIN_PW$( [[ $NEW_PW == 1 ]] && echo '   (new — saved in .esp/secrets/admin_password)')"
 [[ -n "$BACKUP_SSID" ]] && echo "  Backup:   $BACKUP_SSID"
+if [[ "$HA" == 1 ]]; then
+  echo "  Home Assistant: add the ESPHome integration, host $HOSTNAME_.local$( [[ -n "$TS_IP" ]] && echo " (or $TS_NAME over the tailnet)"), port 6053"
+  echo "                  encryption key: $(<"$HA_KEYFILE")"
+fi
 echo
 
 if [[ "$MONITOR" == 1 ]]; then

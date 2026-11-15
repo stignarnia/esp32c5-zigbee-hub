@@ -33,7 +33,7 @@ static char *s_flushbuf;          // PSRAM, RING_SIZE
 // Tags whose INFO lines are worth keeping; everything at WARN/ERROR is kept.
 static const char *const KEEP_INFO[] = {"wifi5g", "hubsys", "web.api", "web.auth", "web",
                                         "sample", "boot", "hublog", "prov", "zb", "ts",
-                                        "auto", "auto.http", "script"};
+                                        "auto", "auto.http", "script", "ha"};
 
 bool hublog_time_valid(void)
 {

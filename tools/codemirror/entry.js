@@ -56,6 +56,9 @@ const API = [
   ['led.set(r, g, b)', 'board RGB LED, 0..255 each'], ['led.off()', ''], ['led.claim()', 'take the LED at load (for handlers)'],
   ['net.online()', 'Wi-Fi up with an IP'], ['net.on("up" | "down", fn)', ''],
   ['motion.moving()', 'Wi-Fi motion now; nil = no signal'], ['motion.moved(from_s, to_s)', 'movement in that window (s ago); nil = not seen'],
+  ['ha.sensor(name, value, {unit=, device_class=, decimals=})', 'Home Assistant sensor; nil = unknown'],
+  ['ha.binary(name, on, {device_class=})', 'Home Assistant binary sensor'], ['ha.event(name, type)', 'Home Assistant event, type default "fired"'],
+  ['ha.remove(name)', 'drop one of this script\'s Home Assistant entities'],
   ['json.encode(v)', ''], ['json.decode(s)', ''], ['log(...)', 'script log'],
 ].map(([label, detail]) => ({ label: label.replace(/\(.*$|\{.*$/, ''), detail: label.slice(label.search(/[({]/)) + (detail ? '  ' + detail : ''), type: 'function', apply: label.replace(/\(.+\)$/, '(').replace(/\{.+\}$/, '{') }));
 const KEYWORDS = 'and break do else elseif end false for function goto if in local nil not or repeat return then true until while'

@@ -52,6 +52,8 @@ esp_err_t prov_load(prov_t *out)
     read_str(h, "country", out->country, sizeof(out->country));
     read_str(h, "lanreset", out->lan_reset, sizeof(out->lan_reset));
     read_str(h, "admin_hash", out->admin_hash, sizeof(out->admin_hash));
+    read_str(h, "ha_nonce", out->ha_nonce, sizeof(out->ha_nonce));
+    read_str(h, "ha_key", out->ha_key, sizeof(out->ha_key));
     nvs_close(h);
 
     out->has_wifi = out->ssid[0] != '\0';

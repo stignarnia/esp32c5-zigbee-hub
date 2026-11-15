@@ -149,9 +149,13 @@ pages.devices = {
       <section class="card"><h2>Zigbee network</h2><div id="zb-net" class="muted">Loading…</div>
         <div class="row"><button id="zb-scan">Scan for devices</button><span id="zb-permit" class="muted"></span></div>
       </section>
-      <div id="zb-devs" class="grid"></div>
+      <div class="grid">
+        <section class="card" id="mo-card"><h2>Motion sensor</h2><div class="muted">Loading…</div></section>
+        <div id="zb-devs" style="display: contents"></div>
+      </div>
       <section class="card"><h2>Network map</h2><div id="zb-map" class="muted">—</div></section>`;
     $('#zb-scan').addEventListener('click', () => this.permit());
+    motionui.render();
     await this.poll();
     this.stop();
     this.timer = setInterval(() => { if (!ws || ws.readyState !== WebSocket.OPEN) this.poll(); }, 2000);
@@ -708,8 +712,9 @@ pages.status = {
   },
 };
 
-// Settings: everything that changes something. Wi-Fi networks, Tailscale, firmware update,
-// restart, diagnostic log download, and the time zone (secrets and GPIO are on Automations).
+// Settings: everything that changes something. Wi-Fi networks, Tailscale, Home Assistant,
+// firmware update, restart, diagnostic log download, and the time zone (secrets and GPIO are
+// on Automations; the motion sensor is a device, on Devices).
 pages.settings = {
   render() {
     $('#view').innerHTML = `
@@ -717,6 +722,7 @@ pages.settings = {
       <div id="wifi-area"><div class="card">Loading…</div></div>
       <div class="grid">
         <section class="card" id="ts-card"><h2>Tailscale</h2><div class="muted">Loading…</div></section>
+        <section class="card" id="ha-card"><h2>Home Assistant</h2><div class="muted">Loading…</div></section>
         <section class="card"><h2>Firmware update</h2>
           <p class="muted">Upload <code>build/esp32c5-zigbee-hub.bin</code>, or run <code>./flash.sh --ota</code>.
           The new firmware runs on trial and the hub goes back to this version by itself if it fails.</p>
@@ -733,7 +739,6 @@ pages.settings = {
         <section class="card"><h2>Restart</h2>
           <div class="row"><button class="danger" id="reboot">Restart the hub</button></div>
         </section>
-        <section class="card" id="mo-card"><h2>Motion</h2><div class="muted">Loading…</div></section>
         <div id="tz-settings" style="display: contents"></div>
       </div>`;
     $('#fw-file').addEventListener('change', () => { $('#fw-upload').disabled = !$('#fw-file').files.length; });
@@ -746,13 +751,13 @@ pages.settings = {
     wifi.render();
     tsui.renderSettings();
     autoset.render();
-    motionui.render();
+    haui.render();
   },
   live() { wifi.live(); tsui.liveSettings(); },
 };
 
-// Motion (part of Settings) -----------------------------------------------------------
-// Wi-Fi motion sensing. The two buttons are the calibration: each one learns what that
+// Motion sensor (part of Devices) ------------------------------------------------------
+// The hub's own Wi-Fi motion sensing. The two buttons are the calibration: each one learns what that
 // state looks like (stay still 30 s / keep moving 15 s).
 const motionui = {
   timer: null,
@@ -760,7 +765,7 @@ const motionui = {
   async render() {
     const card = $('#mo-card');
     if (!card) return;
-    card.innerHTML = `<h2>Motion</h2>
+    card.innerHTML = `<h2>Motion sensor <span class="muted">this hub, Wi-Fi</span></h2>
       <div id="mo-state" style="font-size:2.5rem;font-weight:700;text-align:center;margin:.5rem 0">…</div>
       <p id="mo-note" class="muted" style="text-align:center"></p>
       <div class="row" style="justify-content:center"><button id="mo-still">Not moving</button><button id="mo-move">Moving</button></div>`;
@@ -782,6 +787,85 @@ const motionui = {
     $('#mo-note').textContent = !d.sensing ? 'No Wi-Fi signal: not sensing'
       : d.learning === 'still' ? 'Learning: stay still for 30 s…'
       : d.learning === 'moving' ? 'Learning: keep moving for 15 s…' : '';
+  },
+};
+
+// Home Assistant (part of Settings) -----------------------------------------------------
+// The ESPHome native API: Home Assistant adds the hub with its ESPHome integration.
+// Re-rendered only when on/off or the key changes; the counters update in place.
+const haui = {
+  timer: null,
+  shown: '',
+  stop() { clearInterval(this.timer); this.timer = null; },
+  async render() {
+    if (!$('#ha-card')) return;
+    this.shown = '';
+    await this.poll();
+    this.stop();
+    this.timer = setInterval(() => this.poll(), 3000);
+  },
+  async poll() {
+    const card = $('#ha-card');
+    if (!card) { this.stop(); return; }
+    let d;
+    try { d = await api('/api/ha'); } catch (e) { card.innerHTML = `<h2>Home Assistant</h2><p class="err">${esc(e.message)}</p>`; return; }
+    const key = `${d.enabled}|${d.key}|${d.lan_open}|${d.tailnet_name}`;
+    if (key !== this.shown) { this.shown = key; this.draw(card, d); }
+    const st = $('#ha-state');
+    if (st) {
+      st.innerHTML = !d.running ? '<span class="badge warn">starting…</span>'
+        : d.clients ? `<span class="badge ok">connected</span> ${esc(d.client || 'a client')}`
+        : '<span class="badge">waiting for Home Assistant</span>';
+      $('#ha-count').textContent = `${d.entities} entities on ${d.devices} devices besides the hub itself`
+        + (d.rejected ? ` · ${d.rejected} refused (wrong key or not allowed)` : '');
+    }
+  },
+  draw(card, d) {
+    const host = d.lan_open ? `${d.hostname}.local` : (d.tailnet_name || d.hostname);
+    const where = d.lan_open
+      ? `On the same network Home Assistant usually finds it by itself (Settings → Devices &amp; services → Discovered).
+         Otherwise add the <b>ESPHome</b> integration with host <code>${esc(host)}</code>${d.tailnet_name ? ` (or <code>${esc(d.tailnet_name)}</code> over the tailnet)` : ''}, port <code>${d.port}</code>.`
+      : `Tailnet-only access is on: only Home Assistant on your tailnet can connect, and the hub isn't announced on the LAN.
+         Add the <b>ESPHome</b> integration with host <code>${esc(host)}</code>, port <code>${d.port}</code>.`;
+    const body = !d.enabled
+      ? `<p class="muted">Off. Turned on, Home Assistant sees every Zigbee device as its own device (contact, battery,
+          signal…), the hub's own entities (pairing button, Wi-Fi motion, signal, uptime) and each script as a device
+          with an <i>Enabled</i> switch and what it publishes with <code>ha.*</code>. Encrypted; Home Assistant needs the key shown here.
+          Scripts run on the hub either way.</p>
+         <div class="row"><button id="ha-on">Turn on</button></div>`
+      : `<p id="ha-state"></p>
+         <p class="muted">${where}</p>
+         <label>Encryption key <input type="text" id="ha-key" readonly value="${esc(d.key)}" spellcheck="false"></label>
+         <div class="row"><button id="ha-copy">Copy key</button><button class="ghost" id="ha-newkey">New key</button>
+           <button class="ghost" id="ha-off">Turn off</button></div>
+         <p class="muted" id="ha-count"></p>`;
+    card.innerHTML = `<h2>Home Assistant ${d.enabled ? '<span class="badge ok">on</span>' : ''}</h2>${body}<p id="ha-msg"></p>`;
+    const on = (id, fn) => { const b = $(id); if (b) b.addEventListener('click', fn); };
+    on('#ha-on', () => this.post('/api/ha', { on: true }));
+    on('#ha-off', () => {
+      if (!confirm('Turn the Home Assistant integration off? Home Assistant shows the hub as unavailable until it is turned on again.')) return;
+      this.post('/api/ha', { on: false });
+    });
+    on('#ha-newkey', () => {
+      if (!confirm('Make a new encryption key? Home Assistant disconnects and asks for the new key.')) return;
+      this.post('/api/ha/key');
+    });
+    on('#ha-copy', () => this.copy());
+    const k = $('#ha-key');
+    if (k) k.addEventListener('focus', () => k.select());
+  },
+  // The page is plain HTTP, where browsers don't offer navigator.clipboard: fall back to
+  // selecting the text and the old copy command.
+  async copy() {
+    const k = $('#ha-key');
+    try { await navigator.clipboard.writeText(k.value); }
+    catch (_) { k.focus(); k.select(); document.execCommand('copy'); }
+    $('#ha-msg').textContent = 'Copied.';
+    setTimeout(() => { const m = $('#ha-msg'); if (m) m.textContent = ''; }, 2000);
+  },
+  async post(path, json) {
+    try { await api(path, { method: 'POST', json }); this.shown = ''; await this.poll(); }
+    catch (e) { const m = $('#ha-msg'); if (m) m.textContent = e.message; }
   },
 };
 

@@ -22,7 +22,7 @@ One ESP32-C5 board that is, on its own:
    appears in Home Assistant as a native sub-device of the hub, and the hub adds its own
    entities plus whatever the enabled scripts publish (see Phase 6).
 7. **A motion sensor itself** (added 2026-11-08) — Wi-Fi sensing (CSI) of the router's
-   signal says moving / not moving, for scripts and later for Home Assistant (Phase 5b).
+   signal says moving / not moving, for scripts, the keys alarm and Home Assistant (Phases 5b, 6).
 
 ## Priorities (user decision, 2026-11-04)
 
@@ -37,7 +37,7 @@ Everything below follows from that ordering:
    repo found the C5 can get stuck not finding an AP that is right there, and only
    a reboot was proven to bring it back. So the escalation ends in a reboot, but
    it is gated on the automation/Zigbee side being idle (see the Wi-Fi watchdog in
-   Phase 1), and pending timers survive it.
+   Phase 1), and timers that call a named function survive it.
 3. **Coex preference favours 802.15.4.** With Wi-Fi on 5 GHz there's no band
    overlap, but the C5 shares RF resources; when they contend, Zigbee wins.
 4. **Watchdog and memory budgets are set by the Zigbee/automation side.** The UI
@@ -171,7 +171,7 @@ The user's personal tailnet (not a work account). The board will be
             └──────────────────────────────┬───────────────────────────────────────┘
                               REST + WebSocket (esp_http_server, port 80)
             ┌──────────────────────────────┴───────────────────────────────────────┐
-            │                             Event bus                                │
+            │         public calls + callbacks that only copy (no event bus)       │
             ├──────────────┬────────────────┬─────────────────┬────────────────────┤
             │  Zigbee      │  Device        │  Automation     │  Tailscale         │
             │  coordinator │  registry      │  engine (Lua)   │  (microlink port)  │
@@ -187,7 +187,7 @@ The HTTP server binds to all interfaces. microlink adds its WireGuard interface 
 lwIP's netif list, so the same server answers on the LAN IP and on the `100.x`
 tailnet IP without extra code (verified in Phase 4).
 
-### Source layout (as built, 2026-11-08)
+### Source layout (as built, 2026-11-15)
 
 ```
 CMakeLists.txt  sdkconfig.defaults  partitions.csv  flash.sh  env.sh
@@ -200,8 +200,8 @@ components/
   hublog/        on-board diagnostic log (LittleFS)
   zb/            coordinator, enrollment, interview, ZCL helpers, and the device
                  registry with persistence (zb_dev.c; no separate devices/ component)
-  web/           http server, REST (web_api.c, web_auto.c, web_motion.c), WebSocket, auth,
-                 access mode
+  web/           http server, REST (web_api.c, web_auto.c, web_motion.c, web_ha.c), WebSocket,
+                 auth, access mode
   web/ui/        index.html, app.js, style.css, favicon.svg (no build step, gzipped by
                  CMake), and cm.js (CodeMirror editor, prebuilt by tools/codemirror, committed)
   automation/    Lua engine (auto_engine.c), store, GPIO, HTTP, ha.* entities (auto_ha.c)
@@ -236,14 +236,90 @@ the app slots need; app slots and LittleFS take everything else (2026-11-06).
 | coredump | coredump | 0x30000 | 0x10000 | ELF core dump on panic; summary logged on next boot, `/api/coredump` |
 | ota_0 | app | 0x40000 | 0x400000 | |
 | ota_1 | app | 0x440000 | 0x400000 | |
-| storage | littlefs | 0x840000 | 0x7C0000 | device registry, scripts, logs, UI overrides |
+| storage | littlefs | 0x840000 | 0x7C0000 | device registry, scripts and their state, GPIO config, HA entity definitions, logs |
 
 Credentials live in their own partition so re-provisioning never touches the
 Zigbee network (re-pairing every device would be the cost) or app settings.
 
+## Still to do
+
+Every open item, once, in one place (2026-11-15). The phases below keep what is done and its
+evidence; where something is still open there, it points here.
+
+### To build
+- [ ] Zigbee network backup and restore, downloaded from the UI, so a replacement board takes
+      over without re-pairing; the Wi-Fi watchdog's reboot gate must defer while a backup runs
+      (Phase 1 lists it) (Phase 7)
+- [ ] Factory reset: UI + long-press BOOT (Phase 7)
+- [ ] `zb.set` and commands from Home Assistant (switch / light / … entities), when the first
+      device that takes commands is paired. Not built only because none of the paired devices
+      can be commanded (Decisions: "not yet, not never")
+- [ ] Optional: signed updates (design in Phase 2)
+
+### Tests: router off for about an hour (one session)
+- [ ] triggers, timers, cron and buzzers keep working; `net.on("down")` fires; a `retry_for`
+      request made while offline goes out once the router is back (Phase 5)
+- [ ] the keys alarm: every opening without a tap sounds (no motion signal), Alexa once the
+      router is back (Phase 5b)
+- [ ] the Wi-Fi watchdog firing: driver restart after 5 min, reboot after 20 min (Phase 1)
+- [ ] the reboot gate deferring that reboot (pairing open, a script running, a timer or cron
+      job due within 2 min, a buzzer playing) (Phases 1 and 5)
+
+### Tests: hardware in hand
+- [ ] `flash.sh --prov-only --ha` with the board on USB. `.esp/secrets/ha_key` holds the
+      hub's current key, so HA keeps working; the log should say "turned on by flash.sh --ha"
+      (Phase 6)
+- [ ] `gpio.on` with an input
+- [ ] the hub still boots normally with something attached to GPIO 7 and 25
+- [ ] the boot-loop guard's real case: wiggle a buzzer during an alarm until the chip resets →
+      one reset, the script disabled, no loop. Also shows whether RTC memory survives a real
+      `RTC_PWR_GLITCH` (every boot logs "RTC memory kept/not kept"); if it doesn't, the buzzer
+      marker moves to NVS, written by the automation task when a pattern starts (the plan's
+      fallback) (Phase 5)
+
+### Tests: waiting or long runs
+- [ ] availability: a battery sensor marked offline after 25 h of silence (Phase 3)
+- [ ] soak test 24 h+ (the reference repo's worst bugs needed 9 h of uptime) (Phase 7)
+- [ ] internal heap low-water mark under full load: Zigbee + Tailscale + a UI client + 3
+      scripts, and the same with HA connected (26.1 KB today with HA at boot) (Phase 7)
+
+### Built, never seen with a real device of that kind (none here)
+- [ ] temperature, humidity and occupancy sensors (UI, `zb.*`, HA entities)
+- [ ] motion, water leak, smoke, CO and vibration sensors: only contact sensors were verified;
+      the others depend on the IAS zone type, never seen for those kinds
+- [ ] on/off reporting ("Power" in HA)
+- [ ] the network map with a device more than one hop away (behind a repeater)
+- not a test, a decision (2026-11-06): repeaters and other mains devices (plugs, bulbs) are not
+  tested and the hub isn't built for them; what happens when one joins, and its availability
+  pings (after 10 min of silence), have never run
+
+### Small leftovers
+- [ ] `examples/morning-check.lua` never run
+- [ ] the safe-mode banner in the UI never looked at (the mechanism is tested)
+- [ ] `door-alarm.lua`: two doors open at once, an alarm running past 10 s
+- [ ] the forged-packet test with the tailnet input hook removed (the control experiment) (Phase 4)
+- [ ] `gpio.beep`'s cap of 2 s per pulse stays until a longer continuous tone is measured on the
+      buzzers (only up to 1 s was) (Phase 1b)
+
+### Open decisions (the user's)
+- [ ] keys alarm M2: what if Wi-Fi sensing misses a walk to the door (decided by the sensing
+      test) (Phase 5b)
+- [ ] keys alarm F10: how long the house must be still before an opening counts as coming
+      home; `STILL_S` = 60 s and `GAP_S` = 2 s are Claude's unmeasured choice (Phase 5b)
+- [ ] keys alarm F11: the person coming home seen on the landing before opening → alarm
+      (Phase 5b)
+- [ ] keys alarm F2 (B leaves while A has the key → alarm) was accepted "only if it stops when
+      the door closes **and** the hub guarantees A has the key and it isn't in the house". The
+      first part holds; the second can't: the hub never knows where the key is (Phase 5b)
+
+### Cannot be tested yet
+- Home Assistant auto discovery on the LAN: no Home Assistant on the hub's LAN, and the hub is
+  in tailnet-only mode (mDNS off)
+
 ## Phases
 
-Status markers: `[ ]` todo · `[~]` in progress · `[x]` done and verified on hardware.
+Status markers: `[ ]` todo · `[~]` in progress · `[x]` done and verified on hardware. Open items
+are tracked only under "Still to do" above.
 
 ### Phase 0 — Skeleton (done 2026-11-04)
 - [x] Project `CMakeLists.txt`, `sdkconfig.defaults` (16 MB flash, PSRAM quad
@@ -264,7 +340,8 @@ Notes from the first boot:
 - Rev v1.0 silicon: **PSRAM is not encrypted even with flash encryption**, and
   IDF warns against TLS allocations in PSRAM (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`).
   We don't plan flash encryption, but Phase 4 must decide deliberately where
-  microlink's TLS/WireGuard state lives (keys internal, bulk buffers in PSRAM).
+  microlink's TLS/WireGuard state lives (keys internal, bulk buffers in PSRAM). Decided in
+  Phase 4: mbedTLS allocations in PSRAM (RAM lever 3).
 
 ### Phase 1 — Provisioning + 5 GHz Wi-Fi (done 2026-11-04; 42 h soak passed 2026-11-06)
 - [x] `flash.sh` (+ `tools/mkprov.py`):
@@ -313,14 +390,13 @@ Notes from the first boot:
      - if not safe, re-checked every second until it is
   4. so a router that's off overnight costs a handful of reboots, never a loop
   - [x] watchdog reboot logged on the next boot; [x] shown in the UI (Status → Wi-Fi recovery)
-  - [~] gate implemented 2026-11-06 (`reboot_gate` in `main.c`): defers while the pairing
+  - gate implemented 2026-11-06 (`reboot_gate` in `main.c`): defers while the pairing
     window is open, a device is actively being interviewed, or a firmware upload is
     being written; flushes the device registry before allowing it. Since Phase 5
     (`automation_reboot_blocker`) also: a script running, a timer or cron job due within
     2 min, a buzzer pattern playing; script `state` and named timers saved first (timers
-    with a global function name survive in RTC memory; anonymous ones are lost). Not yet
-    observed deferring (needs a 20+ min outage)
-  - [ ] **not yet observed firing** — needs the AP gone for 5+ / 20+ min
+    with a global function name survive in RTC memory; anonymous ones are lost). Seeing the
+    watchdog fire and the gate defer it: see Still to do (router-off session)
   - the cost being guarded: a reboot takes a few seconds until Zigbee is back
     (network restored from `zb_storage`, no re-pairing), and reports sent in that
     window are lost. Hence the gating
@@ -476,7 +552,8 @@ Independent of the other phases; its results feed Phase 5's `gpio.*` API.
     hole touches only where it leans, so contact makes and breaks with any movement
   - Phase 1b repeated with the probe: 50/50 rounds, 0 resets, radio off; then with Wi-Fi
     associated (ch 36, −47 dBm, pinging the gateway every 50 ms, 2163/2163): 50/50, 0
-    resets. **Wi-Fi is not what made the hub reset** (802.15.4 not tested)
+    resets. **Wi-Fi is not what made the hub reset** (802.15.4 tested later: Phase 5 buzzer
+    endurance, 0 resets with Zigbee traffic)
   - **breadboard + unsoldered header pins: worse.** The pins stand centred in the board's
     holes and make contact only while the board is pressed down (IO6 read 3357 mV driven
     = no load; sounds when pressed, user). Dropped. Without solder, the legs go straight
@@ -582,7 +659,7 @@ OTA bookkeeping), `wifi5g` (runtime network API).
       bootloader loaded the previous slot (`ota_0`), the hub logged `ROLLED_BACK` and the
       core-dump summary, Wi-Fi back in 2.5 s, `flash.sh` reported the rollback
 - [x] What OTA can't change: bootloader, partition table — USB only, by design
-- [ ] **Optional: signed updates** (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` +
+- **Optional: signed updates** (not built; listed under Still to do) (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` +
       `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, RSA-3072, Secure Boot V2
       signature format, no eFuses burned):
   - verification runs in the **running app** when an update arrives — no
@@ -601,7 +678,8 @@ For long tests without a serial cable: log on the board, download later.
       partition; first mount formats it (one-time "Corrupted dir pair" error is
       just the blank partition). Mount 5 ms
 - [x] `esp_log_set_vprintf` hook keeps WARN/ERROR from everything + INFO from
-      `wifi5g hubsys web* sample boot hublog prov`; strips colour codes; drops
+      `wifi5g hubsys web* sample boot hublog prov` (later also `zb ts auto auto.http script ha`);
+      strips colour codes; drops
       prefix-only fragments (the Wi-Fi driver prints capability dumps in pieces)
 - [x] The hook only copies into a 32 KB PSRAM ring (it can run inside the Wi-Fi
       driver: no flash I/O there); a task writes to flash every 10 s, and a
@@ -612,7 +690,7 @@ For long tests without a serial cable: log on the board, download later.
       time across soft reboots; `+Ns` uptime before the first sync after power-on
 - [x] `sample` line every 5 min: uptime, Wi-Fi state, channel, RSSI, counters, heap
 - [x] `GET /api/logs` (authenticated, flushes first, streams both files) +
-      "Download log" on the System page
+      "Download log" on the System page (in Settings since 2026-11-06)
 - Cost: 64 KB PSRAM, no internal RAM; flash writes only when there are new lines
   (~50–100 KB/night), wear-levelled over 7 MB
 - Phase 5 builds the script log (`log(...)`, script errors) on this
@@ -715,7 +793,8 @@ For long tests without a serial cable: log on the board, download later.
   - [x] interview: active endpoints, simple descriptors, Basic cluster (manufacturer,
     model, power source); the card shows "interviewing" until done
   - [x] bind + configure reporting (battery, temperature, humidity, on/off, occupancy)
-    (reference bug: never initialised → no reports ever arrived)
+    (reference bug: never initialised → no reports ever arrived). Only battery reports have
+    been seen; the others need such a device (Still to do)
   - [x] user names the device; persisted to LittleFS **including the cluster list**
     (reference bug: restored devices had none)
   - rooms: not doing (user decision 2026-11-06)
@@ -738,10 +817,10 @@ For long tests without a serial cable: log on the board, download later.
   - a sensor that fell asleep mid-interview is finished on its next check-in,
     instead of being dropped as failed
   - the UI shows it within a second of the announce, even before the interview ends
-- [x] Capability mapping, sensors only: IAS Zone (contact/motion/water/smoke) and Power
-      Config (battery) verified on the contact sensors; Temperature, Humidity and
-      Occupancy reporting built (no such sensor here to verify). Pressure and
-      illuminance: not doing (user decision 2026-11-06)
+- [x] Capability mapping, sensors only: IAS Zone and Power Config (battery) verified with the
+      contact sensors (zone type contact). Motion / water / smoke / CO / vibration zones,
+      Temperature, Humidity, Occupancy and On/Off are built but never seen with such a device
+      (see Still to do). Pressure and illuminance: not doing (user decision 2026-11-06)
 - [x] Device page: live state, LQI/RSSI, last seen, availability, rename, remove — done;
       re-interview (redoes every step; battery devices at their next check-in) — verified
       2026-11-06 on the Door sensor: pressed twice, each time "waiting for it to wake up",
@@ -749,10 +828,10 @@ For long tests without a serial cable: log on the board, download later.
       **No controls in the UI (user decision 2026-11-06)**; since 2026-11-07 nothing
       commands devices at all (no `zb.set` in Lua, no commands from Home Assistant) —
       only because none of the paired devices can be commanded (see Decisions)
-- [~] Availability tracking — built: battery devices offline after 25 h of silence.
-      **Not yet observed firing** (needs a sensor silent for 25 h)
+- Availability tracking — built: battery devices offline after 25 h of silence; mains devices
+      pinged after 10 min of silence. Never seen firing: see Still to do
 - [x] Network map from the coordinator's neighbour table (both sensors listed with
-      LQI/RSSI/depth)
+      LQI/RSSI/depth; only direct neighbours have been seen)
 - **Zigbee routers (mains devices: plugs, bulbs) are not tested, and this hub is not
   built for them** (user decision 2026-11-06)
 - [x] **Web server stalls (found and fixed 2026-11-06; re-interview re-tested by the user)**:
@@ -792,7 +871,8 @@ For long tests without a serial cable: log on the board, download later.
       (upstream used `VERIFY_NONE`), failed DERP connects free their TLS context
       (upstream leaked ~20 KB per attempt)
 - [x] microlink + wireguard-lwip in `components/tailscale/` with their licences
-      (`microlink/LICENSE`, `microlink/x25519-license.txt`, `wireguard/LICENSE`).
+      (`microlink/LICENSE`, `microlink/x25519-license.txt`, `wireguard/LICENSE`; the X25519
+      code itself moved to `components/hubcrypto/` with its licence on 2026-11-15).
       Cellular/PPP/AT-socket transport gone; the last dead `ml_at_socket_is_ready()`
       branches and the unbuilt `ml_peer_nvs.c` removed 2026-11-07
 - [x] We own Wi-Fi: `ts_task` starts microlink once the STA has an IP; microlink has
@@ -981,24 +1061,18 @@ Findings, in case it comes back:
 
 ### Phase 5 — Automation (Lua 5.5) (built and mostly verified 2026-11-07; boot-loop guard, RGB LED, new pins, buzzer endurance 2026-11-08; router-off test pending)
 
-**Tests still to do** (user: "tests are last"), in one place:
+**Tests** (user: "tests are last"; the open ones are under Still to do):
 - [x] `zb.on` firing on a real door change: `t_door` logged `Door open=true` → `false`
   (with `zb.get` agreeing) on 2026-11-07 18:33 and 2026-11-08 00:53
 - [x] then a restart: the door's last state must come back (`devices.json` persistence).
   OTA restart 2026-11-08: `t_door` printed `Door open=false` at start, before any report
   (the boot before: `Door open=nil`). Keys stays `nil` until it reports once
-- [ ] router off for an hour: triggers, timers, cron and buzzers keep working; `net.on("down")`
-  fires; a `retry_for` request made offline goes out when the router is back
-  (skipped for now, user 2026-11-08)
 - [x] buzzers audible with `gpio.pattern` (the user listens): `t_buzz` on the hub, both
   buzzers (IO5/IO27, IO6/IO8), full 10 s alarm, 0 resets, heard (2026-11-08; see Phase 1b
   follow-up — the first try reset-looped the hub with the old IO5 → GND seating)
-- [ ] `gpio.on` with an input
 - [x] UI on the phone: Automations layout (Secrets/GPIO moved there, wrapping rows), the
   CodeMirror editor (typing, completion, error line on Save), Settings → Time zone
   (user, 2026-11-08)
-- [ ] the Wi-Fi watchdog's reboot gate deferring for a script (needs a 20+ min outage;
-  skipped for now, user 2026-11-08)
 
 Built in addition to the list below: `zb.devices()`, `timer.cancel(id)` (also cancels
 cron), timers by global function name (survive a restart), `json.encode/decode`,
@@ -1020,8 +1094,7 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
 - [~] API — verified on hardware: `timer.*`, `cron`, `state` (kept across reboots),
   `json`, `http` (HTTPS, POST + headers, LAN plain HTTP, bad host → 0), `secret` + masking,
   `gpio.*`, `net.online`/`net.on("up")`, `zb.devices`/`zb.get`, `zb.on` (door changes, see
-  the tests above). **Not yet observed:** `net.on("down")`, `retry_for` across an outage,
-  `gpio.on`. Last known device state (zone status, on/off, occupancy within 2 s of a
+  the tests above). `net.on("down")`, `retry_for` across an outage and `gpio.on`: see Still to do. Last known device state (zone status, on/off, occupancy within 2 s of a
   change; battery/temperature/humidity at most every 5 min) is saved in `devices.json` and
   restored at boot, so `zb.get` and the UI have it right after a restart (verified
   2026-11-08: the door's state was back after an OTA restart, before any report). Side effect:
@@ -1085,8 +1158,7 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
     this board" (Hardware section), from the C5 datasheet + this board's schematic
   - [x] **the 2026-11-08 allow list is in code** (`auto_gpio.c`, `app.js`, the probe, the
     error message). Verified on the hub: GPIO 0, 1, 2, 7, 25 each configured as an output,
-    driven high/low and read back 1/0
-    - [ ] the hub still boots normally with something attached to 7 and 25 (nothing on them yet)
+    driven high/low and read back 1/0 (booting with something attached to 7 and 25: Still to do)
   - one script owns a pin at a time. **Claims only while the script loads** (user decision
     2026-11-07): any gpio call at top level claims, `gpio.claim(...)` for pins used only in
     handlers; a handler using an unclaimed pin gets an error. So a conflict is reported at
@@ -1179,14 +1251,12 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
     - [x] RTC marker survives a panic: `rtc_kept: true` after every deliberate crash
       (test build: `idf.py -DHUB_TEST_HOOKS=1`, `POST /api/debug/crash`; installed by OTA
       and crashed only after the trial was confirmed)
-    - [ ] RTC survives a real `RTC_PWR_GLITCH`: unknown until one happens — every boot logs
-      "RTC memory kept/not kept" with the reset reason (the canary). The safe-mode counter
-      is in NVS, so safe mode doesn't depend on it
+    - RTC across a real `RTC_PWR_GLITCH`: unknown until one happens (Still to do) — every boot
+      logs "RTC memory kept/not kept" with the reset reason. The safe-mode counter is in NVS,
+      so safe mode doesn't depend on it
     - [x] panic while a pattern plays → next boot: that script disabled with "the hub reset
       (crash) while this script's buzzer was playing…", LED off (was red), the other
       script running, Tailscale and Zigbee back
-    - [ ] the real case: during an alarm the user wiggles a buzzer until the chip resets →
-      one reset, script disabled, no loop
     - [x] safe mode: crash 5 s into each boot (`{"boots": 3}`) → counter 1 → 2 → 3, then "SAFE
       MODE, scripts not started" (the enabled `t_door` stayed stopped), Wi-Fi + Tailscale +
       API up, API `boot.safe_mode: true`; `POST /api/auto/safe` (the banner's "Start
@@ -1205,14 +1275,12 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
     alternation, 0 repeats** (each also seen by `t_door`); **0 resets** (uptime 849 → 992 s
     unbroken, 150 s serial capture with no WARN/ERROR). The first item (50 rounds, 0 resets)
     is covered by this run. Heap afterwards: 69 KB internal free, lowest since boot 30 KB
-    (Phase 5 recorded 37–40; not traced)
+    (Phase 5's 37–40 KB was the engine with no scripts)
   - [x] the same with Wi-Fi load — **passed 2026-11-08**: the 3-buzzer chime, 50 rounds,
     while the dev machine downloaded `cm.js` over the tailnet in a loop (163 × 120 KB = 19.6 MB,
     0 failed) and pinged the LAN IP every 50 ms (2471/2471, avg 21.6 ms, max 93 ms): **0
     resets** (uptime unbroken), 0 Wi-Fi disconnects. Together with the Zigbee run above this
     settles Phase 1b's open question: neither radio makes the buzzers reset the hub
-- [ ] Test: unplug the router for an hour — every trigger and timer still fires,
-      verified from the serial log
 - [x] UI editor (verified by the user, 2026-11-08): paste/edit,
       Save → syntax check (`luaL_loadbuffer`) before storing, enable/disable,
       live log, last error; a load error (e.g. GPIO conflict) is shown at Save with its line.
@@ -1238,13 +1306,13 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
 - [~] Built-in examples: `examples/*.lua` in the repo (since 2026-11-07, user
       request: a clear location), compiled into `app.js` at build time, offered in the editor;
       none is stored on the hub until saved (door opens → buzzer + Alexa URL with `retry_for`; weekday-morning
-      `cron` that logs which doors are still open)
+      `cron` that logs which doors are still open; `morning-check.lua` not run yet: Still to do)
   - [x] `door-alarm.lua` (door names changed to Door/Keys) verified 2026-11-08: Keys opened →
     alarm on buzzers 1 + 2 at once, routine URL (virtualsmarthome.xyz URL Routine Trigger,
     `response=json`, stored as secret `alexa_alarm_url`) → HTTP 200 in 1.5–2.7 s from the hub
     (0.22 s from the dev machine: the hub pays a full TLS handshake), Alexa ran the routine
-    (user). Each opening restarts the alarm and calls the URL again (3 calls in 13 s) — 5b
-    needs one call per alarm. The JSON reply carries `"triggerActivationStatus": "success"`.
+    (user). Each opening restarts the alarm and calls the URL again (3 calls in 13 s); the
+    keys alarm (5b) calls once per alarm. The JSON reply carries `"triggerActivationStatus": "success"`.
     The trigger is a doorbell-type device in Alexa, so Alexa also announces "<trigger> ha
     rilevato un visitatore"
     Changed the same day (user): the alarm plays while a door is open (pattern capped at
@@ -1253,9 +1321,8 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
     called once per alarm start, not on a second door opening. Verified: 4 open/close cycles
     on Keys (open 1–5 s), alarm off the moment Keys closed, each start → HTTP 200 in
     1.6–1.9 s; works "perfectly" (user). Not exercised: two doors at once, an alarm past
-    10 s. A door reopened right after closing starts a new alarm and a new Alexa call
-    (two calls 2 s apart) — 5b should hold off repeat calls
-  - [ ] `morning-check.lua` not run yet
+    10 s (Still to do). A door reopened right after closing starts a new alarm and a new Alexa
+    call (two calls 2 s apart); the keys alarm (5b) holds repeat calls off for 30 s
   - [x] `keys-alarm.lua`: the user's alarm, see Phase 5b
 
 #### Phase 5 findings (2026-11-07)
@@ -1339,15 +1406,13 @@ nothing from Phase 6.
       open without a tap → alarm; tap, open, don't go out, close, later open without a tap →
       alarm
 - [x] The alarm stopped by closing the door, and by a tap (user, 2026-11-08)
-- [ ] Same with the router unplugged: every opening without a tap sounds (no motion signal),
-      Alexa once the router is back
 
 #### Keys alarm (`examples/keys-alarm.lua`): failure decisions (user, 2026-11-08)
 Setup: "Door" contact sensor; "Keys" contact sensor on the inside of the door, a magnet on
 the one key; tapping the key on "Keys" = "I'm leaving with it". No hardware on the market
 tracks where the key is (user), so the hub never knows it: every wrong guess must be an
 alarm, never silence. No procedures: nobody does anything except tap when leaving with the
-key. Design under review: a Door opening is silent only after a Keys tap within the window,
+key. The design (built as `keys-alarm.lua`): a Door opening is silent only after a Keys tap within the window,
 or when the house was still (Wi-Fi sensing, CSI) for a set time before it (coming home);
 anything else sounds the alarm. Every alarm is the same (user): full alarm (3 buzzers,
 Alexa at once) for 10 s, stopped earlier by a Keys tap or the door closing; the tap only
@@ -1365,7 +1430,9 @@ stops it and changes nothing else.
   - F2: B leaves while A has the key → alarm: only if it stops when the door closes
     **and** the hub guarantees A has the key and it isn't in the house
   - F3 (A leaves the key for B, B at home), F4 (delivery, looking out), F5 (second person
-    let in by the first) → alarm: only if the tap that silences it causes no further problem
+    let in by the first) → alarm: only if the tap that silences it causes no further problem.
+    Met: a tap during an alarm only stops it (`keys-alarm.lua`), it doesn't open a window
+  - F2's condition can't be met (the hub never knows where the key is): Still to do
 - Rejected:
   - F12: delaying the Alexa call. Alexa is called the moment the alarm starts
 - Open:
@@ -1382,8 +1449,8 @@ stops it and changes nothing else.
 The motion sensor card (Settings until 2026-11-15, now first on Devices) shows **Moving** / **Not moving**; two buttons are the only calibration:
 "Not moving" (stay still 30 s → still level = p99) and "Moving" (move 15 s → moving level =
 p25); threshold = geometric mean of the two (still only: 2.5 × still; neither: 800), kept in
-NVS. "Moving" = a 500 ms score above the threshold within the last 2 s. Not used by the
-alarm or scripts yet. A first version logged scores and events to LittleFS for analysis;
+NVS. "Moving" = a 500 ms score above the threshold within the last 2 s. Used by scripts
+(`motion.moving`, `motion.moved`), the keys alarm and Home Assistant. A first version logged scores and events to LittleFS for analysis;
 removed at the user's request once the live test below was convincing.
 - How: the hub pings its gateway every 50 ms; the CSI of every frame addressed to the hub is
   scored every 500 ms (mean per-subcarrier std dev of the amplitude normalised per frame,
@@ -1429,10 +1496,6 @@ pins aioesphomeapi 46.25.0). Upstream read for the protocol: ESPHome 2026.10.2 `
 Noise helper and noise component; HA core `esphome/` (entity identity, timestamp handling,
 connect sequence).
 
-**Still open in Phase 6** (details in the items below):
-- [ ] `flash.sh --prov-only --ha` run once (built; the board wasn't on USB)
-- auto discovery cannot be tested yet (see mDNS below)
-
 - [x] **Real Home Assistant** (2026-11-15): the user's HAOS VM (2026.11.1, on another LAN) joined
       the tailnet with the Tailscale **app** (community `a0d7b954_tailscale`, defaults: kernel
       networking, no routes); `ha dns options --servers dns://100.100.100.100` (the app's
@@ -1469,12 +1532,9 @@ connect sequence).
     session (Noise roles unchanged: the device stays responder). ESPHome dials a configured IP,
     or the last client that declared itself a dial-back target (HelloRequest field 4
     `outgoing_connection_target`), after `delay` (default 60 s) with no client. HA 2026.11
-    declares its main session as a target (`declare_outgoing_target=True`); the hub ignores
-    the field today. To build: remember that client's address (NVS, the server task has an
-    internal stack), dial it a few seconds after boot or a drop when nobody is connected, send
-    the server hello first. Also needs a tailnet grant: `tag:server` (the hub) may not open
-    connections to anything today (grants are only admin → * and * → internet), so
-    `tag:server` → HA, tcp:6054
+    declares its main session as a target (`declare_outgoing_target=True`). It needed a
+    tailnet grant: tagged devices could open no connections (the policy's grants were only
+    admin → * and * → internet)
     - built as ESPHome does it: address stored on the flag (NVS "ha"/"dial", written only on
       change), dial 3 s after start / 5 s after the target drops when no target is connected,
       10 s connect timeout, backoff 5 s → 5 min ±20 %, server hello first, then the client
@@ -1499,9 +1559,7 @@ connect sequence).
       turns it on with that key once, then the UI's choice holds). Off → the API server
       never starts, port 6053 closed, nothing advertised. Verified 2026-11-15: off → port
       closed (`nc`), on → listening, off again frees 6.3 KB internal + 279 KB PSRAM
-  - [ ] `flash.sh --prov-only --ha`: built, **not run** (the board's USB wasn't connected on
-    2026-11-15). `.esp/secrets/ha_key` already holds the hub's current key, so running it
-    re-applies the same key and HA keeps working; check the log for "turned on by flash.sh --ha"
+  - `flash.sh --prov-only --ha` built, not run yet (Still to do)
 - [x] **Script entities (user decision 2026-11-07)**, in addition to the devices: one
       switch per script (enable/disable); entities a script publishes through a small Lua
       API (e.g. `ha.sensor(name, value)`, `ha.binary(name, on)`, `ha.event(name)`), so a
@@ -1641,12 +1699,9 @@ connect sequence).
     switched off → its entities unknown (the protocol has no per-entity unavailable). **Auto
     discovery cannot be tested yet** (see mDNS above)
 
-### Phase 7 — Hardening
-- [ ] Soak test 24 h+ (reference repo's worst bugs needed 9 h of uptime)
-- [ ] Internal heap low-water mark measured: Zigbee + Tailscale + UI client + 3 scripts,
-      and the same with HA connected
-- [ ] Zigbee network backup/restore (download from UI)
-- [ ] Factory reset (UI + long-press BOOT button)
+### Phase 7 — Hardening (not started)
+Soak test, heap low-water mark under full load, Zigbee network backup/restore, factory reset:
+all listed under Still to do.
 
 ## Internal RAM
 
@@ -1675,8 +1730,8 @@ Levers, roughly cheapest first — pull only what's needed:
 1. Wi-Fi code out of IRAM (`CONFIG_ESP_WIFI_IRAM_OPT`, `_RX_IRAM_OPT`,
    `_SLP_IRAM_OPT` = n; the boot log shows all three on). On the C5, IRAM code and
    heap share the same 320 KB. Costs Wi-Fi throughput we don't need. Est. tens of KB
-2. Fewer static Wi-Fi RX buffers (`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM`, now 16
-   × ~1.7 KB). 6–8 is plenty here. Est. ~14 KB
+2. Fewer static Wi-Fi RX buffers (`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM`, ~1.7 KB each).
+   Pulled 2026-11-08: 16 → 8
 3. mbedTLS allocations in PSRAM (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`). IDF's warning
    about PSRAM on rev v1.0 only matters with flash encryption, which we don't use —
    anyone with the board can read the flash anyway. Biggest win for Tailscale
@@ -1742,6 +1797,8 @@ All measured there on the same chip; re-verify, don't assume.
 ## Conventions
 
 - C, `snake_case`, statics prefixed `s_`, every `esp_err_t` checked
-- One component per concern; components talk through the event bus, not globals
+- One component per concern; components talk through their public headers (calls, and
+  callbacks that only copy and return, e.g. `zb_add_event_cb`), not globals. No event bus:
+  few fixed consumers, and a bus would cost a queue, a task and internal RAM (2026-11-15)
 - Lengths from the network are bounded before use
 - Each phase's verification evidence (log excerpt, numbers) goes into this file

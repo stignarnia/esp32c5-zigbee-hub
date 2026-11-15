@@ -6,8 +6,13 @@
 > enrollment of battery sensors (tested with contact sensors), Tailscale (direct
 > paths, relays, the "tailnet only, no password" mode), Lua automations with
 > buzzers and HTTP calls, Wi-Fi motion sensing (with the keys alarm built on it), and
-> the Home Assistant integration (tested with Home Assistant 2026.11; discovery on the LAN not
-> yet). Network backup and signed updates are next. [`CLAUDE.md`](CLAUDE.md) tracks the real status, phase by phase.
+> the Home Assistant integration (tested with Home Assistant 2026.11).
+> **Not built yet:** the Zigbee network backup and restore, factory reset, signed updates, and
+> commanding devices (none of the sensors here takes commands).
+> **Built but never tried with a real device of that kind:** temperature, humidity,
+> occupancy, motion, water leak, smoke and CO sensors (only contact sensors were tested),
+> devices behind a repeater, and Home Assistant discovery on the LAN.
+> [`CLAUDE.md`](CLAUDE.md) tracks the real status; its "Still to do" section lists everything open.
 
 A Zigbee 3.0 coordinator, automation engine and web UI on a single ESP32-C5,
 reachable from anywhere over your tailnet. No cloud, no Home Assistant, no MQTT
@@ -40,7 +45,8 @@ Tailscale are conveniences on top:
 - Losing Wi-Fi doesn't interrupt anything. The board reconnects on its own while
   your automations keep firing. If the Wi-Fi chip itself gets stuck, the board
   reboots as a last resort, but only at a moment when no timer is about to fire
-  and nothing is pairing or updating, and pending timers survive the reboot.
+  and nothing is pairing or updating; timers that call a named function survive the
+  reboot.
 - When the radios contend, Zigbee wins.
 - Scripts that call out to the network queue their requests and move on; a dead
   uplink can't stall an automation.
@@ -156,8 +162,8 @@ direct links, with each device's link quality and signal strength.
 
 #### Adding a device
 
-Click **Scan for devices** and the hub opens the Zigbee network for two minutes
-(adjustable), with a countdown. Put your device in pairing mode. For most
+Click **Scan for devices** and the hub opens the Zigbee network for two minutes,
+with a countdown (click again to close it early). Put your device in pairing mode. For most
 battery sensors, that just means inserting the battery: a no-name reed sensor
 straight out of the bag joins, shows up in the list within a second, and reports
 open/closed before you've closed the battery cover.
@@ -601,8 +607,8 @@ What happens:
    keeps running. Zigbee and your automations aren't interrupted during the upload.
 2. It reboots into the new firmware right away: an update is something you
    started on purpose.
-3. The new firmware is **on trial** until Zigbee is up and your automations are
-   running. If it crashes or hangs before that, the board automatically goes back
+3. The new firmware is **on trial** until the Zigbee network is up and the web UI
+   answers, for a few seconds in a row. If it crashes or hangs before that, the board automatically goes back
    to the previous version, and the UI and `flash.sh` tell you it rolled back.
 
 Your Zigbee network, devices, scripts and credentials are untouched by updates.
@@ -617,8 +623,6 @@ USB flashing always works either way.
 
 ```
  Web UI (REST + WebSocket, port 80, LAN + tailnet)
- ─────────────────────────────────────────────────────────────
- Event bus
  ─────────────────────────────────────────────────────────────
  Zigbee        │ Device registry │ Automation     │ Tailscale
  coordinator   │ + persistence   │ engine (Lua)   │ WireGuard
@@ -753,8 +757,8 @@ on the motion sensor's card under Devices (still for 30 s, then moving for 15 s)
 people, move the hub so the area you care about lies between the hub and the router.
 A fan or curtain on that line reads as movement.
 
-**UI not reachable over Tailscale.** The Tailscale page shows the connection
-state. The auth key must be valid and the device approved in the admin console if
+**UI not reachable over Tailscale.** The Status page shows Tailscale's connection
+state (from the LAN). The auth key must be valid and the device approved in the admin console if
 your tailnet requires device approval.
 
 **Pings to the hub vary between a few ms and ~60 ms.** That's the radio being

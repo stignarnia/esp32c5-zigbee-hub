@@ -14,7 +14,7 @@
 #define wireguard_blake2s(out,outlen,key,keylen,in,inlen) blake2s(out,outlen,key,keylen,in,inlen)
 
 // X25519 IMPLEMENTATION
-#include "crypto/refc/x25519.h"
+#include "x25519.h"
 #define wireguard_x25519(a,b,c)	x25519(a,b,c,1)
 
 //#include "crypto/cortex/scalarmult.h"

@@ -22,17 +22,15 @@ idf_component_register(
          "wireguard/crypto/refc/chacha20.c"
          "wireguard/crypto/refc/chacha20poly1305.c"
          "wireguard/crypto/refc/poly1305-donna.c"
-         "wireguard/crypto/refc/x25519.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "microlink" "wireguard" "wireguard/crypto/refc"
     REQUIRES esp_common
-    PRIV_REQUIRES nvs_flash esp_wifi esp_netif esp_event esp_timer lwip mbedtls log
+    PRIV_REQUIRES hubcrypto nvs_flash esp_wifi esp_netif esp_event esp_timer lwip mbedtls log
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE WIREGUARD_CRYPTO_REFC=1)
 # Third-party code: keep its warnings visible but non-fatal.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error)
-set_source_files_properties(wireguard/crypto/refc/x25519.c PROPERTIES COMPILE_FLAGS "-Wno-stringop-overread")
 
 # lwIP input hook (hub_lwip_hooks.h): drop packets for the tailnet IP that arrive on
 # Wi-Fi. lwIP includes the header from its options file, so the define and the

@@ -17,13 +17,12 @@
 #include "microlink_internal.h"
 #include "esp_log.h"
 #include "esp_random.h"
-#include "psa/crypto.h"
 #include <string.h>
 
 static const char *TAG = "ml_noise";
 
-/* X25519 from x25519.h */
-#include "x25519.h"
+/* X25519 and ChaCha20-Poly1305 (components/hubcrypto) */
+#include "hub_crypto.h"
 
 /* BLAKE2s from wireguard-lwip (RFC 7693 reference implementation) */
 #include "blake2s.h"
@@ -148,7 +147,7 @@ static void noise_mix_key(uint8_t ck[32], uint8_t k[32], const uint8_t *dh_outpu
  * ChaCha20-Poly1305 AEAD (Noise uses 64-bit nonce, padded to 96-bit)
  * ========================================================================== */
 
-/* Hub port: mbedTLS 4 made the chachapoly module private; PSA is the API now.
+/* Hub port: mbedTLS 4 made the chachapoly module private; PSA via hub_crypto.h.
  * Keys are volatile and live only for one call (Noise keys change per session and
  * the control connection carries a few messages per minute). */
 
@@ -159,17 +158,6 @@ static void noise_nonce(uint8_t out[12], uint64_t nonce) {
     for (int i = 0; i < 8; i++) out[4 + i] = (uint8_t)(nonce >> (56 - 8 * i));
 }
 
-static psa_status_t aead_key(const uint8_t *key, psa_key_usage_t usage, psa_key_id_t *id) {
-    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attr, PSA_KEY_TYPE_CHACHA20);
-    psa_set_key_bits(&attr, 256);
-    psa_set_key_usage_flags(&attr, usage);
-    psa_set_key_algorithm(&attr, PSA_ALG_CHACHA20_POLY1305);
-    psa_status_t st = psa_import_key(&attr, key, 32, id);
-    psa_reset_key_attributes(&attr);
-    return st;
-}
-
 /* ciphertext layout: encrypted_data(pt_len) + tag(16) */
 static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
                                       const uint8_t *ad, size_t ad_len,
@@ -177,31 +165,16 @@ static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
                                       uint8_t *ciphertext) {
     uint8_t nonce_bytes[12];
     noise_nonce(nonce_bytes, nonce);
-    psa_key_id_t id;
-    psa_status_t st = aead_key(key, PSA_KEY_USAGE_ENCRYPT, &id);
-    if (st != PSA_SUCCESS) return -1;
-    size_t out_len = 0;
-    st = psa_aead_encrypt(id, PSA_ALG_CHACHA20_POLY1305, nonce_bytes, sizeof(nonce_bytes),
-                          ad, ad_len, plaintext, pt_len, ciphertext, pt_len + 16, &out_len);
-    psa_destroy_key(id);
-    return (st == PSA_SUCCESS && out_len == pt_len + 16) ? 0 : -1;
+    return hub_aead_seal(key, nonce_bytes, ad, ad_len, plaintext, pt_len, ciphertext);
 }
 
 static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
                                       const uint8_t *ad, size_t ad_len,
                                       const uint8_t *ciphertext, size_t ct_len,
                                       uint8_t *plaintext) {
-    if (ct_len < 16) return -1;
     uint8_t nonce_bytes[12];
     noise_nonce(nonce_bytes, nonce);
-    psa_key_id_t id;
-    psa_status_t st = aead_key(key, PSA_KEY_USAGE_DECRYPT, &id);
-    if (st != PSA_SUCCESS) return -1;
-    size_t out_len = 0;
-    st = psa_aead_decrypt(id, PSA_ALG_CHACHA20_POLY1305, nonce_bytes, sizeof(nonce_bytes),
-                          ad, ad_len, ciphertext, ct_len, plaintext, ct_len - 16, &out_len);
-    psa_destroy_key(id);
-    return (st == PSA_SUCCESS && out_len == ct_len - 16) ? 0 : -1;
+    return hub_aead_open(key, nonce_bytes, ad, ad_len, ciphertext, ct_len, plaintext);
 }
 
 /* ============================================================================

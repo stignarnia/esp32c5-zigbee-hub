@@ -1431,10 +1431,8 @@ connect sequence).
 
 **Still open in Phase 6** (details in the items below):
 - [ ] `flash.sh --prov-only --ha` run once (built; the board wasn't on USB)
-- [ ] the Settings → Home Assistant card and the motion sensor card on Devices looked at in a
-      browser
-- [ ] optional: ESPHome's outgoing connection (HA listens on 6054; the hub would knock when it
-      is back after a restart: reconnect ~3 s instead of 25 s). Not built
+- [ ] optional: ESPHome's outgoing connection (reconnect ~3 s after a restart instead of 25 s).
+      Not built; see the planned-reboot item under "Real Home Assistant"
 - auto discovery cannot be tested yet (see mDNS below)
 
 - [x] **Real Home Assistant** (2026-11-15): the user's HAOS VM (2026.11.1, on another LAN) joined
@@ -1465,8 +1463,20 @@ connect sequence).
     `hubsys_reboot_pending()` makes the server send DisconnectRequest (as ESPHome does on
     shutdown), close its clients and stop accepting: HA marks everything unavailable 0.1 s
     after the request. Reconnect took 25 s (hub listening again after 2.5 s): HA's retry
-    backoff, with no zeroconf to hear the hub come back. ESPHome's outgoing-connection feature
-    (HA listens on 6054, the device knocks when back) would cut that to ~3 s: not built
+    backoff, with no zeroconf to hear the hub come back
+  - [ ] optional, not built: **outgoing connection** (ESPHome `api: outgoing_connection:`,
+    aioesphomeapi `outgoing_connection.py`, read 2026-11-15). The device dials the client
+    instead of waiting: HA listens on TCP 6054, the device connects and sends its server hello
+    (name + MAC) first, HA picks the key by MAC and adopts that socket as the normal API
+    session (Noise roles unchanged: the device stays responder). ESPHome dials a configured IP,
+    or the last client that declared itself a dial-back target (HelloRequest field 4
+    `outgoing_connection_target`), after `delay` (default 60 s) with no client. HA 2026.11
+    declares its main session as a target (`declare_outgoing_target=True`); the hub ignores
+    the field today. To build: remember that client's address (NVS, the server task has an
+    internal stack), dial it a few seconds after boot or a drop when nobody is connected, send
+    the server hello first. Also needs a tailnet grant: `tag:server` (the hub) may not open
+    connections to anything today (grants are only admin → * and * → internet), so
+    `tag:server` → HA, tcp:6054
 - [x] **Setting** "Home Assistant integration", **off by default**, in the UI
       (Settings → Home Assistant) and as `flash.sh --prov-only --ha` at provisioning (one-shot
       like `--lan-access`: a fresh `ha_nonce` + `ha_key` in `prov`; a nonce not seen before
@@ -1600,8 +1610,8 @@ connect sequence).
 - [x] The web UI is unchanged by the integration (devices, enrollment, network, status);
       it gains the Settings → Home Assistant card (on/off, key + copy, new key, how to add
       it, connection state). Its API is verified (on/off/new key from curl)
-  - [ ] the card itself, and the motion sensor card moved to Devices, not looked at in a
-    browser yet
+  - [x] the card itself, and the motion sensor card moved to Devices: looked at in a browser by
+    the user (2026-11-15)
 - [x] When the setting is off, the ESPHome API code costs no runtime RAM (server
       task and entity table only allocated when it's on). Measured: off 70.5 KB internal
       free / on 64.2 KB (6 KB stack + sockets); PSRAM +279 KB on. A tiny event queue

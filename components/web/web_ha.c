@@ -25,6 +25,7 @@ static esp_err_t reply(httpd_req_t *req)
     cJSON_AddStringToObject(o, "client", s.client);
     cJSON_AddNumberToObject(o, "connects", s.connects);
     cJSON_AddNumberToObject(o, "rejected", s.rejected);
+    cJSON_AddStringToObject(o, "dial_target", s.dial_target);
     cJSON_AddStringToObject(o, "hostname", web_hostname());
     cJSON_AddBoolToObject(o, "lan_open", web_lan_open());
     cJSON_AddStringToObject(o, "tailnet_name", t.name);

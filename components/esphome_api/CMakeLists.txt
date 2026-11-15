@@ -5,5 +5,5 @@ idf_component_register(
     PRIV_INCLUDE_DIRS "."
     REQUIRES esp_common automation zb
     PRIV_REQUIRES hubcrypto mbedtls lwip nvs_flash esp_timer esp_app_format esp_hw_support log freertos heap
-                  hublog hubsys motion wifi5g espressif__mdns
+                  hublog hubsys motion tailscale wifi5g espressif__mdns
 )

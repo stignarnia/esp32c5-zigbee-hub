@@ -817,7 +817,8 @@ const haui = {
         : d.clients ? `<span class="badge ok">connected</span> ${esc(d.client || 'a client')}`
         : '<span class="badge">waiting for Home Assistant</span>';
       $('#ha-count').textContent = `${d.entities} entities on ${d.devices} devices besides the hub itself`
-        + (d.rejected ? ` · ${d.rejected} refused (wrong key or not allowed)` : '');
+        + (d.rejected ? ` · ${d.rejected} refused (wrong key or not allowed)` : '')
+        + (d.dial_target ? ` · after a restart the hub calls Home Assistant back at ${d.dial_target}, port 6054` : '');
     }
   },
   draw(card, d) {

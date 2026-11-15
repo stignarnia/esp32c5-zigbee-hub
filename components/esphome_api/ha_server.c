@@ -10,6 +10,13 @@
 // Never in Zigbee's way: it reads snapshots (zb_snapshot takes the registry lock for a
 // copy), is woken by polling revisions every 100 ms, and blocks on nothing but its own
 // sockets (send timeout 2 s, then that client is dropped).
+//
+// Outgoing connection (ESPHome's `api: outgoing_connection:`, api_outgoing_connection.cpp):
+// a client that declares itself a dial-back target (HelloRequest field 4, only after its key
+// was verified) has its address remembered in NVS. While no such client is connected, the
+// hub dials that address on TCP 6054 itself, sends its server hello first, and the session
+// continues as usual (the hub stays the Noise responder). Home Assistant adopts the socket,
+// so it is back seconds after a hub restart instead of after its retry backoff.
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +24,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+
+#include <fcntl.h>
 
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -35,6 +44,8 @@
 #include "mbedtls/base64.h"
 #include "mdns.h"
 #include "nvs.h"
+#include "tailscale.h"
+#include "wifi5g.h"
 
 static const char *TAG = "ha";
 
@@ -53,6 +64,14 @@ static const char *TAG = "ha";
 #define NVS_NS             "ha"
 #define TASK_STACK         5120            // internal: a SwitchCommand saves the script list to flash (used 2.5 KB)
 
+#define DIAL_PORT          6054
+#define DIAL_BOOT_WAIT_US  (3LL * 1000000)    // after the server starts, before the first dial
+#define DIAL_IDLE_WAIT_US  (5LL * 1000000)    // after the target left: its own reconnect goes first
+#define DIAL_PRECOND_US    (1LL * 1000000)    // re-check Wi-Fi / Tailscale / a free slot
+#define DIAL_CONNECT_US    (10LL * 1000000)
+#define DIAL_BACKOFF_MIN   (5LL * 1000000)    // ESPHome's values: 5 s doubling to 5 min, ±20 %
+#define DIAL_BACKOFF_MAX   (300LL * 1000000)
+
 #define API_MAJOR          1
 #define API_MINOR          19              // what ESPHome 2026.10 speaks
 #define ESPHOME_COMPAT     "2026.10.2"
@@ -68,12 +87,16 @@ enum { MSG_HELLO_REQ = 1, MSG_HELLO_RSP = 2, MSG_AUTH_REQ = 3, MSG_DISC_REQ = 5,
        MSG_ST_BINARY = 21, MSG_ST_SENSOR = 25, MSG_ST_SWITCH = 26, MSG_ST_TEXT = 27, MSG_EVENT = 108,
        MSG_SWITCH_CMD = 33, MSG_BUTTON_CMD = 62, MSG_CAPS_REQ = 149, MSG_CAPS_RSP = 150 };
 
-typedef enum { CS_FREE = 0, CS_HELLO, CS_HANDSHAKE, CS_DATA } cstate_t;
+// CS_HELLO_OUT: a connection the hub dialed; its server hello is already sent
+typedef enum { CS_FREE = 0, CS_HELLO, CS_HELLO_OUT, CS_HANDSHAKE, CS_DATA } cstate_t;
+typedef enum { DIAL_IDLE = 0, DIAL_WAIT, DIAL_CONNECTING } dial_state_t;
 
 typedef struct {
     int fd;
     uint8_t state;
     bool subscribed;
+    bool target;                  // declared itself a dial-back target
+    bool dialed;                  // the hub opened this connection
     size_t rx_len;
     int64_t opened_us, last_rx_us, ping_us;
     char peer[16];
@@ -98,6 +121,10 @@ typedef struct {
     uint8_t msg[4 + MSG_CAP];     // header room + protobuf
     uint8_t tx[TX_CAP];
     size_t tx_len;
+    int dial_fd;
+    uint8_t dial_state;           // dial_state_t
+    bool target_was_up;
+    int64_t dial_at_us, dial_started_us, dial_backoff_us;
 } srv_t;
 
 typedef struct {
@@ -120,6 +147,7 @@ static volatile uint32_t s_connects, s_rejected;
 static char s_last_client[48];
 static bool (*s_filter)(int fd);
 static QueueHandle_t s_evq;                 // ha.event() from the automation task
+static uint32_t s_dial_ip;                  // remembered dial-back target, network order, 0 = none
 
 // ---- settings ------------------------------------------------------------------------------------
 
@@ -196,9 +224,24 @@ static bool send_all(int fd, const uint8_t *p, size_t n)
     return true;
 }
 
+static void dial_wait(srv_t *S, int64_t now, int64_t wait);
+static void dial_retry(srv_t *S, int64_t now);
+
 static void close_client(client_t *c, const char *why)
 {
     if (c->state == CS_FREE) return;
+    if (c->dialed && s_srv) {
+        // A dialed session that ended normally waits the idle time; one that died before
+        // its handshake finished counts as a failed dial (backoff grows)
+        if (c->state == CS_DATA) {
+            s_srv->dial_backoff_us = DIAL_BACKOFF_MIN;
+            dial_wait(s_srv, esp_timer_get_time(), DIAL_IDLE_WAIT_US);
+        } else {
+            dial_retry(s_srv, esp_timer_get_time());
+        }
+    }
+    c->dialed = false;
+    c->target = false;
     if (c->state == CS_DATA) {
         s_clients--;
         ESP_LOGI(TAG, "%s (%s) disconnected: %s", c->info[0] ? c->info : "client", c->peer, why);
@@ -422,6 +465,7 @@ static void send_device_info(srv_t *S, client_t *c)
     pb_str(&w, 12, "Espressif");
     pb_str(&w, 13, "Zigbee Hub");
     pb_bool(&w, 19, true);
+    pb_bool(&w, 27, true);  // api_outgoing_connection_supported
     const ha_model_t *m = S->model;
     for (int i = 0; i < m->n_dev; i++) {
         uint8_t sub[64];
@@ -454,13 +498,35 @@ static uint32_t cmd_key(const uint8_t *p, size_t n, bool *state)
     return key;
 }
 
+// A key-verified client declared itself a dial-back target: remember where it connected from.
+// Written to NVS only when it changes (the server task has an internal stack).
+static void remember_target(client_t *c)
+{
+    struct sockaddr_in a;
+    socklen_t al = sizeof(a);
+    if (getpeername(c->fd, (struct sockaddr *)&a, &al) != 0 || a.sin_family != AF_INET) return;
+    if (a.sin_addr.s_addr == s_dial_ip) return;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u32(h, "dial", a.sin_addr.s_addr);
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    s_dial_ip = a.sin_addr.s_addr;  // used this boot even if the write failed
+    if (err == ESP_OK) ESP_LOGI(TAG, "remembered %s as the dial-back address of %s", c->peer, c->info);
+    else ESP_LOGW(TAG, "dial-back address %s not saved: %s", c->peer, esp_err_to_name(err));
+}
+
 static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *p, size_t n)
 {
     switch (type) {
     case MSG_HELLO_REQ: {
         pb_r_t r = {p, p + n};
         pb_field_t f;
+        bool wants_dial_back = false;
         while (pb_next(&r, &f)) {
+            if (f.field == 4 && f.wire == 0) wants_dial_back = f.v != 0;
             if (f.field == 1 && f.wire == 2) {
                 size_t k = 0;
                 for (size_t i = 0; i < f.len && k < sizeof(c->info) - 1; i++) {
@@ -480,7 +546,12 @@ static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *
         pb_str(&w, 4, s_host);
         out_msg(S, c, MSG_HELLO_RSP, &w);
         strlcpy(s_last_client, c->info, sizeof(s_last_client));
-        ESP_LOGI(TAG, "%s connected from %s", c->info[0] ? c->info : "client", c->peer);
+        ESP_LOGI(TAG, "%s connected from %s%s", c->info[0] ? c->info : "client", c->peer,
+                 c->dialed ? " (dialed by the hub)" : "");
+        if (wants_dial_back && !c->target) {
+            c->target = true;  // only reachable after the Noise handshake: the key is verified
+            remember_target(c);
+        }
         break;
     }
     case MSG_AUTH_REQ:      // no passwords: the Noise key is the authentication
@@ -543,10 +614,23 @@ static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *
 
 // ---- incoming frames ----------------------------------------------------------------------------
 
+// Server hello: chosen protocol 0x01, our name and MAC (Home Assistant checks both; on a
+// dialed connection it picks the key by the MAC)
+static bool send_server_hello(client_t *c)
+{
+    uint8_t hello[1 + sizeof(s_host) + sizeof(s_mac_hex)];
+    size_t hn = strlen(s_host) + 1, mn = strlen(s_mac_hex) + 1;
+    hello[0] = 0x01;
+    memcpy(hello + 1, s_host, hn);
+    memcpy(hello + 1 + hn, s_mac_hex, mn);
+    return send_raw_frame(c, hello, 1 + hn + mn);
+}
+
 static void handle_frame(srv_t *S, client_t *c, const uint8_t *p, size_t n, int64_t now)
 {
     switch (c->state) {
-    case CS_HELLO: {
+    case CS_HELLO:
+    case CS_HELLO_OUT: {
         // Prologue = "NoiseAPIInit" + be16 length + the client hello (its content is
         // reserved for flags; mixing it in makes a tampered hello fail the handshake)
         uint8_t pro[12 + 2 + HANDSHAKE_MAX];
@@ -554,13 +638,8 @@ static void handle_frame(srv_t *S, client_t *c, const uint8_t *p, size_t n, int6
         pro[12] = n >> 8;
         pro[13] = n & 0xFF;
         memcpy(pro + 14, p, n);
-        // Server hello: chosen protocol 0x01, our name and MAC (Home Assistant checks both)
-        uint8_t hello[1 + sizeof(s_host) + sizeof(s_mac_hex)];
-        size_t hn = strlen(s_host) + 1, mn = strlen(s_mac_hex) + 1;
-        hello[0] = 0x01;
-        memcpy(hello + 1, s_host, hn);
-        memcpy(hello + 1 + hn, s_mac_hex, mn);
-        if (!send_raw_frame(c, hello, 1 + hn + mn)) {
+        // A dialed connection sent its server hello when it connected
+        if (c->state == CS_HELLO && !send_server_hello(c)) {
             close_client(c, "send failed");
             return;
         }
@@ -686,6 +765,7 @@ static void accept_client(srv_t *S, int64_t now)
     c->state = CS_HELLO;
     c->rx_len = 0;
     c->subscribed = false;
+    c->target = c->dialed = false;
     c->opened_us = c->last_rx_us = now;
     c->ping_us = 0;
     c->info[0] = '\0';
@@ -819,6 +899,138 @@ static void keepalive(srv_t *S, int64_t now)
     }
 }
 
+// ---- outgoing connection --------------------------------------------------------------------------
+
+static void dial_close(srv_t *S)
+{
+    if (S->dial_fd >= 0) close(S->dial_fd);
+    S->dial_fd = -1;
+}
+
+static void dial_wait(srv_t *S, int64_t now, int64_t wait)
+{
+    dial_close(S);
+    S->dial_state = DIAL_WAIT;
+    S->dial_at_us = now + wait;
+}
+
+static void dial_retry(srv_t *S, int64_t now)
+{
+    int64_t b = S->dial_backoff_us, span = b / 5;
+    dial_wait(S, now, b - span + (int64_t)(esp_random() % (uint32_t)(2 * span + 1)));
+    S->dial_backoff_us = b * 2 > DIAL_BACKOFF_MAX ? DIAL_BACKOFF_MAX : b * 2;
+}
+
+static client_t *free_slot(srv_t *S)
+{
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (S->cl[i].state == CS_FREE) return &S->cl[i];
+    }
+    return NULL;
+}
+
+static void dial_start(srv_t *S, int64_t now)
+{
+    wifi5g_stats_t w;
+    wifi5g_get_stats(&w);
+    bool tailnet = (ntohl(s_dial_ip) & 0xFFC00000u) == 0x64400000u;  // 100.64.0.0/10
+    if (!w.connected || (tailnet && !ts_tailnet_ip()) || !free_slot(S)) {
+        dial_wait(S, now, DIAL_PRECOND_US);  // not a failure: no backoff
+        return;
+    }
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0 || fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) != 0) {
+        if (fd >= 0) close(fd);
+        dial_retry(S, now);
+        return;
+    }
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(DIAL_PORT), .sin_addr.s_addr = s_dial_ip};
+    char ip[16];
+    inet_ntoa_r(a.sin_addr, ip, sizeof(ip));
+    ESP_LOGI(TAG, "dialing Home Assistant at %s:%d", ip, DIAL_PORT);
+    S->dial_fd = fd;
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0 && errno != EINPROGRESS) {
+        ESP_LOGI(TAG, "dial: connect failed (errno %d)", errno);
+        dial_retry(S, now);
+        return;
+    }
+    S->dial_state = DIAL_CONNECTING;
+    S->dial_started_us = now;
+}
+
+// The dialing socket became writable: connected or failed.
+static void dial_finish(srv_t *S, int64_t now)
+{
+    int err = 0;
+    socklen_t el = sizeof(err);
+    if (getsockopt(S->dial_fd, SOL_SOCKET, SO_ERROR, &err, &el) != 0 || err != 0) {
+        ESP_LOGI(TAG, "dial: connect failed (errno %d)", err);
+        dial_retry(S, now);
+        return;
+    }
+    client_t *c = free_slot(S);
+    if (!c) {
+        dial_wait(S, now, DIAL_PRECOND_US);
+        return;
+    }
+    int fd = S->dial_fd;
+    S->dial_fd = -1;
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) & ~O_NONBLOCK);
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    struct timeval tv = {.tv_sec = 2};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct in_addr ia = {.s_addr = s_dial_ip};
+    c->fd = fd;
+    c->state = CS_HELLO_OUT;
+    c->rx_len = 0;
+    c->subscribed = false;
+    c->target = false;
+    c->dialed = true;
+    c->opened_us = c->last_rx_us = now;
+    c->ping_us = 0;
+    c->info[0] = '\0';
+    inet_ntoa_r(ia, c->peer, sizeof(c->peer));
+    S->dial_state = DIAL_IDLE;  // a live dialed connection gates further dials
+    if (!send_server_hello(c)) close_client(c, "dial: server hello not sent");
+}
+
+static void dial_step(srv_t *S, int64_t now)
+{
+    bool target_up = false, dialed_live = false;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        const client_t *c = &S->cl[i];
+        target_up |= c->state == CS_DATA && c->target;
+        dialed_live |= c->state != CS_FREE && c->dialed;
+    }
+    if (target_up) {
+        dial_close(S);
+        S->dial_state = DIAL_IDLE;
+        S->dial_backoff_us = DIAL_BACKOFF_MIN;
+        S->target_was_up = true;
+        return;
+    }
+    if (S->target_was_up) {
+        S->target_was_up = false;
+        dial_wait(S, now, DIAL_IDLE_WAIT_US);  // its own reconnect goes first
+    }
+    if (dialed_live || !s_dial_ip) return;
+    switch (S->dial_state) {
+    case DIAL_IDLE:
+        dial_wait(S, now, DIAL_IDLE_WAIT_US);
+        break;
+    case DIAL_WAIT:
+        if (now >= S->dial_at_us) dial_start(S, now);
+        break;
+    case DIAL_CONNECTING:
+        if (now - S->dial_started_us > DIAL_CONNECT_US) {
+            ESP_LOGI(TAG, "dial: no answer within %lld s", DIAL_CONNECT_US / 1000000);
+            dial_retry(S, now);
+        }
+        break;
+    }
+}
+
 // ---- the task -----------------------------------------------------------------------------------
 
 static int open_listener(void)
@@ -847,6 +1059,9 @@ static void server_task(void *arg)
     S->zrev = zb_revision();
     S->arev = automation_ha_revision();
     S->listen_fd = -1;
+    S->dial_fd = -1;
+    S->dial_backoff_us = DIAL_BACKOFF_MIN;
+    dial_wait(S, esp_timer_get_time(), DIAL_BOOT_WAIT_US);
     int64_t retry_us = 0;
     bool goodbye = false;
     ESP_LOGI(TAG, "Home Assistant API on, %d entities on %d sub-devices", S->model->n_ent, S->model->n_dev);
@@ -864,6 +1079,7 @@ static void server_task(void *arg)
             }
             if (S->listen_fd >= 0) close(S->listen_fd);
             S->listen_fd = -1;
+            dial_close(S);
         }
         if (S->listen_fd < 0 && now >= retry_us && !goodbye) {
             S->listen_fd = open_listener();
@@ -887,9 +1103,16 @@ static void server_task(void *arg)
             FD_SET(S->cl[i].fd, &rs);
             if (S->cl[i].fd > maxfd) maxfd = S->cl[i].fd;
         }
+        fd_set ws;
+        FD_ZERO(&ws);
+        if (S->dial_fd >= 0) {
+            FD_SET(S->dial_fd, &ws);
+            if (S->dial_fd > maxfd) maxfd = S->dial_fd;
+        }
         struct timeval tv = {.tv_usec = 100 * 1000};
-        int r = maxfd >= 0 ? select(maxfd + 1, &rs, NULL, NULL, &tv) : (vTaskDelay(pdMS_TO_TICKS(100)), 0);
+        int r = maxfd >= 0 ? select(maxfd + 1, &rs, &ws, NULL, &tv) : (vTaskDelay(pdMS_TO_TICKS(100)), 0);
         now = esp_timer_get_time();
+        if (r > 0 && S->dial_fd >= 0 && FD_ISSET(S->dial_fd, &ws)) dial_finish(S, now);
         if (r > 0) {
             if (S->listen_fd >= 0 && FD_ISSET(S->listen_fd, &rs)) accept_client(S, now);
             for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -904,8 +1127,10 @@ static void server_task(void *arg)
         update(S, now);
         deliver_events(S);
         keepalive(S, now);
+        if (!goodbye) dial_step(S, now);
     }
 
+    dial_close(S);
     close_all(S, "Home Assistant integration turned off");
     if (S->listen_fd >= 0) close(S->listen_fd);
     mdns_del();
@@ -969,6 +1194,7 @@ esp_err_t ha_init(const char *hostname, const char *prov_nonce, const char *prov
         s_enabled = on;
         s_have_key = nvs_get_blob(h, "key", s_key, &kl) == ESP_OK && kl == 32;
         if (nvs_get_str(h, "nonce", seen, &sl) != ESP_OK) seen[0] = '\0';
+        if (nvs_get_u32(h, "dial", &s_dial_ip) != ESP_OK) s_dial_ip = 0;
         nvs_close(h);
     }
     // flash.sh --ha: a nonce not seen before turns the integration on with its key
@@ -1015,6 +1241,10 @@ void ha_get_status(ha_status_t *out)
     out->connects = s_connects;
     out->rejected = s_rejected;
     strlcpy(out->client, s_last_client, sizeof(out->client));
+    if (s_dial_ip) {
+        struct in_addr a = {.s_addr = s_dial_ip};
+        inet_ntoa_r(a, out->dial_target, sizeof(out->dial_target));
+    }
     if (s_have_key) {
         uint8_t k[32];
         size_t n = 0;

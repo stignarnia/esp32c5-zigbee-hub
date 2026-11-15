@@ -519,8 +519,10 @@ they're derived from each device's hardware address (or the script's name) and f
 entity names.
 
 When the hub restarts (an update, Settings → Restart) it tells Home Assistant first, so
-its entities show *unavailable* at once rather than stale values; Home Assistant connects
-again by itself, within about half a minute.
+its entities show *unavailable* at once rather than stale values. Once it's back, the hub
+calls Home Assistant itself (ESPHome's outgoing connection, TCP 6054 on Home Assistant), so
+it reconnects in about 10 seconds; if your Tailscale policy doesn't let the hub reach Home
+Assistant on that port, Home Assistant reconnects on its own within about half a minute.
 
 The connection is encrypted (ESPHome's Noise protocol, no plaintext fallback). **New
 key** under Settings replaces it (Home Assistant then asks for the new one). If Home

@@ -1431,8 +1431,6 @@ connect sequence).
 
 **Still open in Phase 6** (details in the items below):
 - [ ] `flash.sh --prov-only --ha` run once (built; the board wasn't on USB)
-- [ ] optional: ESPHome's outgoing connection (reconnect ~3 s after a restart instead of 25 s).
-      Not built; see the planned-reboot item under "Real Home Assistant"
 - auto discovery cannot be tested yet (see mDNS below)
 
 - [x] **Real Home Assistant** (2026-11-15): the user's HAOS VM (2026.11.1, on another LAN) joined
@@ -1464,7 +1462,7 @@ connect sequence).
     shutdown), close its clients and stop accepting: HA marks everything unavailable 0.1 s
     after the request. Reconnect took 25 s (hub listening again after 2.5 s): HA's retry
     backoff, with no zeroconf to hear the hub come back
-  - [ ] optional, not built: **outgoing connection** (ESPHome `api: outgoing_connection:`,
+  - [x] **outgoing connection** (built and verified 2026-11-15; ESPHome `api: outgoing_connection:`,
     aioesphomeapi `outgoing_connection.py`, read 2026-11-15). The device dials the client
     instead of waiting: HA listens on TCP 6054, the device connects and sends its server hello
     (name + MAC) first, HA picks the key by MAC and adopts that socket as the normal API
@@ -1477,6 +1475,24 @@ connect sequence).
     the server hello first. Also needs a tailnet grant: `tag:server` (the hub) may not open
     connections to anything today (grants are only admin → * and * → internet), so
     `tag:server` → HA, tcp:6054
+    - built as ESPHome does it: address stored on the flag (NVS "ha"/"dial", written only on
+      change), dial 3 s after start / 5 s after the target drops when no target is connected,
+      10 s connect timeout, backoff 5 s → 5 min ±20 %, server hello first, then the client
+      hello into the prologue as usual; DeviceInfo field 27 set. Tailnet targets wait for
+      Tailscale to be up. The user added a policy grant: host `zigbee-hub` → host
+      `homeassistant`, tcp:6054 only
+    - verified: HA declared itself, the hub remembered 100.x of HA; restart → HA unavailable
+      0.8 s after the request, hub dialed at 8.7 s after boot (as Tailscale came up),
+      connected 0.23 s later "(dialed by the hub)": **HA back 10.5 s after the request** (was
+      25 s). The very first dial after the update got no answer within 10 s, cause unknown
+      (not reproduced on the next restart); the retry was overtaken by HA's own reconnect.
+      Costs only time: worst case HA is back as slowly as before (its own retries)
+    - by design: the tailnet-only check counts Tailscale as up only once it is fully
+      connected, so HA's own retries that arrive through the tunnel before that (seen at 7.1 s,
+      "connected" at 8.7 s) are refused; the dial covers it (user, 2026-11-15: correct as is)
+    - seen once, not chased: a Tailscale control-connection drop 77 s after a boot
+      (`coord_recv failed`, reconnected in 3 s); the WireGuard tunnel and HA's session were
+      unaffected
 - [x] **Setting** "Home Assistant integration", **off by default**, in the UI
       (Settings → Home Assistant) and as `flash.sh --prov-only --ha` at provisioning (one-shot
       like `--lan-access`: a fresh `ha_nonce` + `ha_key` in `prov`; a nonce not seen before

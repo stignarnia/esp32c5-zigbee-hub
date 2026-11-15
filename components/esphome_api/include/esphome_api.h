@@ -9,7 +9,10 @@
 // the Zigbee callback only wakes it), and with the setting off it costs no RAM (the task,
 // sockets and entity table exist only while it is on).
 //
-// Settings: app NVS namespace "ha" (on/off, the 32-byte Noise key). `flash.sh --ha`
+// Outgoing connection: a client that asks for it (Home Assistant does) is dialed back on
+// TCP 6054 whenever none is connected, so it returns seconds after a hub restart.
+//
+// Settings: app NVS namespace "ha" (on/off, the 32-byte Noise key, the dial-back address). `flash.sh --ha`
 // writes a nonce + key into the prov partition; a nonce not seen before turns the
 // integration on with that key once, after which the UI's choice holds again.
 #pragma once
@@ -30,6 +33,7 @@ typedef struct {
     char client[48];         // what the last client called itself ("Home Assistant 2026.11.1")
     uint32_t connects;       // handshakes completed since boot
     uint32_t rejected;       // handshakes refused (wrong key, plaintext client, filter)
+    char dial_target[16];    // where the hub dials Home Assistant back (TCP 6054), "" = nobody asked
 } ha_status_t;
 
 // Loads the settings, applies a new prov nonce (prov_nonce "" = none), and starts the

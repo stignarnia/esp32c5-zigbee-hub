@@ -368,14 +368,10 @@ static void time_update(void)
     ezb_zcl_set_attr_value(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_TIME_ZONE_ID, EZB_ZCL_STD_MANUF_CODE, &zone, false);
     ezb_zcl_set_attr_value(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_DST_SHIFT_ID, EZB_ZCL_STD_MANUF_CODE, &shift, false);
     ezb_zcl_set_attr_value(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_LOCAL_TIME_ID, EZB_ZCL_STD_MANUF_CODE, &local, false);
-    if (!logged) {  // once per boot: what the stack serves as Time, against the clock
+    if (!logged) {  // once per boot, when the clock is first set
         logged = true;
-        uint32_t served = 0;
-        ezb_zcl_attr_desc_t a = ezb_zcl_get_attr_desc(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_TIME_ID,
-                                                      EZB_ZCL_STD_MANUF_CODE);
-        if (a != EZB_INVALID_ZCL_ATTR_DESC) ezb_zcl_attr_desc_get_value(a, &served);
-        ESP_LOGI(TAG, "time server: Time attribute %lu, clock %lu (ZCL seconds), zone %ld s, DST %ld s",
-                 (unsigned long)served, (unsigned long)zcl_utc_now(), (long)zone, (long)shift);
+        ESP_LOGI(TAG, "time server: clock %lu (ZCL seconds), zone %ld s, DST %ld s", (unsigned long)zcl_utc_now(),
+                 (long)zone, (long)shift);
     }
 }
 

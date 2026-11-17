@@ -916,11 +916,16 @@ For long tests without a serial cable: log on the board, download later.
       `ezb_zcl_time_server_interface_register` (`get_utc_time` returns ZCL time, seconds since
       2000-01-01 UTC, 0xFFFFFFFF until SNTP); the other four are set every second on the Zigbee
       task (TimeStatus master | synchronised | master zone/DST). The stored Time attribute stays
-      0xFFFFFFFF (logged once per boot with the clock: 848261928 = 20:18:48 UTC, zone 3600,
-      DST 0). First attempt wrote the Time attribute with `ezb_zcl_set_attr_value` and had no
+      0xFFFFFFFF: the stack answers reads from the callback. **Answer verified** with a temporary
+      self-check (the hub read its own Time cluster over Zigbee, so the stack built the same
+      reply a device gets; removed after): Time 848266128 = 21:28:48 UTC, 0 s from the clock,
+      TimeStatus 0x07, TimeZone 3600, DstShift 0, LocalTime 22:28:48. A temporary APS hook logging
+      every request for the Time cluster saw that self-check read; no request from the plug in
+      the minutes it ran (it was removed before the plug could be power-cycled). First attempt wrote the Time attribute with `ezb_zcl_set_attr_value` and had no
       interface: an assertion in the stack on the trial boot (`zigbee` task, `__assert_func`,
       core dump without a usable backtrace), rolled back by the bootloader as designed; the
       board wasn't on USB, so the assertion text wasn't captured. Not seen yet: a device reading it
+      (the S60ZBTPF may ask only at power-up)
 - [x] **Network map drawn** (2026-11-17): SVG, hub in the middle, every device around it; a line
       per direct link from the neighbour table, coloured by LQI, dashed for sleepy end devices;
       square = router, circle = end device; devices not in the table sit unlinked ("route

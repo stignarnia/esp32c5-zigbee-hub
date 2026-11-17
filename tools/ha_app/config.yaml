@@ -1,0 +1,20 @@
+name: Zigbee Hub
+version: "1.0.0"
+slug: zigbee_hub
+description: Reverse proxy to the ESP32-C5 Zigbee Hub web UI over Tailscale
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: services
+boot: auto
+ingress: true
+ingress_port: 8099
+ingress_stream: true
+panel_icon: mdi:zigbee
+panel_title: Zigbee Hub
+panel_admin: false
+options:
+  upstream: "100.76.61.43:80"
+schema:
+  upstream: "match(^[A-Za-z0-9._-]+(:[0-9]{1,5})?$)"

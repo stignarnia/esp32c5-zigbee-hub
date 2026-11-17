@@ -220,6 +220,7 @@ tools/
   gpio_probe/    Phase 1b buzzer/GPIO probe firmware
   codemirror/    editor bundle: pinned package.json + lockfile, entry.js, build.sh, LICENSE
   lua/hub.lua    the hub's Lua API as LuaLS definitions (completion, no "undefined global")
+  ha_app/        local Home Assistant Ingress app (nginx reverse proxy to the hub's UI)
 ```
 
 ### Partition table (16 MB)
@@ -1800,6 +1801,25 @@ connect sequence).
     key, devices and entities right, a script's new entities added while every device stayed,
     switched off → its entities unknown (the protocol has no per-entity unavailable). **Auto
     discovery cannot be tested yet** (see mDNS above)
+- [x] **The hub's UI inside Home Assistant** (2026-11-17, for networks that reach HA but not the
+      tailnet): local HA app `local_zigbee_hub` (`tools/ha_app/`, installed in
+      `/mnt/data/supervisor/apps/local/zigbee_hub` on the HAOS VM), Alpine 3.24 + nginx 1.30.6
+      reverse proxy to the hub's tailnet IP on Ingress port 8099 (`allow 172.30.32.2; deny all`),
+      shown as a sidebar panel ("Zigbee Hub", `mdi:zigbee`, `panel_admin: false`).
+  - UI (`index.html`, `app.js`) switched to relative paths (`style.css`, `app.js`, `cm.js`,
+    `favicon.svg`, `api/…`, and `new URL('ws', location.href)` for the WebSocket) so it works
+    both at `/` and under `/api/hassio_ingress/<token>/`; `Content-Security-Policy` in
+    `web_server.c` changed from `frame-ancestors 'none'` to `frame-ancestors 'self'` so the
+    same-origin HA Ingress iframe can frame it
+  - **Header limit**: `esp_http_server`'s `CONFIG_HTTPD_MAX_REQ_HDR_LEN` is 1024 B; browser
+    requests through HA Ingress carry Authentik + `ingress_session` cookies, `User-Agent`, `Sec-*`
+    and Supervisor's `X-Remote-User-*` / `X-Ingress-Path` headers and hit `431 Header fields are
+    too long`. Fixed in `tools/ha_app/run.sh`: `proxy_pass_request_headers off`, forwarding only
+    the headers the hub uses (`Host`, `If-None-Match`, `X-Hub`, `hub_session` cookie if present,
+    `Content-Type`, `Content-Length`, and WebSocket upgrade headers)
+  - verified: direct HTTP + WebSocket over the tailnet (`200` on all assets and APIs, `zb` +
+    `status` pushes on `/ws`) and visually in the Home Assistant sidebar panel by the user
+    (2026-11-17)
 
 ### Phase 7 — Hardening (soak test done; the rest not started)
 Heap low-water mark under full load, Zigbee network backup/restore, factory reset: listed under
@@ -1904,6 +1924,8 @@ All measured there on the same chip; re-verify, don't assume.
 - **Router**: test on DFS channel 52 first; move to 36–48 only if measurements are bad.
 - **Tailnet-only access**: once Tailscale works, an option to drop the password
   and listen only on the Tailscale interface (Phase 4, "Access mode").
+- **The hub's UI proxied through Home Assistant needs no password** (2026-11-17): the HA UI is
+  trusted; whoever can open HA may control the hub.
 
 ## Conventions
 

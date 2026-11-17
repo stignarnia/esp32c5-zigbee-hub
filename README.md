@@ -542,6 +542,14 @@ Assistant runs somewhere else on your tailnet, add the hub manually as
 Assistant OS with the Tailscale app, run `ha dns options --servers dns://100.100.100.100`
 once (the app's documented step), or tailnet names won't resolve in Home Assistant.
 
+**The hub's UI inside Home Assistant.** To open the hub's own web UI (devices, network map,
+Lua script editor, logs, firmware updates) from a browser that reaches Home Assistant without
+Tailscale, copy [`tools/ha_app/`](tools/ha_app/) to `/addons/zigbee_hub` on Home Assistant OS
+(`/mnt/data/supervisor/apps/local/zigbee_hub`), set `upstream` to the hub's address, install it
+and turn on **Show in sidebar**. It runs a small nginx reverse proxy (with WebSocket passthrough)
+behind Home Assistant Ingress, so the UI opens as a **Zigbee Hub** panel in the Home Assistant
+sidebar.
+
 ### Tailscale
 
 On the Status page: connection state, tailnet IP, MagicDNS name, the home relay

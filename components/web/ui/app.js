@@ -43,7 +43,7 @@ async function api(path, opts = {}) {
   }
   const res = await fetch(path, init);
   const body = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== '/api/login') { showLogin(); throw new Error('login required'); }
+  if (res.status === 401 && path !== 'api/login') { showLogin(); throw new Error('login required'); }
   if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
   return body;
 }
@@ -74,7 +74,7 @@ $('#login-form').addEventListener('submit', async (e) => {
   const btn = e.submitter || $('#login-form button');
   btn.disabled = true;
   try {
-    await api('/api/login', { method: 'POST', json: { password: $('#login-pw').value } });
+    await api('api/login', { method: 'POST', json: { password: $('#login-pw').value } });
     $('#login-pw').value = '';
     await start();
   } catch (err) {
@@ -85,15 +85,16 @@ $('#login-form').addEventListener('submit', async (e) => {
 });
 
 $('#logout').addEventListener('click', async () => {
-  try { await api('/api/logout', { method: 'POST' }); } catch (_) { /* already out */ }
+  try { await api('api/logout', { method: 'POST' }); } catch (_) { /* already out */ }
   showLogin();
 });
 
 // ---- live status -------------------------------------------------------------------
 function connectWs() {
   clearTimeout(wsRetry);
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const u = new URL('ws', location.href);
+  u.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(u);
   ws.onopen = () => $('#dot').classList.add('on');
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
@@ -110,7 +111,7 @@ function connectWs() {
 }
 
 async function refresh() {
-  status = await api('/api/status');
+  status = await api('api/status');
   onStatus();
 }
 
@@ -161,7 +162,7 @@ pages.devices = {
     this.timer = setInterval(() => { if (!ws || ws.readyState !== WebSocket.OPEN) this.poll(); }, 2000);
   },
   async poll() {
-    try { this.apply(await api('/api/zb')); } catch (e) { /* offline: keep the last view */ }
+    try { this.apply(await api('api/zb')); } catch (e) { /* offline: keep the last view */ }
   },
   apply(d) {
     if (!$('#zb-net')) return;  // another page is open
@@ -282,29 +283,29 @@ pages.devices = {
   },
   async permit() {
     const open = this.data && this.data.network.permit_s > 0;
-    try { await api('/api/zb/permit', { method: 'POST', json: { seconds: open ? 0 : 120 } }); } catch (e) { alert(e.message); }
+    try { await api('api/zb/permit', { method: 'POST', json: { seconds: open ? 0 : 120 } }); } catch (e) { alert(e.message); }
     this.poll();
   },
   async rename(ieee) {
     const name = $(`#name-${ieee}`).value.trim();
-    try { await api('/api/zb/rename', { method: 'POST', json: { ieee, name } }); document.activeElement.blur(); } catch (e) { alert(e.message); }
+    try { await api('api/zb/rename', { method: 'POST', json: { ieee, name } }); document.activeElement.blur(); } catch (e) { alert(e.message); }
     this.poll();
   },
   async reinterview(ieee) {
     if (document.activeElement) document.activeElement.blur();
-    try { await api('/api/zb/reinterview', { method: 'POST', json: { ieee } }); } catch (e) { alert(`Re-interview failed: ${e.message}`); return; }
+    try { await api('api/zb/reinterview', { method: 'POST', json: { ieee } }); } catch (e) { alert(`Re-interview failed: ${e.message}`); return; }
     this.reiv[ieee] = { busy: false, done: 0 };
     this.poll();
   },
   async setOn(ieee, on) {
     const v = this.data && this.data.devices.find((d) => d.ieee === ieee);
     this.switching[ieee] = { t: Date.now(), was: v ? v.on : undefined };
-    try { await api('/api/zb/set', { method: 'POST', json: { ieee, on } }); } catch (e) { delete this.switching[ieee]; alert(e.message); }
+    try { await api('api/zb/set', { method: 'POST', json: { ieee, on } }); } catch (e) { delete this.switching[ieee]; alert(e.message); }
     this.poll();
   },
   async remove(ieee) {
     if (!confirm('Remove this device? It is asked to leave the network; to use it again, pair it again.')) return;
-    try { await api('/api/zb/remove', { method: 'POST', json: { ieee } }); } catch (e) { alert(e.message); }
+    try { await api('api/zb/remove', { method: 'POST', json: { ieee } }); } catch (e) { alert(e.message); }
     this.poll();
   },
 };
@@ -361,7 +362,7 @@ function loadCodeMirror() {
   if (!cmLoading) {
     cmLoading = new Promise((resolve) => {
       const el = document.createElement('script');
-      el.src = '/cm.js';
+      el.src = 'cm.js';
       el.onload = () => resolve(!!window.HubEditor);
       el.onerror = () => { cmLoading = null; el.remove(); resolve(false); };
       document.head.appendChild(el);
@@ -400,7 +401,7 @@ pages.automations = {
     this.logTimer = setInterval(() => this.pollLog(), 1500);
   },
   async poll() {
-    try { this.data = await api('/api/auto'); } catch (e) { return; }
+    try { this.data = await api('api/auto'); } catch (e) { return; }
     if (!$('#au-list')) { this.stop(); return; }
     this.drawList();
     this.drawPins();
@@ -416,7 +417,7 @@ pages.automations = {
       soon after starting (last: ${esc(b.last_reset)}), so scripts were not started. Zigbee and everything
       else run normally. <button id="au-safe-go">Start scripts</button></div>`;
     $('#au-safe-go').addEventListener('click', async () => {
-      try { await api('/api/auto/safe', { method: 'POST', json: {} }); this.poll(); } catch (e) { alert(e.message); }
+      try { await api('api/auto/safe', { method: 'POST', json: {} }); this.poll(); } catch (e) { alert(e.message); }
     });
   },
   drawList() {
@@ -442,9 +443,9 @@ pages.automations = {
       </div>`).join('');
     el.querySelectorAll('[data-en]').forEach((c) => c.addEventListener('change', () => this.enable(c.dataset.en, c.checked)));
     el.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => this.edit(b.dataset.edit)));
-    el.querySelectorAll('[data-restart]').forEach((b) => b.addEventListener('click', () => this.act('/api/auto/restart', b.dataset.restart)));
+    el.querySelectorAll('[data-restart]').forEach((b) => b.addEventListener('click', () => this.act('api/auto/restart', b.dataset.restart)));
     el.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
-      if (confirm(`Delete the script "${b.dataset.del}" and its saved state?`)) this.act('/api/auto/delete', b.dataset.del);
+      if (confirm(`Delete the script "${b.dataset.del}" and its saved state?`)) this.act('api/auto/delete', b.dataset.del);
     }));
   },
   drawPins() {
@@ -465,7 +466,7 @@ pages.automations = {
     }
   },
   async enable(name, on) {
-    try { await api('/api/auto/enable', { method: 'POST', json: { name, enabled: on } }); } catch (e) { alert(e.message); }
+    try { await api('api/auto/enable', { method: 'POST', json: { name, enabled: on } }); } catch (e) { alert(e.message); }
     this.poll();
   },
   async act(path, name) {
@@ -477,7 +478,7 @@ pages.automations = {
     let src = EXAMPLES.Template;
     if (name) {
       try {
-        const r = await fetch(`/api/auto/script?name=${encodeURIComponent(name)}`, { credentials: 'same-origin' });
+        const r = await fetch(`api/auto/script?name=${encodeURIComponent(name)}`, { credentials: 'same-origin' });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         src = await r.text();
       } catch (e) { alert(e.message); return; }
@@ -530,7 +531,7 @@ pages.automations = {
     const en = $('#au-enabled').checked ? 1 : 0;
     msg.className = 'muted'; msg.textContent = 'Saving…';
     try {
-      const r = await fetch(`/api/auto/script?name=${encodeURIComponent(name)}&enabled=${en}`, {
+      const r = await fetch(`api/auto/script?name=${encodeURIComponent(name)}&enabled=${en}`, {
         method: 'POST', credentials: 'same-origin', headers: { 'X-Hub': '1', 'Content-Type': 'text/plain' }, body: ed.get() });
       const body = await r.json().catch(() => ({}));
       if (r.status === 401) { showLogin(); return; }
@@ -553,7 +554,7 @@ pages.automations = {
   },
   async pollLog() {
     let d;
-    try { d = await api(`/api/auto/log?after=${this.logLast}`); } catch (e) { return; }
+    try { d = await api(`api/auto/log?after=${this.logLast}`); } catch (e) { return; }
     if (!$('#au-log')) return;
     if (d.lines.length) {
       this.logLines.push(...d.lines);
@@ -591,7 +592,7 @@ const autoset = {
   async render() {
     const area = $('#auto-settings'), tzArea = $('#tz-settings');
     if (!area && !tzArea) return;
-    try { this.data = await api('/api/auto'); } catch (e) { (area || tzArea).innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
+    try { this.data = await api('api/auto'); } catch (e) { (area || tzArea).innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
     const d = this.data;
     if (tzArea) this.renderTz(tzArea, d);
     if (!area) return;
@@ -668,18 +669,18 @@ const autoset = {
     try { await api(path, { method: 'POST', json }); m.className = 'good'; m.textContent = 'Saved.'; return true; }
     catch (e) { m.className = 'err'; m.textContent = e.message; return false; }
   },
-  async saveGpio() { this.readRows(); if (await this.post('/api/auto/gpio', { pins: this.rows }, '#gp-msg')) setTimeout(() => this.render(), 800); },
+  async saveGpio() { this.readRows(); if (await this.post('api/auto/gpio', { pins: this.rows }, '#gp-msg')) setTimeout(() => this.render(), 800); },
   async saveSecret() {
     const name = $('#sec-name').value.trim(), value = $('#sec-val').value;
     if (!value) { $('#sec-msg').className = 'err'; $('#sec-msg').textContent = 'Value required'; return; }
-    if (await this.post('/api/auto/secret', { name, value }, '#sec-msg')) setTimeout(() => this.render(), 800);
+    if (await this.post('api/auto/secret', { name, value }, '#sec-msg')) setTimeout(() => this.render(), 800);
   },
   async delSecret(name) {
     if (!confirm(`Delete the secret "${name}"? Scripts reading it get nil.`)) return;
-    try { await api('/api/auto/secret', { method: 'POST', json: { name, value: null } }); } catch (e) { alert(e.message); }
+    try { await api('api/auto/secret', { method: 'POST', json: { name, value: null } }); } catch (e) { alert(e.message); }
     this.render();
   },
-  async saveTz() { if (await this.post('/api/auto/tz', { tz: $('#tz-val').value.trim() }, '#tz-msg')) setTimeout(() => this.render(), 800); },
+  async saveTz() { if (await this.post('api/auto/tz', { tz: $('#tz-val').value.trim() }, '#tz-msg')) setTimeout(() => this.render(), 800); },
 };
 
 // System ------------------------------------------------------------------------------
@@ -772,7 +773,7 @@ pages.settings = {
         <section class="card"><h2>Diagnostic log</h2>
           <p class="muted">Warnings, errors, Wi-Fi events, updates and reboots, plus a sample every
           5 minutes, kept on the hub (the last ~500 KB) with UTC timestamps.</p>
-          <div class="row"><a class="button" href="/api/logs" download>Download log</a></div>
+          <div class="row"><a class="button" href="api/logs" download>Download log</a></div>
         </section>
         <section class="card"><h2>Restart</h2>
           <div class="row"><button class="danger" id="reboot">Restart the hub</button></div>
@@ -783,7 +784,7 @@ pages.settings = {
     $('#fw-upload').addEventListener('click', () => fw.upload());
     $('#reboot').addEventListener('click', async () => {
       if (!confirm('Restart the hub now?')) return;
-      try { await api('/api/reboot', { method: 'POST' }); fw.msg('Restarting…'); fw.waitBack(null); }
+      try { await api('api/reboot', { method: 'POST' }); fw.msg('Restarting…'); fw.waitBack(null); }
       catch (e) { fw.msg(esc(e.message), 'err'); }
     });
     wifi.render();
@@ -814,13 +815,13 @@ const motionui = {
     this.timer = setInterval(() => this.poll(), 1000);
   },
   async learn(moving) {
-    try { await api('/api/motion/learn', { method: 'POST', json: { moving } }); await this.poll(); }
+    try { await api('api/motion/learn', { method: 'POST', json: { moving } }); await this.poll(); }
     catch (e) { $('#mo-note').textContent = e.message; }
   },
   async poll() {
     if (!$('#mo-card')) { this.stop(); return; }
     let d;
-    try { d = await api('/api/motion'); } catch (_) { return; }
+    try { d = await api('api/motion'); } catch (_) { return; }
     $('#mo-state').textContent = !d.sensing ? '—' : d.moving ? 'Moving' : 'Not moving';
     $('#mo-note').textContent = !d.sensing ? 'No Wi-Fi signal: not sensing'
       : d.learning === 'still' ? 'Learning: stay still for 30 s…'
@@ -846,7 +847,7 @@ const haui = {
     const card = $('#ha-card');
     if (!card) { this.stop(); return; }
     let d;
-    try { d = await api('/api/ha'); } catch (e) { card.innerHTML = `<h2>Home Assistant</h2><p class="err">${esc(e.message)}</p>`; return; }
+    try { d = await api('api/ha'); } catch (e) { card.innerHTML = `<h2>Home Assistant</h2><p class="err">${esc(e.message)}</p>`; return; }
     const key = `${d.enabled}|${d.key}|${d.lan_open}|${d.tailnet_name}`;
     if (key !== this.shown) { this.shown = key; this.draw(card, d); }
     const st = $('#ha-state');
@@ -880,14 +881,14 @@ const haui = {
          <p class="muted" id="ha-count"></p>`;
     card.innerHTML = `<h2>Home Assistant ${d.enabled ? '<span class="badge ok">on</span>' : ''}</h2>${body}<p id="ha-msg"></p>`;
     const on = (id, fn) => { const b = $(id); if (b) b.addEventListener('click', fn); };
-    on('#ha-on', () => this.post('/api/ha', { on: true }));
+    on('#ha-on', () => this.post('api/ha', { on: true }));
     on('#ha-off', () => {
       if (!confirm('Turn the Home Assistant integration off? Home Assistant shows the hub as unavailable until it is turned on again.')) return;
-      this.post('/api/ha', { on: false });
+      this.post('api/ha', { on: false });
     });
     on('#ha-newkey', () => {
       if (!confirm('Make a new encryption key? Home Assistant disconnects and asks for the new key.')) return;
-      this.post('/api/ha/key');
+      this.post('api/ha/key');
     });
     on('#ha-copy', () => this.copy());
     const k = $('#ha-key');
@@ -914,7 +915,7 @@ const wifi = {
   async render() {
     const area = $('#wifi-area');
     if (!area) return;
-    try { this.data = await api('/api/wifi'); } catch (e) { area.innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
+    try { this.data = await api('api/wifi'); } catch (e) { area.innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
     const d = this.data;
     const netForm = (n, i) => `
       <section class="card"><h2>${i === 0 ? 'Primary Wi-Fi network' : 'Backup Wi-Fi network'}
@@ -958,12 +959,12 @@ const wifi = {
   },
   save(target) {
     const nets = [0, 1].map((i) => ({ ssid: $(`#ssid${i}`).value.trim(), password: $(`#psk${i}`).value }));
-    this.go(api('/api/wifi', { method: 'POST', json: { networks: nets, target } }));
+    this.go(api('api/wifi', { method: 'POST', json: { networks: nets, target } }));
   },
-  switchTo(target) { this.go(api('/api/wifi/switch', { method: 'POST', json: { target } })); },
+  switchTo(target) { this.go(api('api/wifi/switch', { method: 'POST', json: { target } })); },
   reset() {
     if (confirm('Go back to the Wi-Fi networks written by flash.sh? (On trial, like any switch.)')) {
-      this.go(api('/api/wifi/reset', { method: 'POST' }));
+      this.go(api('api/wifi/reset', { method: 'POST' }));
     }
   },
 };
@@ -1009,7 +1010,7 @@ const tsui = {
   },
   async loadPeers() {
     this.peersAt = Date.now();
-    try { this.peers = (await api('/api/ts')).peer_list; if (currentPage() === 'status') pages.status.live(); } catch (_) { /* keep last */ }
+    try { this.peers = (await api('api/ts')).peer_list; if (currentPage() === 'status') pages.status.live(); } catch (_) { /* keep last */ }
   },
   // Rewritten only when it changes: a re-created link flashes from unvisited to visited colour.
   msg(html, cls = '') {
@@ -1047,19 +1048,19 @@ const tsui = {
     }
     el.innerHTML = `<h2>Tailscale ${this.stateBadge(t)}</h2>${body}<p id="ts-msg"></p>`;
     const on = (id, fn) => { const b = $(id); if (b) b.addEventListener('click', fn); };
-    on('#ts-on', () => this.post('/api/ts/enabled', { on: true }));
+    on('#ts-on', () => this.post('api/ts/enabled', { on: true }));
     on('#ts-off', () => {
       if (t.state !== 'off' && !confirm('Turn Tailscale off? The hub restarts to apply it (Zigbee is back within seconds).')) return;
-      this.post('/api/ts/enabled', { on: false });
+      this.post('api/ts/enabled', { on: false });
     });
     on('#ts-logout', () => {
       if (!confirm('Log out of the tailnet? The hub forgets its node key and restarts; you will need a new auth key. Delete the old machine in the Tailscale admin console.')) return;
-      this.post('/api/ts/logout');
+      this.post('api/ts/logout');
     });
     on('#ts-save', () => {
       const key = $('#ts-key').value.trim();
       if (!key) return;
-      this.post('/api/ts/key', { key }).then((ok) => { const k = $('#ts-key'); if (ok && k) k.value = ''; });
+      this.post('api/ts/key', { key }).then((ok) => { const k = $('#ts-key'); if (ok && k) k.value = ''; });
     });
     this.liveSettings();
   },
@@ -1068,7 +1069,7 @@ const tsui = {
     const el = $('#ts-access');
     if (!el) return;
     let a;
-    try { a = await api('/api/access'); } catch (e) { el.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    try { a = await api('api/access'); } catch (e) { el.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
     const name = (status && status.tailscale.name) || 'the hub’s tailnet name';
     if (a.tailnet_only) {
       el.innerHTML = `<p><b>Access: tailnet only.</b> Over Tailscale no password is asked; the LAN is closed
@@ -1098,7 +1099,7 @@ const tsui = {
   },
   async setAccess(json) {
     try {
-      await api('/api/access', { method: 'POST', json });
+      await api('api/access', { method: 'POST', json });
       this.loadAccess();
     } catch (e) { this.msg(esc(e.message), 'err'); }
   },
@@ -1135,7 +1136,7 @@ const fw = {
     $('#fw-progress').hidden = false;
     this.msg('Uploading…');
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/ota');
+    xhr.open('POST', 'api/ota');
     xhr.setRequestHeader('X-Hub', '1');
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) $('#fw-bar').value = (100 * e.loaded) / e.total; };
@@ -1154,7 +1155,7 @@ const fw = {
     const tick = async () => {
       if (Date.now() - t0 > 180000) { this.busy = false; this.msg('The hub hasn\'t come back after 3 minutes.', 'err'); return; }
       try {
-        const s = await api('/api/status');
+        const s = await api('api/status');
         status = s;
         this.busy = false;
         let text, cls = '';
@@ -1172,7 +1173,7 @@ const fw = {
 
 // ---- boot ------------------------------------------------------------------------------
 async function start() {
-  const sess = await api('/api/session');
+  const sess = await api('api/session');
   $('#login-title').textContent = sess.hostname;
   if (!sess.authed) { showLogin(); return; }
   $('#login').hidden = true;

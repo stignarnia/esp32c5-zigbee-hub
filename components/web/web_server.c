@@ -127,7 +127,7 @@ static esp_err_t asset_handler(httpd_req_t *req)
         httpd_resp_set_hdr(req, "Content-Security-Policy",
                            "default-src 'self'; connect-src 'self' ws: wss:; "
                            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-                           "frame-ancestors 'none'");
+                           "frame-ancestors 'self'");
     }
     return httpd_resp_send(req, (const char *)a->start, a->end - a->start);
 }

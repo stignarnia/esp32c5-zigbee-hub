@@ -3,6 +3,7 @@
 
 #include <inttypes.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_coexist.h"
 #include "esp_coex_i154.h"
@@ -11,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_zigbee.h"
+#include "hublog.h"
 #include "ezbee/zha.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -178,6 +180,9 @@ static bool on_signal(const ezb_app_signal_t *sig)
     return true;
 }
 
+static uint32_t zcl_utc_now(void);
+static void zcl_utc_set(uint32_t utc);
+
 static esp_err_t register_hub_endpoint(void)
 {
     ezb_af_device_desc_t dev = ezb_af_create_device_desc();
@@ -201,9 +206,23 @@ static esp_err_t register_hub_endpoint(void)
     ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_ias_zone_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
     ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_electrical_measurement_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
     ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_metering_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    // Time server: devices that are Time clients (the SONOFF S60ZBTPF) learn the date and
+    // time from the coordinator. Kept current by time_update() once SNTP has set the clock.
+    ezb_zcl_time_cluster_server_config_t tcfg = {.time = 0xFFFFFFFF, .time_status = 0};
+    ezb_zcl_cluster_desc_t tcl = ezb_zcl_time_create_cluster_desc(&tcfg, EZB_ZCL_CLUSTER_SERVER);
+    int32_t zero32 = 0;
+    uint32_t invalid = 0xFFFFFFFF;
+    ezb_zcl_time_cluster_desc_add_attr(tcl, EZB_ZCL_ATTR_TIME_TIME_ZONE_ID, &zero32);
+    ezb_zcl_time_cluster_desc_add_attr(tcl, EZB_ZCL_ATTR_TIME_DST_SHIFT_ID, &zero32);
+    ezb_zcl_time_cluster_desc_add_attr(tcl, EZB_ZCL_ATTR_TIME_LOCAL_TIME_ID, &invalid);
+    ezb_af_endpoint_add_cluster_desc(ep, tcl);
     esp_err_t err = esp_zigbee_err_to_esp(ezb_af_device_add_endpoint_desc(dev, ep));
     if (err == ESP_OK) ezb_zcl_core_action_handler_register(zb_dev_on_zcl);
     if (err == ESP_OK) err = esp_zigbee_err_to_esp(ezb_af_device_desc_register(dev));
+    if (err == ESP_OK) {
+        ezb_zcl_time_interface_t ti = {.get_utc_time = zcl_utc_now, .set_utc_time = zcl_utc_set};
+        err = esp_zigbee_err_to_esp(ezb_zcl_time_server_interface_register(ZB_HUB_EP, ti));
+    }
     return err;
 }
 
@@ -312,6 +331,54 @@ static void net_refresh(void)  // Zigbee task only
     taskEXIT_CRITICAL(&s_net_lock);
 }
 
+// Time server. The stack serves the Time attribute from get_utc_time (registered after the
+// endpoint, ZCL time: seconds since 2000-01-01 UTC); TimeStatus, TimeZone, DstShift and
+// LocalTime are kept current here, every second on the Zigbee task, once SNTP has set the
+// clock (until then TimeStatus is 0: not synchronised).
+#define ZCL_EPOCH_OFFSET 946684800  // 2000-01-01T00:00:00Z in Unix time
+static uint32_t zcl_utc_now(void)
+{
+    return hublog_time_valid() ? (uint32_t)(time(NULL) - ZCL_EPOCH_OFFSET) : 0xFFFFFFFF;
+}
+
+static void zcl_utc_set(uint32_t utc)
+{
+    (void)utc;  // the hub is the time master (SNTP); nobody sets its clock over Zigbee
+}
+
+static void time_update(void)
+{
+    static bool logged;
+    if (!hublog_time_valid()) return;
+    time_t now = time(NULL);
+    struct tm lt, ut;
+    localtime_r(&now, &lt);
+    gmtime_r(&now, &ut);
+    // UTC offset (newlib's struct tm has no tm_gmtoff): local minus UTC wall time,
+    // with the day difference at midnight / new year
+    int days = lt.tm_year != ut.tm_year ? (lt.tm_year > ut.tm_year ? 1 : -1) : lt.tm_yday - ut.tm_yday;
+    int32_t gmtoff = days * 86400 + (lt.tm_hour - ut.tm_hour) * 3600 + (lt.tm_min - ut.tm_min) * 60;
+    int32_t shift = lt.tm_isdst > 0 ? 3600 : 0;
+    int32_t zone = gmtoff - shift;
+    uint32_t local = (uint32_t)(now - ZCL_EPOCH_OFFSET) + (uint32_t)gmtoff;
+    uint8_t status = EZB_ZCL_TIME_TIME_STATUS_MASTER | EZB_ZCL_TIME_TIME_STATUS_SYNCHRONIZED |
+                     EZB_ZCL_TIME_TIME_STATUS_MASTER_ZONE_DST;
+    const uint16_t cl = EZB_ZCL_CLUSTER_ID_TIME;
+    ezb_zcl_set_attr_value(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_TIME_STATUS_ID, EZB_ZCL_STD_MANUF_CODE, &status, false);
+    ezb_zcl_set_attr_value(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_TIME_ZONE_ID, EZB_ZCL_STD_MANUF_CODE, &zone, false);
+    ezb_zcl_set_attr_value(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_DST_SHIFT_ID, EZB_ZCL_STD_MANUF_CODE, &shift, false);
+    ezb_zcl_set_attr_value(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_LOCAL_TIME_ID, EZB_ZCL_STD_MANUF_CODE, &local, false);
+    if (!logged) {  // once per boot: what the stack serves as Time, against the clock
+        logged = true;
+        uint32_t served = 0;
+        ezb_zcl_attr_desc_t a = ezb_zcl_get_attr_desc(ZB_HUB_EP, cl, EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_TIME_TIME_ID,
+                                                      EZB_ZCL_STD_MANUF_CODE);
+        if (a != EZB_INVALID_ZCL_ATTR_DESC) ezb_zcl_attr_desc_get_value(a, &served);
+        ESP_LOGI(TAG, "time server: Time attribute %lu, clock %lu (ZCL seconds), zone %ld s, DST %ld s",
+                 (unsigned long)served, (unsigned long)zcl_utc_now(), (long)zone, (long)shift);
+    }
+}
+
 // Neighbours the registry doesn't know: a device whose join signal and announce were
 // both missed shows up only here. Children and routers only, not stale entries.
 static void net_adopt(void)
@@ -334,6 +401,7 @@ static void tick_on_zb_task(void *arg)
 {
     net_refresh();
     net_adopt();
+    time_update();
     zb_dev_tick(arg);
 }
 

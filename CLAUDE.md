@@ -257,8 +257,13 @@ evidence; where something is still open there, it points here.
       Wi-Fi's coex slot (measured 2026-11-17, Phase 3). Registration no longer depends on it;
       giving 802.15.4 priority while pairing is open would make joins themselves more reliable
       (user's call: Wi-Fi slower during those minutes)
-- [ ] the S60ZBTPF's energy counter (Metering 0x0702) read 0 kWh after several minutes at 88 W:
-      watch whether it counts at all; SONOFF may count only in its own cluster 0xFC11
+- [ ] what makes the S60ZBTPF publish its energy total (Phase 3). The standard summation stayed 0
+      through a full hour on (2026-11-17 20:08–21:10, 88 → 15 W, ~70 Wh, 10 reads; 0xFC11 counters
+      0x7009–0x700c 0 too), then read 0.08 kWh at 21:49, after the load reached 0 W at 21:44:
+      about everything that went through it that day, so it counted all along and published late.
+      Two candidates, not separable from this run: the Time server added at 20:18 (it is a Time
+      client, out cluster 0x000A), or it publishes only when the load ends. Next charge: if the
+      counter rises while charging, it was the time
 - [ ] Optional: signed updates (design in Phase 2)
 
 ### Tests: router off for about an hour (one session)
@@ -284,7 +289,6 @@ evidence; where something is still open there, it points here.
 
 ### Tests: waiting or long runs
 - [ ] availability: a battery sensor marked offline after 25 h of silence (Phase 3)
-- [ ] soak test 24 h+ (the reference repo's worst bugs needed 9 h of uptime) (Phase 7)
 - [ ] internal heap low-water mark under full load: Zigbee + Tailscale + a UI client + 3
       scripts, and the same with HA connected (26.1 KB today with HA at boot) (Phase 7)
 
@@ -308,8 +312,6 @@ evidence; where something is still open there, it points here.
 ### Open decisions (the user's)
 - [ ] keys alarm M2: what if Wi-Fi sensing misses a walk to the door (decided by the sensing
       test) (Phase 5b)
-- [ ] keys alarm F10: how long the house must be still before an opening counts as coming
-      home; `STILL_S` = 60 s and `GAP_S` = 2 s are Claude's unmeasured choice (Phase 5b)
 - [ ] keys alarm F11: the person coming home seen on the landing before opening → alarm
       (Phase 5b)
 - [ ] keys alarm F2 (B leaves while A has the key → alarm) was accepted "only if it stops when
@@ -880,15 +882,45 @@ For long tests without a serial cable: log on the board, download later.
     Seen: try 1 after boot → 0x0006, 0x0B04, 0x0702 all configured
   - after every on/off command the state is read back at 1.5 s and 4 s (the meter at 4 s), so
     a lost report can't leave a wrong state
-  - the S60ZBTPF freezes its meter while the relay is off (same raw 88 / 22111 / 66 at 4 s and
-    30 s after off; live values while on): power and current are shown as 0 while the device
-    reports off, voltage keeps its last reading
+  - the S60ZBTPF freezes power and current while the relay is off (raw 88 W / 66 at 4 s, 30 s and
+    17 min after off; live while on); voltage stays live (raw 22111 → 22188 after 17 min, the
+    line side): power and current are shown as 0 while the device reports off. It can't measure
+    what a load would draw while off, so "turn on only if the load wants > 10 W" has to be
+    on → measure → off (the hub reads the meter back 4 s after a command), or auto-off when
+    the draw stays low
   - verified on the plug (an ~88 W load: 88 W / 221 V / 0.63–0.66 A): Lua set/toggle/off with
     `zb.on` firing true then false and the errors (unknown device, contact sensor, "power"
     not settable); aioesphomeapi 46.30.0: switch + 4 sensors listed, switch on → on, 88 W,
     0.66 A; off → off, 0 W, 0 A; `/api/zb/set` on/off. UI: the card and map code run in Node
     against live `/api/zb` data, the map rendered (rsvg) and looked at; the card's button and
     the map tested in the browser by the user (2026-11-17)
+- [x] **Attribute survey** (2026-11-17, an investigation tool, removed the same day at the
+      user's request; the results below stay): at every interview of an always-on device the hub sent
+      Discover Attributes to Metering, Electrical Measurement and every manufacturer cluster
+      (≥ 0xFC00), reads everything listed (6 per read: 16 didn't fit one frame) and logs each
+      value ("survey 0xCCCC/0xAAAA = v") and every error answer; unanswered discovery is
+      re-sent every 5 s, 3 times (0xFC11's first answer was lost). The S60ZBTPF, complete lists:
+  - 0x0702: 0000 summation (0), 0200 status, 0300 unit (0 = kWh), 0301/0302 = 1/1000, 0303,
+    0306 (0 = electric). No instantaneous demand
+  - 0x0B04: 0000, 0505 V, 0508 A, 050B W, 0600–0605 = 1/100, 1/100, 1/1. **No 0x0300: it does
+    not report AC frequency**
+  - 0xFC11 (19): 0x7004 = 660 (mA), 0x7005 = 221885 (mV), 0x7006 and 0x7008 = 88172 (mW): the
+    same readings as 0x0B04 in finer units (identified by matching them); 0x700d = 17000,
+    0x700f = 253000, 0x7011 = 4000000: by their values probably the 17 A / 253 V / 4000 W
+    protection limits, with uint8 flags 0x700c/0x700e/0x7010; 0x7009–0x700b (uint32) and
+    0x700c = 0; also 0001, 0010, 001c, 7003 (a string), 7007. Labels other than the matched
+    readings are inferred, not confirmed
+  - 0xFC57 (14): bool/uint8/uint16 settings (0002–0013); not identified
+- [x] **Time server on the hub endpoint** (2026-11-17): Time cluster server with TimeStatus,
+      TimeZone, DstShift, LocalTime. The stack serves the Time attribute from
+      `ezb_zcl_time_server_interface_register` (`get_utc_time` returns ZCL time, seconds since
+      2000-01-01 UTC, 0xFFFFFFFF until SNTP); the other four are set every second on the Zigbee
+      task (TimeStatus master | synchronised | master zone/DST). The stored Time attribute stays
+      0xFFFFFFFF (logged once per boot with the clock: 848261928 = 20:18:48 UTC, zone 3600,
+      DST 0). First attempt wrote the Time attribute with `ezb_zcl_set_attr_value` and had no
+      interface: an assertion in the stack on the trial boot (`zigbee` task, `__assert_func`,
+      core dump without a usable backtrace), rolled back by the bootloader as designed; the
+      board wasn't on USB, so the assertion text wasn't captured. Not seen yet: a device reading it
 - [x] **Network map drawn** (2026-11-17): SVG, hub in the middle, every device around it; a line
       per direct link from the neighbour table, coloured by LQI, dashed for sleepy end devices;
       square = router, circle = end device; devices not in the table sit unlinked ("route
@@ -1446,9 +1478,10 @@ nothing from Phase 6.
         10 s (5 rounds), stopped by a Keys tap or the Door closing; a tap changes nothing else.
         Alexa called the moment the alarm starts (F12), but not again within 30 s: calling it
         on every alarm was "too eager" (user, 2026-11-08), as the earlier script's 30 s did
-      - `STILL_S` = 60 s and `GAP_S` = 2 s are Claude's choice, not measured (F10 is still the
-        user's): longer = fewer silent openings (safer), more homecoming alarms when someone
-        moved inside shortly before
+      - `STILL_S` = 60 s and `GAP_S` = 2 s (the last 2 s before the opening left out: the door
+        and the person at it move the Wi-Fi signal themselves): both decided by the user
+        (2026-11-17, F10). Longer `STILL_S` = fewer silent openings (safer), more homecoming
+        alarms when someone moved inside shortly before
 - [x] Lua API for it: `motion.moving()` and `motion.moved(from_s, to_s)` (10 min of history,
       one flag per 500 ms; movement anywhere in the window → true even where part of it
       wasn't seen; otherwise any unseen part → nil). Verified with a throwaway script:
@@ -1494,9 +1527,11 @@ stops it and changes nothing else.
   - F2's condition can't be met (the hub never knows where the key is): Still to do
 - Rejected:
   - F12: delaying the Alexa call. Alexa is called the moment the alarm starts
+- Decided:
+  - F10: the house must be still for 60 s before an opening counts as coming home, the last
+    2 s before it left out (user, 2026-11-17; `STILL_S`, `GAP_S`)
 - Open:
   - M2: Wi-Fi sensing misses a walk to the door → decided by the sensing test
-  - F10: how long the house must be still before an opening counts as coming home
   - F11: the person coming home seen on the landing before opening → alarm
 - Accepted as long as a natural action resets everything to normal (rule for every
   failure, user): M3 (still by the door for long, out within 3 s of moving), M4 (Door
@@ -1761,9 +1796,18 @@ connect sequence).
     switched off → its entities unknown (the protocol has no per-entity unavailable). **Auto
     discovery cannot be tested yet** (see mDNS above)
 
-### Phase 7 — Hardening (not started)
-Soak test, heap low-water mark under full load, Zigbee network backup/restore, factory reset:
-all listed under Still to do.
+### Phase 7 — Hardening (soak test done; the rest not started)
+Heap low-water mark under full load, Zigbee network backup/restore, factory reset: listed under
+Still to do.
+- [x] **Soak test, full stack: 43.4 h** (2026-11-15 22:08 → 2026-11-17 17:34 UTC, ended by an
+      update), the firmware of 2026-11-15 (HA outgoing connection): Zigbee (Door, Keys), Wi-Fi
+      on ch 36, Tailscale, Home Assistant connected, the keys-alarm script running. From the
+      hub's `sample` lines (every 5 min): 0 disconnects, 0 NO_AP_FOUND, 0 failovers, 0 driver
+      restarts; internal heap 65 KB free / lowest 26 KB from the first sample to the last,
+      PSRAM 7303 → 7298 KB (no leak). Warnings: 382 Tailscale "DISCO ping / CallMeMaybe from
+      unknown peer" (a tailnet peer not in our netmap, in bursts), 37 web send errors + 39
+      "ctrl socket queue full" in the 3 min after the boot (a stale browser tab reconnecting),
+      one Tailscale control-connection drop (reconnected), one DERP write timeout
 
 ## Internal RAM
 

@@ -44,6 +44,8 @@ const pageDark = () => {
 const API = [
   ['zb.on(device, attr, fn)', 'call fn(value, device, attr) when it changes'],
   ['zb.get(device, attr)', 'current value (last known after a restart)'], ['zb.devices()', 'list of devices'],
+  ['zb.set(device, "on", true)', 'switch on/off (the device reports the new state)'],
+  ['zb.toggle(device)', 'toggle on/off'],
   ['timer.after(s, fn)', 'once, s seconds from now'], ['timer.every(s, fn)', 'repeat every s seconds'],
   ['timer.cancel(id)', 'stop a timer'], ['cron("min hour day month weekday", fn)', 'local time'],
   ['state.get(key)', 'saved value'], ['state.put(key, value)', 'kept on flash'],

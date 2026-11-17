@@ -131,3 +131,14 @@ td.actions > * { margin-left: .3rem; }
   .gp .gp-name { grid-column: 1 / -1; }
   .gp-head { display: none; }
 }
+/* Zigbee network map (SVG) */
+.zmap { width: 100%; max-width: 640px; height: auto; display: block; margin: 0 auto; }
+.zmap text { fill: var(--fg); font: 12px system-ui, sans-serif; }
+.zmap .zm-sub, .zmap .zm-lqi { fill: var(--muted); font-size: 10.5px; }
+.zmap .zm-lqi { text-anchor: middle; }
+.zmap .zm-node { fill: var(--card); stroke: var(--accent); stroke-width: 2; }
+.zmap .zm-node.zm-off { stroke: var(--bad); stroke-dasharray: 3 3; }
+.zmap .zm-hub { fill: var(--accent); }
+.zmap .zm-hub-t { fill: var(--accent-fg); font-weight: 600; }
+.zm-key { font-size: .85rem; }
+button.small { padding: .15rem .6rem; font-size: .85rem; margin-left: .5rem; }

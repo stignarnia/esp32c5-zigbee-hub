@@ -6,8 +6,8 @@
 
 #include "esp_coexist.h"
 #include "esp_coex_i154.h"
-#include "nvs_flash.h"
 #include "esp_ieee802154.h"
+#include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_zigbee.h"
@@ -70,6 +70,28 @@ static void retry_commissioning(void *arg)
     ezb_bdb_start_top_level_commissioning((ezb_bdb_comm_mode_mask_t)(uintptr_t)arg);
 }
 
+// MAC capability guessed from the neighbour table, for a device whose announce (which
+// carries the real one) hasn't been seen. A router always keeps its receiver on and is
+// mains powered; the table's rx-on flag is false for routers heard only through link
+// status, so it counts for end devices only. Zigbee task only.
+static uint8_t cap_of(uint8_t device_type, bool rx_on)
+{
+    uint8_t cap = 0x80;                          // allocate address
+    if (device_type == EZB_NWK_DEVICE_TYPE_ROUTER) cap |= 0x0E;  // FFD, mains, rx on
+    else if (rx_on) cap |= 0x0C;
+    return cap;
+}
+
+static uint8_t nbr_cap(uint64_t ieee)
+{
+    ezb_nwk_info_iterator_t it = EZB_NWK_INFO_ITERATOR_INIT;
+    ezb_nwk_neighbor_info_t nb;
+    while (ezb_nwk_get_next_neighbor(&it, &nb) == EZB_ERR_NONE) {
+        if (nb.ieee_addr.u64 == ieee) return cap_of(nb.device_type, nb.rx_on_when_idle);
+    }
+    return 0x80;  // unknown: treated as sleepy until its announce says otherwise
+}
+
 static bool on_signal(const ezb_app_signal_t *sig)
 {
     ezb_app_signal_type_t type = ezb_app_signal_get_type(sig);
@@ -114,11 +136,15 @@ static bool on_signal(const ezb_app_signal_t *sig)
     }
     case EZB_ZDO_SIGNAL_DEVICE_ANNCE: {
         const ezb_zdo_signal_device_annce_params_t *p = params;
+        ESP_LOGI(TAG, "device announce 0x%016llx short 0x%04x cap 0x%02x", (unsigned long long)p->device_addr.u64,
+                 p->short_addr, p->capability);
         zb_dev_on_announce(p->short_addr, p->device_addr.u64, p->capability);
         break;
     }
     case EZB_ZDO_SIGNAL_LEAVE_INDICATION: {
         const ezb_zdo_signal_leave_indication_params_t *p = params;
+        ESP_LOGI(TAG, "leave indication 0x%016llx short 0x%04x type %u", (unsigned long long)p->device_addr.u64,
+                 p->short_addr, p->leave_type);
         if (p->leave_type == EZB_ZDO_LEAVE_TYPE_RESET) zb_dev_on_leave(p->device_addr.u64);
         break;
     }
@@ -127,9 +153,24 @@ static bool on_signal(const ezb_app_signal_t *sig)
         ESP_LOGW(TAG, "0x%04x: stack reports the device unavailable (delivery failed)", p->short_addr);
         break;
     }
-    case EZB_ZDO_SIGNAL_DEVICE_UPDATE:
-    case EZB_ZDO_SIGNAL_DEVICE_AUTHORIZED:
-        break;  // join bookkeeping; the announce that follows is what matters
+    case EZB_ZDO_SIGNAL_DEVICE_UPDATE: {
+        const ezb_zdo_signal_device_update_params_t *p = params;
+        ESP_LOGI(TAG, "device update 0x%016llx short 0x%04x status %u tc_action %u parent 0x%04x",
+                 (unsigned long long)p->device_addr.u64, p->short_addr, p->status, p->tc_action, p->parent_short);
+        if (p->status != EZB_ZDO_UPDDEV_DEVICE_LEFT) {
+            zb_dev_on_joined(p->short_addr, p->device_addr.u64, nbr_cap(p->device_addr.u64));
+        }
+        break;
+    }
+    case EZB_ZDO_SIGNAL_DEVICE_AUTHORIZED: {
+        const ezb_zdo_signal_device_authorized_params_t *p = params;
+        ESP_LOGI(TAG, "device authorized 0x%016llx short 0x%04x type %u status %u",
+                 (unsigned long long)p->device_addr.u64, p->short_addr, p->type, p->status);
+        if (p->status == EZB_ZDO_AUTH_STATUS_SUCCESS) {
+            zb_dev_on_joined(p->short_addr, p->device_addr.u64, nbr_cap(p->device_addr.u64));
+        }
+        break;
+    }
     default:
         ESP_LOGI(TAG, "signal %s (0x%02x)", ezb_app_signal_to_string(type), (unsigned)type);
         break;
@@ -271,9 +312,28 @@ static void net_refresh(void)  // Zigbee task only
     taskEXIT_CRITICAL(&s_net_lock);
 }
 
+// Neighbours the registry doesn't know: a device whose join signal and announce were
+// both missed shows up only here. Children and routers only, not stale entries.
+static void net_adopt(void)
+{
+    int n;
+    static nbr_t tmp[ZB_MAX_DEVICES];
+    taskENTER_CRITICAL(&s_net_lock);
+    n = s_net.n;
+    memcpy(tmp, s_net.nbr, n * sizeof(nbr_t));
+    taskEXIT_CRITICAL(&s_net_lock);
+    for (int i = 0; i < n; i++) {
+        const nbr_t *b = &tmp[i];
+        if (b->relationship != EZB_NWK_RELATIONSHIP_CHILD && b->relationship != EZB_NWK_RELATIONSHIP_SIBLING) continue;
+        if (b->type != EZB_NWK_DEVICE_TYPE_ROUTER && b->type != EZB_NWK_DEVICE_TYPE_END_DEVICE) continue;
+        zb_dev_on_neighbor(b->short_addr, b->ieee, cap_of(b->type, b->rx_on));
+    }
+}
+
 static void tick_on_zb_task(void *arg)
 {
     net_refresh();
+    net_adopt();
     zb_dev_tick(arg);
 }
 
@@ -393,6 +453,40 @@ esp_err_t zb_remove(const char *ieee_hex)
     p[0] = ieee;
     p[1] = short_addr;
     return esp_zigbee_task_queue_post(remove_on_zb_task, p);
+}
+
+typedef struct {
+    uint16_t short_addr;
+    uint8_t ep, mode;
+} onoff_req_t;
+
+static void onoff_on_zb_task(void *arg)
+{
+    onoff_req_t r = *(onoff_req_t *)arg;
+    free(arg);
+    ezb_zcl_on_off_cmd_t c = {0};
+    c.cmd_ctrl.dst_addr.addr_mode = EZB_ADDR_MODE_SHORT;
+    c.cmd_ctrl.dst_addr.u.short_addr = r.short_addr;
+    c.cmd_ctrl.dst_ep = r.ep;
+    c.cmd_ctrl.src_ep = ZB_HUB_EP;
+    ezb_err_t e = r.mode == ZB_ON ? ezb_zcl_on_off_on_cmd_req(&c)
+                : r.mode == ZB_OFF ? ezb_zcl_on_off_off_cmd_req(&c) : ezb_zcl_on_off_toggle_cmd_req(&c);
+    ESP_LOGI(TAG, "0x%04x: %s sent (0x%x)", r.short_addr, r.mode == ZB_ON ? "on" : r.mode == ZB_OFF ? "off" : "toggle", e);
+    zb_dev_onoff_sent(r.short_addr, r.ep);
+}
+
+esp_err_t zb_set_on(const char *device, int mode)
+{
+    if (mode < ZB_OFF || mode > ZB_TOGGLE) return ESP_ERR_INVALID_ARG;
+    onoff_req_t t = {.mode = (uint8_t)mode};
+    esp_err_t err = zb_dev_target(device, EZB_ZCL_CLUSTER_ID_ON_OFF, &t.short_addr, &t.ep);
+    if (err != ESP_OK) return err;
+    onoff_req_t *p = malloc(sizeof(*p));
+    if (!p) return ESP_ERR_NO_MEM;
+    *p = t;
+    err = esp_zigbee_task_queue_post(onoff_on_zb_task, p);
+    if (err != ESP_OK) free(p);
+    return err;
 }
 
 static void reinterview_on_zb_task(void *arg)

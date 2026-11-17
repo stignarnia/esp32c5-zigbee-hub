@@ -142,7 +142,7 @@ window.addEventListener('hashchange', render);
 const ZONE_STATE = { contact: ['closed', 'OPEN'], motion: ['clear', 'MOTION'], water: ['dry', 'LEAK'],
   fire: ['ok', 'FIRE'], co: ['ok', 'CO'], vibration: ['still', 'VIBRATION'] };
 pages.devices = {
-  timer: null, data: null, rev: -1, reiv: {},
+  timer: null, data: null, rev: -1, reiv: {}, switching: {},
   stop() { clearInterval(this.timer); this.timer = null; },
   async render() {
     $('#view').innerHTML = `
@@ -175,25 +175,47 @@ pages.devices = {
     this.list(d.devices);
     this.map(n, d.devices);
   },
+  // Network map: the hub in the middle, every device around it. A line = a direct link from
+  // the hub's neighbour table, coloured by link quality (LQI); dashed = a sleepy end device.
+  // Devices not in that table (behind a router, or not heard since boot) sit unlinked.
   map(n, devs) {
     const el = $('#zb-map');
     if (!n.up) { el.textContent = '—'; return; }
-    const byIeee = Object.fromEntries(devs.map((v) => [v.ieee, v]));
-    const type = ['coordinator', 'router', 'end device'];
-    const rel = ['parent', 'child', 'sibling', 'none', 'previous child', 'unauthenticated child'];
-    const lqiBadge = (q) => `<span class="badge ${q >= 150 ? 'ok' : q >= 80 ? 'warn' : 'bad'}">LQI ${q}</span>`;
-    const rows = (n.neighbors || []).map((x) => {
-      const v = byIeee[x.ieee];
-      const name = v ? (v.name || [v.manuf, v.model].filter(Boolean).join(' ')) : `0x${x.short.toString(16).padStart(4, '0')}`;
-      return `<tr><td>${esc(name)}</td><td>${type[x.type] || x.type}${x.rx_on ? '' : ' (sleepy)'}</td>
-        <td>${rel[x.relationship] || x.relationship}</td>
-        <td>${x.lqi ? lqiBadge(x.lqi) : '<span class="muted">no frame since boot</span>'}</td>
-        <td>${x.rssi ? `${x.rssi} dBm` : v && v.rssi !== undefined ? `${v.rssi} dBm (last message)` : '—'}</td></tr>`;
+    const nb = Object.fromEntries((n.neighbors || []).map((x) => [x.ieee, x]));
+    const nodes = devs.map((v) => ({ v, x: nb[v.ieee] }));
+    for (const x of n.neighbors || []) if (!devs.some((v) => v.ieee === x.ieee)) nodes.push({ v: null, x });
+    if (!nodes.length) { el.textContent = 'No devices yet.'; return; }
+    const W = 640, H = 420, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 70;
+    const q = (lqi) => (lqi >= 150 ? 'var(--ok)' : lqi >= 80 ? 'var(--warn)' : 'var(--bad)');
+    const label = (o) => (o.v ? (o.v.name || [o.v.manuf, o.v.model].filter(Boolean).join(' ')) : `0x${o.x.short.toString(16).padStart(4, '0')}`);
+    let lines = '', dots = '';
+    nodes.forEach((o, i) => {
+      const a = -Math.PI / 2 + (2 * Math.PI * i) / nodes.length;
+      const linked = !!o.x;
+      const r = linked ? R : R + 30;
+      const x = cx + r * Math.cos(a), y = cy + r * Math.sin(a);
+      const router = o.x ? o.x.type === 1 : o.v && !o.v.sleepy;
+      const sleepy = o.v ? o.v.sleepy : o.x && !o.x.rx_on && o.x.type === 2;
+      const off = o.v && !o.v.available;
+      if (linked) {
+        const col = o.x.lqi ? q(o.x.lqi) : 'var(--muted)';
+        lines += `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${col}" stroke-width="${o.x.lqi ? 1 + o.x.lqi / 85 : 1}"${sleepy ? ' stroke-dasharray="6 5"' : ''}/>`;
+        const mx = cx + (r * 0.55) * Math.cos(a), my = cy + (r * 0.55) * Math.sin(a);
+        lines += `<text x="${mx.toFixed(1)}" y="${(my - 4).toFixed(1)}" class="zm-lqi">${o.x.lqi ? `LQI ${o.x.lqi}` : 'not heard'}</text>`;
+      }
+      const shape = router
+        ? `<rect x="${(x - 11).toFixed(1)}" y="${(y - 11).toFixed(1)}" width="22" height="22" rx="4" class="zm-node${off ? ' zm-off' : ''}"/>`
+        : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10" class="zm-node${off ? ' zm-off' : ''}"/>`;
+      const anchor = Math.cos(a) > 0.3 ? 'start' : Math.cos(a) < -0.3 ? 'end' : 'middle';
+      const lx = x + (anchor === 'start' ? 16 : anchor === 'end' ? -16 : 0), ly = y + (anchor === 'middle' ? (Math.sin(a) > 0 ? 28 : -30) : 4);
+      const sub = [router ? 'router' : sleepy ? 'battery' : 'end device', o.v && o.v.rssi !== undefined ? `${o.v.rssi} dBm` : '', off ? 'offline' : '', linked ? '' : 'route unknown'].filter(Boolean).join(' · ');
+      dots += `${shape}<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" class="zm-name">${esc(label(o))}</text>
+        <text x="${lx.toFixed(1)}" y="${(ly + 14).toFixed(1)}" text-anchor="${anchor}" class="zm-sub">${esc(sub)}</text>`;
     });
-    el.innerHTML = rows.length
-      ? `<p class="muted">Hub (coordinator) → direct links, from its neighbour table:</p>
-         <table><tr><th>Device</th><th>Type</th><th>Link</th><th>Quality</th><th>RSSI</th></tr>${rows.join('')}</table>`
-      : 'No neighbours yet.';
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="zmap" role="img" aria-label="Zigbee network map">${lines}
+      <circle cx="${cx}" cy="${cy}" r="18" class="zm-hub"/><text x="${cx}" y="${cy + 4}" text-anchor="middle" class="zm-hub-t">hub</text>${dots}</svg>
+      <p class="muted zm-key">Square = router (mains), circle = end device, dashed = sleepy. Line colour = link quality:
+      <span class="badge ok">good</span> <span class="badge warn">fair</span> <span class="badge bad">poor</span>.</p>`;
   },
   list(devs) {
     const el = $('#zb-devs');
@@ -203,6 +225,7 @@ pages.devices = {
     el.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', () => this.rename(b.dataset.rename)));
     el.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', () => this.remove(b.dataset.remove)));
     el.querySelectorAll('[data-reinterview]').forEach((b) => b.addEventListener('click', () => this.reinterview(b.dataset.reinterview)));
+    el.querySelectorAll('[data-switch]').forEach((b) => b.addEventListener('click', () => this.setOn(b.dataset.switch, b.dataset.to === '1')));
   },
   card(v) {
     const title = v.name || [v.manuf, v.model].filter(Boolean).join(' ') || `0x${v.short.toString(16).padStart(4, '0')}`;
@@ -218,7 +241,16 @@ pages.devices = {
     } else if (v.kind) rows.push([v.kind, '<span class="muted">no report yet</span>']);
     if (v.temperature !== undefined) rows.push(['Temperature', `${v.temperature.toFixed(1)} °C`]);
     if (v.humidity !== undefined) rows.push(['Humidity', `${v.humidity.toFixed(0)} %`]);
-    if (v.on !== undefined) rows.push(['State', v.on ? 'on' : 'off']);
+    if (v.switchable) {
+      const busy = this.switching[v.ieee] && Date.now() - this.switching[v.ieee].t < 8000 && this.switching[v.ieee].was === v.on;
+      if (!busy) delete this.switching[v.ieee];
+      const state = v.on === undefined ? '<span class="muted">unknown</span>' : v.on ? '<span class="badge ok">on</span>' : '<span class="badge">off</span>';
+      rows.push(['Power', `${state} <button class="ghost small" data-switch="${v.ieee}" data-to="${v.on ? 0 : 1}"${busy ? ' disabled' : ''}>${busy ? '…' : v.on ? 'Turn off' : 'Turn on'}</button>`]);
+    } else if (v.on !== undefined) rows.push(['State', v.on ? 'on' : 'off']);
+    if (v.watts !== undefined) rows.push(['Power draw', `${v.watts.toFixed(1)} W`]);
+    if (v.volts !== undefined) rows.push(['Voltage', `${v.volts.toFixed(1)} V`]);
+    if (v.amps !== undefined) rows.push(['Current', `${v.amps.toFixed(3)} A`]);
+    if (v.kwh !== undefined) rows.push(['Energy', `${v.kwh.toFixed(3)} kWh`]);
     if (v.occupied !== undefined) rows.push(['Occupancy', v.occupied ? 'occupied' : 'clear']);
     if (v.battery !== undefined) rows.push(['Battery', `${Math.round(v.battery)} %${v.battery_low ? ' <span class="badge bad">low</span>' : ''}`]);
     else if (v.battery_v !== undefined) rows.push(['Battery', `${v.battery_v.toFixed(1)} V`]);
@@ -262,6 +294,12 @@ pages.devices = {
     if (document.activeElement) document.activeElement.blur();
     try { await api('/api/zb/reinterview', { method: 'POST', json: { ieee } }); } catch (e) { alert(`Re-interview failed: ${e.message}`); return; }
     this.reiv[ieee] = { busy: false, done: 0 };
+    this.poll();
+  },
+  async setOn(ieee, on) {
+    const v = this.data && this.data.devices.find((d) => d.ieee === ieee);
+    this.switching[ieee] = { t: Date.now(), was: v ? v.on : undefined };
+    try { await api('/api/zb/set', { method: 'POST', json: { ieee, on } }); } catch (e) { delete this.switching[ieee]; alert(e.message); }
     this.poll();
   },
   async remove(ieee) {

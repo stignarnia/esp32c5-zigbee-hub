@@ -97,6 +97,24 @@ typedef struct {
     uint8_t batt_v;   bool has_batt_v;   // 100 mV
     bool on;          bool has_on;
     uint8_t occ;      bool has_occ;
+    // Electrical Measurement (0x0B04) and Metering (0x0702): raw values and the device's
+    // own scale factors (0 = not read yet, counts as 1)
+    int16_t power;    bool has_power;    // active power
+    uint16_t volt;    bool has_volt;     // RMS voltage
+    uint16_t curr;    bool has_curr;     // RMS current
+    uint64_t energy;  bool has_energy;   // current summation delivered
+    uint16_t p_mul, p_div, v_mul, v_div, i_mul, i_div;
+    uint32_t e_mul, e_div;
+    // Reporting setup, per cluster (rep_bit): answered by the device (configured or
+    // refused). Always-on devices get the unanswered ones again (REP_RETRY_US apart);
+    // a lost setup frame would otherwise leave a cluster that never reports. RAM only:
+    // after a boot the setup is confirmed again.
+    uint8_t rep_ans;
+    uint8_t rep_tries;
+    int64_t rep_retry_us;
+    // On/Off state read back after a command (the report can be lost): when, 0 = none
+    int64_t onoff_read_us[2];
+    uint8_t onoff_ep;
 } zdev_t;
 
 static zdev_t *s_dev;                    // PSRAM, ZB_MAX_DEVICES
@@ -127,6 +145,22 @@ static zdev_t *by_ieee(uint64_t ieee)
     }
     return NULL;
 }
+
+static double scaled(double raw, uint32_t mul, uint32_t div)
+{
+    return raw * (mul ? mul : 1) / (div ? div : 1);
+}
+static bool has_server(const zdev_t *d, uint16_t cluster, uint8_t *ep_out);
+// A plug whose relay reports off draws nothing, but some (SONOFF S60ZBTPF) keep reporting
+// the last reading taken while it was on: power and current are 0 while the device says off.
+static bool relay_off(const zdev_t *d)
+{
+    return d->has_on && !d->on && has_server(d, EZB_ZCL_CLUSTER_ID_ON_OFF, NULL);
+}
+static double watts(const zdev_t *d) { return relay_off(d) ? 0 : scaled(d->power, d->p_mul, d->p_div); }
+static double volts(const zdev_t *d) { return scaled(d->volt, d->v_mul, d->v_div); }
+static double amps(const zdev_t *d)  { return relay_off(d) ? 0 : scaled(d->curr, d->i_mul, d->i_div); }
+static double kwh(const zdev_t *d)   { return scaled((double)d->energy, d->e_mul, d->e_div); }
 
 static int dev_index(const zdev_t *d)
 {
@@ -226,6 +260,10 @@ typedef struct {
     uint8_t batt_v;       bool has_batt_v;
     bool on;              bool has_on;
     uint8_t occ;          bool has_occ;
+    int16_t power;        bool has_power;
+    uint16_t volt;        bool has_volt;
+    uint16_t curr;        bool has_curr;
+    uint64_t energy;      bool has_energy;
 } live_t;
 
 static zb_event_cb_t s_event_cbs[ZB_MAX_EVENT_CBS];
@@ -246,6 +284,8 @@ static void live_of(const zdev_t *d, live_t *l)
         .temp = d->temp, .has_temp = d->has_temp, .hum = d->hum, .has_hum = d->has_hum,
         .batt = d->batt, .has_batt = d->has_batt, .batt_v = d->batt_v, .has_batt_v = d->has_batt_v,
         .on = d->on, .has_on = d->has_on, .occ = d->occ, .has_occ = d->has_occ,
+        .power = d->power, .has_power = d->has_power, .volt = d->volt, .has_volt = d->has_volt,
+        .curr = d->curr, .has_curr = d->has_curr, .energy = d->energy, .has_energy = d->has_energy,
     };
 }
 
@@ -273,7 +313,8 @@ static void emit(const zdev_t *d, const char *attr, const char *alias, bool is_b
 
 // What changed decides how soon the registry file is written: zone status, on/off and
 // occupancy within 2 s (a door that was open before a reboot must read open after it);
-// battery/temperature/humidity report often and can wait a few minutes.
+// battery/temperature/humidity and the meter readings report often and can wait a few
+// minutes.
 static void persist_diff(const zdev_t *d, const live_t *b)
 {
     if (d->zone_status != b->zone_status || d->has_zone_status != b->has_zone_status || d->on != b->on ||
@@ -281,7 +322,9 @@ static void persist_diff(const zdev_t *d, const live_t *b)
         s_dirty = true;
     } else if (d->batt != b->batt || d->batt_v != b->batt_v || d->temp != b->temp || d->hum != b->hum ||
                d->has_batt != b->has_batt || d->has_batt_v != b->has_batt_v || d->has_temp != b->has_temp ||
-               d->has_hum != b->has_hum) {
+               d->has_hum != b->has_hum || d->power != b->power || d->volt != b->volt || d->curr != b->curr ||
+               d->energy != b->energy || d->has_power != b->has_power || d->has_volt != b->has_volt ||
+               d->has_curr != b->has_curr || d->has_energy != b->has_energy) {
         s_state_dirty = true;
     }
 }
@@ -303,6 +346,11 @@ static void emit_diff(const zdev_t *d, const live_t *b)
     if (d->has_hum && (!b->has_hum || d->hum != b->hum)) emit(d, "humidity", NULL, false, d->hum / 100.0);
     if (d->has_on && (!b->has_on || d->on != b->on)) emit(d, "on", NULL, true, d->on);
     if (d->has_occ && (!b->has_occ || (d->occ & 1) != (b->occ & 1))) emit(d, "occupied", NULL, true, d->occ & 1);
+    bool relay = d->has_on && (!b->has_on || d->on != b->on);  // power/current follow the relay
+    if (d->has_power && (relay || !b->has_power || d->power != b->power)) emit(d, "power", NULL, false, watts(d));
+    if (d->has_volt && (!b->has_volt || d->volt != b->volt)) emit(d, "voltage", NULL, false, volts(d));
+    if (d->has_curr && (relay || !b->has_curr || d->curr != b->curr)) emit(d, "current", NULL, false, amps(d));
+    if (d->has_energy && (!b->has_energy || d->energy != b->energy)) emit(d, "energy", NULL, false, kwh(d));
 }
 
 // ---- interview: requests --------------------------------------------------------------
@@ -389,7 +437,7 @@ typedef struct {
     uint16_t cluster, attr;
     uint8_t type;
     uint16_t min_s, max_s;
-    uint32_t change;
+    uint64_t change;             // in the attribute's raw units
 } report_spec_t;
 
 static const report_spec_t REPORTS[] = {
@@ -399,15 +447,47 @@ static const report_spec_t REPORTS[] = {
     {EZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, 0x0000, EZB_ZCL_ATTR_TYPE_UINT16, 10, 600, 100},
     {EZB_ZCL_CLUSTER_ID_ON_OFF, 0x0000, EZB_ZCL_ATTR_TYPE_BOOL, 0, 300, 0},
     {EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING, 0x0000, EZB_ZCL_ATTR_TYPE_MAP8, 0, 300, 0},
+    {EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT, 0x050B, EZB_ZCL_ATTR_TYPE_INT16, 5, 300, 1},    // active power
+    {EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT, 0x0505, EZB_ZCL_ATTR_TYPE_UINT16, 10, 600, 2},  // RMS voltage
+    {EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT, 0x0508, EZB_ZCL_ATTR_TYPE_UINT16, 5, 300, 10},  // RMS current
+    {EZB_ZCL_CLUSTER_ID_METERING, 0x0000, EZB_ZCL_ATTR_TYPE_UINT48, 10, 600, 1},               // energy
 };
 
-static void bind_and_report(zdev_t *d)
+#define REP_RETRY_US  (20LL * 1000000)
+#define REP_TRIES     5
+
+static uint8_t rep_bit(uint16_t cluster)
+{
+    static const uint16_t CL[] = {EZB_ZCL_CLUSTER_ID_POWER_CONFIG, EZB_ZCL_CLUSTER_ID_TEMPERATURE_MEASUREMENT,
+                                  EZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, EZB_ZCL_CLUSTER_ID_ON_OFF,
+                                  EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING, EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT,
+                                  EZB_ZCL_CLUSTER_ID_METERING};
+    for (size_t i = 0; i < sizeof(CL) / sizeof(CL[0]); i++) {
+        if (CL[i] == cluster) return 1 << i;
+    }
+    return 0;
+}
+
+// Clusters of REPORTS the device has whose setup it hasn't answered yet
+static uint8_t rep_missing(const zdev_t *d)
+{
+    uint8_t want = 0;
+    for (size_t i = 0; i < sizeof(REPORTS) / sizeof(REPORTS[0]); i++) {
+        if (has_server(d, REPORTS[i].cluster, NULL)) want |= rep_bit(REPORTS[i].cluster);
+    }
+    return want & ~d->rep_ans;
+}
+
+static void initial_read(zdev_t *d);
+
+// Bind + configure reporting for the clusters in `which` (rep_bit mask)
+static void bind_and_report(zdev_t *d, uint8_t which)
 {
     uint16_t last_cluster = 0;
     for (size_t i = 0; i < sizeof(REPORTS) / sizeof(REPORTS[0]); i++) {
         const report_spec_t *s = &REPORTS[i];
         uint8_t ep;
-        if (!has_server(d, s->cluster, &ep)) continue;
+        if (!(which & rep_bit(s->cluster)) || !has_server(d, s->cluster, &ep)) continue;
         if (s->cluster != last_cluster) {
             ezb_zdo_bind_req_t b = {
                 .dst_nwk_addr = d->short_addr,
@@ -430,15 +510,37 @@ static void bind_and_report(zdev_t *d)
         rec.client.attr_type = s->type;
         rec.client.min_interval = s->min_s;
         rec.client.max_interval = s->max_s;
-        rec.client.reportable_change.u32 = s->change;
+        rec.client.reportable_change.u64 = s->change;  // little-endian: the low bytes are the value
         ezb_zcl_config_report_cmd_t c = {
             .cmd_ctrl = ctrl_to(d, ep, s->cluster),
             .payload = {.record_number = 1, .record_field = &rec},
         };
         ezb_zcl_config_report_cmd_req(&c);
     }
-    // An initial read, so the UI has values before the first report.
+}
+
+// An initial read, so the UI has values before the first report.
+static void initial_read(zdev_t *d)
+{
     uint8_t ep;
+    if (has_server(d, EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT, &ep)) {
+        static uint16_t em_attrs[] = {0x0600, 0x0601, 0x0602, 0x0603, 0x0604, 0x0605, 0x0505, 0x0508, 0x050B};
+        ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, ep, EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT),
+                                     .payload = {.attr_number = 9, .attr_field = em_attrs}};
+        ezb_zcl_read_attr_cmd_req(&r);
+    }
+    if (has_server(d, EZB_ZCL_CLUSTER_ID_METERING, &ep)) {
+        static uint16_t m_attrs[] = {0x0301, 0x0302, 0x0000};
+        ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, ep, EZB_ZCL_CLUSTER_ID_METERING),
+                                     .payload = {.attr_number = 3, .attr_field = m_attrs}};
+        ezb_zcl_read_attr_cmd_req(&r);
+    }
+    if (has_server(d, EZB_ZCL_CLUSTER_ID_ON_OFF, &ep)) {
+        static uint16_t onoff_attr[] = {0x0000};
+        ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, ep, EZB_ZCL_CLUSTER_ID_ON_OFF),
+                                     .payload = {.attr_number = 1, .attr_field = onoff_attr}};
+        ezb_zcl_read_attr_cmd_req(&r);
+    }
     if (has_server(d, EZB_ZCL_CLUSTER_ID_POWER_CONFIG, &ep)) {
         static uint16_t attrs[] = {0x0020, 0x0021};
         ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, ep, EZB_ZCL_CLUSTER_ID_POWER_CONFIG),
@@ -474,8 +576,12 @@ static void interview_step(zdev_t *d)
             ias_setup(d, ep);
         }
         if (!(d->done & IV_REPORT)) {
-            bind_and_report(d);
-            d->done |= IV_REPORT;  // fire-and-forget: reports arriving prove it worked
+            d->rep_ans = 0;
+            d->rep_tries = 0;
+            d->rep_retry_us = esp_timer_get_time() + REP_RETRY_US;
+            bind_and_report(d, 0xFF);
+            initial_read(d);
+            d->done |= IV_REPORT;  // answers are tracked in rep_ans; the tick re-sends missing ones
         }
     }
     d->tries++;
@@ -602,6 +708,37 @@ static void apply_attr(zdev_t *d, uint16_t cluster, uint16_t attr, uint8_t type,
     case EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING:
         if (attr == 0x0000) { d->occ = *(const uint8_t *)v; d->has_occ = true; }
         break;
+    case EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT: {
+        uint16_t u16;
+        memcpy(&u16, v, 2);
+        switch (attr) {
+        case 0x050B: memcpy(&d->power, v, 2); d->has_power = d->power != (int16_t)0x8000; break;
+        case 0x0505: d->volt = u16; d->has_volt = u16 != 0xFFFF; break;
+        case 0x0508: d->curr = u16; d->has_curr = u16 != 0xFFFF; break;
+        case 0x0600: d->v_mul = u16; break;
+        case 0x0601: d->v_div = u16; break;
+        case 0x0602: d->i_mul = u16; break;
+        case 0x0603: d->i_div = u16; break;
+        case 0x0604: d->p_mul = u16; break;
+        case 0x0605: d->p_div = u16; break;
+        default: break;
+        }
+        break;
+    }
+    case EZB_ZCL_CLUSTER_ID_METERING: {
+        const uint8_t *b = v;
+        if (attr == 0x0000) {
+            uint64_t e = 0;
+            for (int i = 0; i < 6; i++) e |= (uint64_t)b[i] << (8 * i);
+            d->energy = e;
+            d->has_energy = e != 0xFFFFFFFFFFFFULL;
+        } else if (attr == 0x0301 || attr == 0x0302) {
+            uint32_t u24 = b[0] | b[1] << 8 | (uint32_t)b[2] << 16;
+            if (attr == 0x0301) d->e_mul = u24;
+            else d->e_div = u24;
+        }
+        break;
+    }
     case EZB_ZCL_CLUSTER_ID_IAS_ZONE:
         if (attr == EZB_ZCL_ATTR_IAS_ZONE_ZONE_TYPE_ID) memcpy(&d->zone_type, v, 2);
         else if (attr == EZB_ZCL_ATTR_IAS_ZONE_ZONE_STATUS_ID) {
@@ -640,6 +777,14 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
         if (cl == EZB_ZCL_CLUSTER_ID_BASIC && !(d->done & IV_BASIC)) {
             d->done |= IV_BASIC;
             ESP_LOGI(TAG, "0x%04x: '%s' '%s', power source %u", d->short_addr, d->manuf, d->model, d->power_src);
+        }
+        if (cl == EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT) {
+            ESP_LOGI(TAG, "0x%04x: meter read: %.1f W, %.1f V, %.3f A (raw %d/%u/%u, scale P %u/%u V %u/%u I %u/%u)",
+                     d->short_addr, watts(d), volts(d), amps(d), d->power, d->volt, d->curr, d->p_mul, d->p_div,
+                     d->v_mul, d->v_div, d->i_mul, d->i_div);
+        } else if (cl == EZB_ZCL_CLUSTER_ID_METERING) {
+            ESP_LOGI(TAG, "0x%04x: energy read: %.3f kWh (raw %llu, scale %lu/%lu)", d->short_addr, kwh(d),
+                     (unsigned long long)d->energy, (unsigned long)d->e_mul, (unsigned long)d->e_div);
         }
         if (cl == EZB_ZCL_CLUSTER_ID_IAS_ZONE && d->zone_type) {
             ESP_LOGI(TAG, "0x%04x: IAS zone type 0x%04x (%s), status 0x%04x", d->short_addr, d->zone_type,
@@ -684,6 +829,7 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
         if (!d) break;
         heard(d, m->in.header->rssi);
         bool ok = m->in.variables && m->in.variables->status == EZB_ZCL_STATUS_SUCCESS;
+        d->rep_ans |= rep_bit(m->info.cluster_id);
         ESP_LOGI(TAG, "0x%04x: reporting on cluster 0x%04x %s", d->short_addr, m->info.cluster_id,
                  ok ? "configured" : "refused");
         m->out.result = EZB_ZCL_STATUS_SUCCESS;
@@ -734,9 +880,33 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
 
 // ---- signals ------------------------------------------------------------------------------
 
-void zb_dev_on_announce(uint16_t short_addr, uint64_t ieee, uint8_t capability)
+// Devices removed or gone since boot. The neighbour table can still list one for a
+// while (a sleepy device that never heard the leave request stays as a child), and the
+// neighbour fallback below must not bring it straight back. Its next announce or join
+// does.
+#define FORGOTTEN_MAX 8
+static uint64_t s_forgotten[FORGOTTEN_MAX];
+static int s_forgotten_next;
+
+static bool is_forgotten(uint64_t ieee)
 {
-    LOCK();
+    for (int i = 0; i < FORGOTTEN_MAX; i++) {
+        if (s_forgotten[i] == ieee) return true;
+    }
+    return false;
+}
+
+static void unforget(uint64_t ieee)
+{
+    for (int i = 0; i < FORGOTTEN_MAX; i++) {
+        if (s_forgotten[i] == ieee) s_forgotten[i] = 0;
+    }
+}
+
+// Adds the device if it is new and starts its interview. Called with s_mtx held.
+// `how` says where the device came from, for the log.
+static zdev_t *adopt(uint16_t short_addr, uint64_t ieee, uint8_t capability, const char *how)
+{
     zdev_t *d = by_ieee(ieee);
     bool fresh = false;
     if (!d) {
@@ -744,9 +914,8 @@ void zb_dev_on_announce(uint16_t short_addr, uint64_t ieee, uint8_t capability)
             if (!s_dev[i].used) d = &s_dev[i];
         }
         if (!d) {
-            UNLOCK();
             ESP_LOGE(TAG, "device table full (%d): ignoring 0x%016llx", ZB_MAX_DEVICES, (unsigned long long)ieee);
-            return;
+            return NULL;
         }
         memset(d, 0, sizeof(*d));
         d->used = true;
@@ -760,20 +929,77 @@ void zb_dev_on_announce(uint16_t short_addr, uint64_t ieee, uint8_t capability)
     d->last_seen_us = esp_timer_get_time();  // not heard(): the interview starts below
     d->pings = 0;
     d->offline = false;
-    ESP_LOGI(TAG, "%s 0x%016llx short 0x%04x cap 0x%02x%s", fresh ? "NEW device" : "rejoined",
-             (unsigned long long)ieee, short_addr, capability, (capability & 0x08) ? "" : " (sleepy)");
+    ESP_LOGI(TAG, "%s 0x%016llx short 0x%04x cap 0x%02x%s (%s)", fresh ? "NEW device" : "rejoined",
+             (unsigned long long)ieee, short_addr, capability, (capability & 0x08) ? "" : " (sleepy)", how);
     if (!complete(d)) {
         d->tries = 0;
         d->woke_us = esp_timer_get_time();
         interview_step(d);  // immediately: a sleepy device is awake only now
     }
     changed(true);
+    return d;
+}
+
+void zb_dev_on_announce(uint16_t short_addr, uint64_t ieee, uint8_t capability)
+{
+    LOCK();
+    unforget(ieee);
+    adopt(short_addr, ieee, capability, "announce");
+    UNLOCK();
+}
+
+// The trust centre let a device in (join or rejoin). Its announce normally follows; a
+// device whose announce is lost would otherwise never be registered, and a sleepy one
+// is awake now, so a new device's interview starts here. A known device only gets its
+// short address updated: the announce (or its next frame) does the rest.
+void zb_dev_on_joined(uint16_t short_addr, uint64_t ieee, uint8_t capability)
+{
+    LOCK();
+    unforget(ieee);
+    zdev_t *d = by_ieee(ieee);
+    if (!d) {
+        adopt(short_addr, ieee, capability, "join");
+    } else if (d->short_addr != short_addr) {
+        ESP_LOGI(TAG, "0x%04x %s: new short address 0x%04x", d->short_addr, d->name[0] ? d->name : d->model,
+                 short_addr);
+        d->short_addr = short_addr;
+        changed(true);
+    }
+    UNLOCK();
+}
+
+// A neighbour-table entry (1 s refresh): the fallback for a device that joined while
+// both its join signal and its announce were missed. Unknown devices are adopted
+// unless removed since boot; a known one's short address follows the table.
+void zb_dev_on_neighbor(uint16_t short_addr, uint64_t ieee, uint8_t capability)
+{
+    if (ieee == 0 || ieee == UINT64_MAX || ieee == s_my_ieee) return;
+    LOCK();
+    zdev_t *d = by_ieee(ieee);
+    if (!d) {
+        if (!is_forgotten(ieee)) adopt(short_addr, ieee, capability, "neighbour table, no announce seen");
+    } else if ((capability & 0x02) && !(d->cap & 0x08)) {
+        // A router recorded as sleepy (registered before routers were recognised here)
+        ESP_LOGI(TAG, "0x%04x %s: router, receiver always on (cap 0x%02x -> 0x%02x)", d->short_addr,
+                 d->name[0] ? d->name : d->model, d->cap, d->cap | capability);
+        d->cap |= capability;
+        changed(true);
+    } else if (d->short_addr != short_addr) {
+        ESP_LOGI(TAG, "0x%04x %s: new short address 0x%04x (neighbour table)", d->short_addr,
+                 d->name[0] ? d->name : d->model, short_addr);
+        d->short_addr = short_addr;
+        changed(true);
+    }
     UNLOCK();
 }
 
 void zb_dev_on_leave(uint64_t ieee)
 {
     LOCK();
+    if (!is_forgotten(ieee)) {
+        s_forgotten[s_forgotten_next] = ieee;
+        s_forgotten_next = (s_forgotten_next + 1) % FORGOTTEN_MAX;
+    }
     zdev_t *d = by_ieee(ieee);
     if (d) {
         ESP_LOGW(TAG, "0x%04x %s left the network", d->short_addr, d->name);
@@ -828,6 +1054,38 @@ void zb_dev_tick(void *arg)
             live_of(d, &before);
             availability(d, now);
             emit_diff(d, &before);
+            for (int k = 0; k < 2; k++) {
+                if (d->onoff_read_us[k] && now >= d->onoff_read_us[k]) {
+                    d->onoff_read_us[k] = 0;
+                    static uint16_t onoff_attr[] = {0x0000};
+                    ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, d->onoff_ep, EZB_ZCL_CLUSTER_ID_ON_OFF),
+                                                 .payload = {.attr_number = 1, .attr_field = onoff_attr}};
+                    ezb_zcl_read_attr_cmd_req(&r);
+                    uint8_t ep;
+                    if (k == 1 && has_server(d, EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT, &ep)) {
+                        static uint16_t em_attrs[] = {0x0505, 0x0508, 0x050B};
+                        ezb_zcl_read_attr_cmd_t m = {
+                            .cmd_ctrl = ctrl_to(d, ep, EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT),
+                            .payload = {.attr_number = 3, .attr_field = em_attrs}};
+                        ezb_zcl_read_attr_cmd_req(&m);
+                    }
+                }
+            }
+            uint8_t miss;
+            if (complete(d) && (d->cap & 0x08) && !d->offline && d->rep_retry_us && now >= d->rep_retry_us &&
+                (miss = rep_missing(d))) {
+                if (d->rep_tries >= REP_TRIES) {
+                    ESP_LOGW(TAG, "0x%04x %s: reporting setup unanswered (clusters 0x%02x) after %d tries", d->short_addr,
+                             d->name[0] ? d->name : d->model, miss, d->rep_tries);
+                    d->rep_retry_us = 0;
+                } else {
+                    d->rep_tries++;
+                    d->rep_retry_us = now + REP_RETRY_US;
+                    ESP_LOGI(TAG, "0x%04x %s: reporting setup again (clusters 0x%02x, try %d)", d->short_addr,
+                             d->name[0] ? d->name : d->model, miss, d->rep_tries);
+                    bind_and_report(d, miss);
+                }
+            }
         }
         if (!d->used || complete(d) || !d->next_try_us || now < d->next_try_us) continue;
         if (d->tries >= MAX_TRIES) {
@@ -886,6 +1144,18 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
         if (d->has_batt_v) cJSON_AddNumberToObject(st, "batt_v", d->batt_v);
         if (d->has_on) cJSON_AddBoolToObject(st, "on", d->on);
         if (d->has_occ) cJSON_AddNumberToObject(st, "occ", d->occ);
+        if (d->has_power) cJSON_AddNumberToObject(st, "pw", d->power);
+        if (d->has_volt) cJSON_AddNumberToObject(st, "volt", d->volt);
+        if (d->has_curr) cJSON_AddNumberToObject(st, "curr", d->curr);
+        if (d->has_energy) cJSON_AddNumberToObject(st, "energy", (double)d->energy);
+        // the device's scale factors (read once, at the interview)
+        uint32_t sc[8] = {d->p_mul, d->p_div, d->v_mul, d->v_div, d->i_mul, d->i_div, d->e_mul, d->e_div};
+        bool any = false;
+        for (int i = 0; i < 8; i++) any |= sc[i] != 0;
+        if (any) {
+            cJSON *a = cJSON_AddArrayToObject(o, "scale");
+            for (int i = 0; i < 8; i++) cJSON_AddItemToArray(a, cJSON_CreateNumber(sc[i]));
+        }
     }
     if (live) {
         int64_t now = esp_timer_get_time();
@@ -909,6 +1179,11 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
         if (d->has_hum) cJSON_AddNumberToObject(o, "humidity", d->hum / 100.0);
         if (d->has_on) cJSON_AddBoolToObject(o, "on", d->on);
         if (d->has_occ) cJSON_AddBoolToObject(o, "occupied", d->occ & 1);
+        if (has_server(d, EZB_ZCL_CLUSTER_ID_ON_OFF, NULL)) cJSON_AddBoolToObject(o, "switchable", true);
+        if (d->has_power) cJSON_AddNumberToObject(o, "watts", watts(d));
+        if (d->has_volt) cJSON_AddNumberToObject(o, "volts", volts(d));
+        if (d->has_curr) cJSON_AddNumberToObject(o, "amps", amps(d));
+        if (d->has_energy) cJSON_AddNumberToObject(o, "kwh", kwh(d));
     }
     return o;
 }
@@ -1058,9 +1333,22 @@ static void load(void)
         RESTORE("batt", batt, has_batt);
         RESTORE("batt_v", batt_v, has_batt_v);
         RESTORE("occ", occ, has_occ);
+        RESTORE("pw", power, has_power);
+        RESTORE("volt", volt, has_volt);
+        RESTORE("curr", curr, has_curr);
 #undef RESTORE
+        const cJSON *en = cJSON_GetObjectItem(st, "energy");
+        if (cJSON_IsNumber(en)) { d->energy = (uint64_t)en->valuedouble; d->has_energy = true; }
+        const cJSON *sc = cJSON_GetObjectItem(o, "scale");
+        if (cJSON_GetArraySize(sc) == 8) {
+            uint32_t v8[8];
+            for (int i = 0; i < 8; i++) v8[i] = (uint32_t)cJSON_GetArrayItem(sc, i)->valuedouble;
+            d->p_mul = v8[0]; d->p_div = v8[1]; d->v_mul = v8[2]; d->v_div = v8[3];
+            d->i_mul = v8[4]; d->i_div = v8[5]; d->e_mul = v8[6]; d->e_div = v8[7];
+        }
         const cJSON *on = cJSON_GetObjectItem(st, "on");
         if (cJSON_IsBool(on)) { d->on = cJSON_IsTrue(on); d->has_on = true; }
+        d->rep_retry_us = 30LL * 1000000;  // reporting setup confirmed again once the network is up
         count++;
     }
     cJSON_Delete(arr);
@@ -1120,6 +1408,12 @@ int zb_snapshot(zb_dev_info_t *out, int max)
         o->hum_meas = has_server(d, EZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT, NULL);
         o->occ_sensing = has_server(d, EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING, NULL);
         o->on_off = has_server(d, EZB_ZCL_CLUSTER_ID_ON_OFF, NULL);
+        o->elec_meas = has_server(d, EZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT, NULL);
+        o->metering = has_server(d, EZB_ZCL_CLUSTER_ID_METERING, NULL);
+        o->has_power = d->has_power;      o->power = watts(d);
+        o->has_volt = d->has_volt;        o->volt = volts(d);
+        o->has_curr = d->has_curr;        o->curr = amps(d);
+        o->has_energy = d->has_energy;    o->energy = kwh(d);
         o->zone_type = d->zone_type;
         o->available = !d->offline;
         o->sleepy = !(d->cap & 0x08);
@@ -1238,9 +1532,43 @@ esp_err_t zb_get_attr(const char *device, const char *attr, double *value, bool 
         else if (d->has_batt_v && strcmp(attr, "battery_v") == 0) { v = d->batt_v / 10.0; err = ESP_OK; }
         else if (d->has_temp && strcmp(attr, "temperature") == 0) { v = d->temp / 100.0; err = ESP_OK; }
         else if (d->has_hum && strcmp(attr, "humidity") == 0) { v = d->hum / 100.0; err = ESP_OK; }
+        else if (d->has_power && strcmp(attr, "power") == 0) { v = watts(d); err = ESP_OK; }
+        else if (d->has_volt && strcmp(attr, "voltage") == 0) { v = volts(d); err = ESP_OK; }
+        else if (d->has_curr && strcmp(attr, "current") == 0) { v = amps(d); err = ESP_OK; }
+        else if (d->has_energy && strcmp(attr, "energy") == 0) { v = kwh(d); err = ESP_OK; }
     }
     UNLOCK();
     *value = v;
     *is_bool = b;
     return err;
+}
+
+// Where to send a cluster command for `device`: its short address and the endpoint with
+// that server cluster. Any task.
+esp_err_t zb_dev_target(const char *device, uint16_t cluster, uint16_t *short_addr, uint8_t *ep)
+{
+    esp_err_t err = ESP_OK;
+    LOCK();
+    zdev_t *d = by_name_or_ieee(device);
+    if (!d) err = ESP_ERR_NOT_FOUND;
+    else if (!has_server(d, cluster, ep)) err = ESP_ERR_NOT_SUPPORTED;
+    else *short_addr = d->short_addr;
+    UNLOCK();
+    return err;
+}
+
+// An On/Off command was just sent to `short_addr`: read the state back 1.5 s and 4 s
+// later, in case the device's report is lost; the second read takes the meter too.
+// Zigbee task.
+void zb_dev_onoff_sent(uint16_t short_addr, uint8_t ep)
+{
+    LOCK();
+    zdev_t *d = by_short(short_addr);
+    if (d) {
+        int64_t now = esp_timer_get_time();
+        d->onoff_ep = ep;
+        d->onoff_read_us[0] = now + 1500000;
+        d->onoff_read_us[1] = now + 4000000;
+    }
+    UNLOCK();
 }

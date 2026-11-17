@@ -8,7 +8,7 @@
 zb = {}
 ---Call fn(value, device, attribute) when the attribute changes. "*" matches any device / attribute.
 ---@param device string name from the Devices page, IEEE hex, or "*"
----@param attribute string "open", "motion", "water", "battery", "temperature", ... or "*"
+---@param attribute string "open", "motion", "water", "battery", "temperature", "on", "power", ... or "*"
 ---@param fn fun(value: boolean|number, device: string, attribute: string)
 function zb.on(device, attribute, fn) end
 ---Current value; nil if not known yet. Last known value is kept across restarts.
@@ -16,6 +16,19 @@ function zb.on(device, attribute, fn) end
 ---@param attribute string
 ---@return boolean|number|nil
 function zb.get(device, attribute) end
+---Switch a device on or off (plugs, relays: anything with an On/Off cluster). Never blocks: the
+---command is queued and the new state arrives as the device's report (zb.on / zb.get).
+---@param device string
+---@param attribute "on"
+---@param value boolean
+---@return true|nil ok
+---@return string? err "no such device" or "device can't be switched"
+function zb.set(device, attribute, value) end
+---Toggle a device's on/off state. Same returns as zb.set.
+---@param device string
+---@return true|nil ok
+---@return string? err
+function zb.toggle(device) end
 ---@return {name: string, ieee: string, model: string, manuf: string, kind: string, available: boolean}[]
 function zb.devices() end
 

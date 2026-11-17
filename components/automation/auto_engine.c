@@ -945,6 +945,34 @@ static int l_zb_get(lua_State *L)
     return 2;
 }
 
+// zb.set(device, "on", true|false): queued to the Zigbee task; the device's report brings
+// the new state (zb.on / zb.get). Returns true, or nil and the reason.
+static int zb_switch_result(lua_State *L, esp_err_t err)
+{
+    if (err == ESP_OK) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, err == ESP_ERR_NOT_FOUND ? "no such device"
+                      : err == ESP_ERR_NOT_SUPPORTED ? "device can't be switched" : esp_err_to_name(err));
+    return 2;
+}
+
+static int l_zb_set(lua_State *L)
+{
+    const char *dev = luaL_checkstring(L, 1);
+    const char *attr = luaL_checkstring(L, 2);
+    if (strcmp(attr, "on") != 0) return luaL_error(L, "zb.set: attribute \"%s\" can't be set (only \"on\")", attr);
+    luaL_checktype(L, 3, LUA_TBOOLEAN);
+    return zb_switch_result(L, zb_set_on(dev, lua_toboolean(L, 3) ? ZB_ON : ZB_OFF));
+}
+
+static int l_zb_toggle(lua_State *L)
+{
+    return zb_switch_result(L, zb_set_on(luaL_checkstring(L, 1), ZB_TOGGLE));
+}
+
 static int l_zb_devices(lua_State *L)
 {
     box_t *b = box_new(L);
@@ -1130,7 +1158,8 @@ static void open_libs(lua_State *L)
     lua_register(L, "secret", l_secret);
     lua_register(L, "cron", l_cron);
 
-    static const luaL_Reg zb[] = {{"on", l_zb_on}, {"get", l_zb_get}, {"devices", l_zb_devices}, {NULL, NULL}};
+    static const luaL_Reg zb[] = {{"on", l_zb_on},          {"get", l_zb_get},       {"set", l_zb_set},
+                                  {"toggle", l_zb_toggle}, {"devices", l_zb_devices}, {NULL, NULL}};
     luaL_newlib(L, zb);
     lua_setglobal(L, "zb");
     static const luaL_Reg tm[] = {{"after", l_timer_after}, {"every", l_timer_every}, {"cancel", l_timer_cancel},

@@ -593,6 +593,9 @@ static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *
             esp_err_t err = automation_set_enabled(e->ref, on);
             if (err != ESP_OK) ESP_LOGW(TAG, "script %s: %s", e->ref, esp_err_to_name(err));
             S->next_poll_us = 0;  // show the new state at once
+        } else if (e && e->val == V_ZB_ON) {
+            esp_err_t err = zb_set_on(e->ref, on ? ZB_ON : ZB_OFF);
+            ESP_LOGI(TAG, "%s: %s %s (%s)", c->info, e->ref, on ? "on" : "off", esp_err_to_name(err));
         }
         break;
     }

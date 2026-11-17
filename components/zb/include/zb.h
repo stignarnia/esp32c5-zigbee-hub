@@ -28,7 +28,13 @@ uint32_t zb_revision(void);     // changes whenever devices/state change
 
 esp_err_t zb_rename(const char *ieee_hex, const char *name);
 esp_err_t zb_remove(const char *ieee_hex);  // asks the device to leave, then forgets it
-esp_err_t zb_reinterview(const char *ieee_hex);  // sleepy devices: at their next check-in
+esp_err_t zb_reinterview(const char *ieee_hex);
+// Switch a device with an On/Off server cluster (name, case-insensitive, or IEEE hex):
+// ZB_OFF, ZB_ON or ZB_TOGGLE. Queued to the Zigbee task, never blocks; the new state
+// arrives as the device's report. ESP_ERR_NOT_FOUND: no such device;
+// ESP_ERR_NOT_SUPPORTED: it has no On/Off cluster. Any task.
+enum { ZB_OFF = 0, ZB_ON = 1, ZB_TOGGLE = 2 };
+esp_err_t zb_set_on(const char *device, int mode);  // sleepy devices: at their next check-in
 bool zb_interviewing(void);  // a device is being interviewed right now (awake, retrying)
 void zb_save_now(void);      // write the device registry to flash now (before a reboot)
 
@@ -36,7 +42,7 @@ void zb_save_now(void);      // write the device registry to flash now (before a
 // Attribute names: "open" / "motion" / "water" / "smoke" / "co" / "vibration" / "alarm"
 // (IAS zone alarm bit; `alias` is always "alarm" for those), "tamper", "battery_low",
 // "battery" (%), "battery_v" (V), "temperature" (°C), "humidity" (%), "occupied", "on",
-// "available".
+// "power" (W), "voltage" (V), "current" (A), "energy" (kWh), "available".
 typedef struct {
     char ieee[17];
     char device[ZB_NAME_LEN];    // the user's name, else the model, else the IEEE
@@ -60,7 +66,7 @@ typedef struct {
     char ieee[17];
     char name[ZB_NAME_LEN];      // the user's name, "" = none
     char manuf[33], model[33];
-    bool ias, power_cfg, temp_meas, hum_meas, occ_sensing, on_off;
+    bool ias, power_cfg, temp_meas, hum_meas, occ_sensing, on_off, elec_meas, metering;
     uint16_t zone_type;          // 0 = not known yet
     bool available;
     bool sleepy;
@@ -73,6 +79,10 @@ typedef struct {
     bool has_hum; float hum;     // %
     bool has_on; bool on;
     bool has_occ; bool occ;
+    bool has_power; float power; // W
+    bool has_volt; float volt;   // V
+    bool has_curr; float curr;   // A
+    bool has_energy; float energy;  // kWh
 } zb_dev_info_t;
 
 // Fills up to `max` devices; returns how many. Any task (takes the registry lock briefly).

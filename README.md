@@ -3,12 +3,13 @@
 > **Work in progress.** This README describes the finished product. Working today:
 > 5 GHz-only Wi-Fi with backup network and recovery, provisioning via `flash.sh`,
 > the web UI, over-the-air updates with rollback, the Zigbee coordinator with
-> enrollment of battery sensors (tested with contact sensors), Tailscale (direct
+> enrollment of battery sensors (tested with contact sensors) and smart plugs (tested with a
+> SONOFF S60ZBTPF: on/off from scripts, Home Assistant and the UI, power metering), Tailscale (direct
 > paths, relays, the "tailnet only, no password" mode), Lua automations with
 > buzzers and HTTP calls, Wi-Fi motion sensing (with the keys alarm built on it), and
 > the Home Assistant integration (tested with Home Assistant 2026.11).
 > **Not built yet:** the Zigbee network backup and restore, factory reset, signed updates, and
-> commanding devices (none of the sensors here takes commands).
+> lights (brightness, colour).
 > **Built but never tried with a real device of that kind:** temperature, humidity,
 > occupancy, motion, water leak, smoke and CO sensors (only contact sensors were tested),
 > devices behind a repeater, and Home Assistant discovery on the LAN.
@@ -28,9 +29,9 @@ broker, no Raspberry Pi.
   from your phone on cellular just like it does at home.
 - **The hub is a motion sensor too.** It senses people moving from how they disturb
   the Wi-Fi signal between it and your router. No extra hardware.
-- **Made for battery sensors.** Contact, motion, leak, smoke, temperature and
-  humidity sensors. Mains-powered Zigbee devices (plugs, bulbs, other routers) are
-  untested and not what this hub is built for.
+- **Battery sensors and plugs.** Contact, motion, leak, smoke, temperature and
+  humidity sensors; smart plugs with on/off and power metering (tested with a SONOFF
+  S60ZBTPF). Bulbs (brightness, colour) aren't supported yet.
 - **Optionally, native Home Assistant devices.** Turn on the Home Assistant
   integration: every Zigbee device appears in Home Assistant as a native ESPHome
   device, the hub adds its own entities (including its Wi-Fi motion sensor), and your
@@ -149,16 +150,17 @@ it, and the browser remembers your choice.
 
 First the hub's own **Motion sensor** (Wi-Fi motion sensing: moving / not moving, and its
 two calibration buttons), then every paired sensor with its live state: contact, motion,
-water leak, smoke, temperature, humidity and battery. Each device shows signal strength, last seen
-and availability. Rename, re-interview or remove them. The UI only shows state;
-there are no switches in it. The sensors the hub is built for take no commands, so
-nothing sends them any.
+water leak, smoke, temperature, humidity and battery. Plugs show on/off with a **Turn on /
+Turn off** button, and those that measure it their power draw (W), voltage, current and energy
+(kWh). Each device shows signal strength, last seen and availability. Rename, re-interview or
+remove them.
 
 The last known state of each sensor is kept across restarts, so a door that was
 open before a reboot still reads open after it.
 
-Below the list: the Zigbee network (channel, PAN ID) and a network map of the hub's
-direct links, with each device's link quality and signal strength.
+Below the list: the Zigbee network (channel, PAN ID) and a drawn network map: the hub in the
+middle, every device around it, each direct link coloured by its quality (routers are squares,
+end devices circles, sleepy ones on dashed lines).
 
 #### Adding a device
 
@@ -244,7 +246,8 @@ The Automations page has everything scripts need, top to bottom:
 | | |
 |---|---|
 | `zb.on(device, attribute, fn)` | call `fn(value, device, attribute)` when it changes. `"*"` as device or attribute matches any |
-| `zb.get(device, attribute)` | current value, `nil` if not known yet |
+| `zb.get(device, attribute)` | current value, `nil` if not known yet. Plugs: `"on"`, `"power"` (W), `"voltage"`, `"current"`, `"energy"` (kWh) |
+| `zb.set(device, "on", true or false)` / `zb.toggle(device)` | switch a plug or relay; never blocks, the new state arrives as a change (`zb.on`). Returns `true`, or `nil` and the reason |
 | `zb.devices()` | list of `{name, ieee, model, manuf, kind, available}` |
 | `timer.after(s, fn)` / `timer.every(s, fn)` | one-shot / repeating timer, returns an id. Pass a global function's *name* instead of `fn` and the timer survives a restart |
 | `timer.cancel(id)` | stop a timer or cron job |
@@ -500,6 +503,8 @@ shows the hub's ("Espressif, ESP32-C5 Zigbee hub") on each, and you set the area
 |---|---|
 | contact, motion, leak, smoke, CO, vibration sensor | a binary sensor of the right class (listed once the interview knows which it is) |
 | temperature / humidity sensor | sensors of the right class |
+| plug / relay (On/Off) | a switch, **Power**: Home Assistant turns it on and off |
+| plug with metering | power draw (W), voltage, current, energy (kWh, for the energy dashboard) |
 | any IAS sensor | tamper, battery low (diagnostic) |
 | any battery device | battery %, battery voltage (diagnostic; voltage disabled by default) |
 | any device | online, last seen, signal strength (diagnostic; signal disabled by default) |
@@ -669,9 +674,13 @@ USB flashing always works either way.
   scripts as ESPHome sub-devices (needs Home Assistant 2025.7 or newer). One task reads
   snapshots of the device registry and pushes what changed; Zigbee never waits for it.
   Off, it uses no memory; on, about 6 KB of internal RAM and 280 KB of PSRAM.
-- **Commanding devices**: none of the sensors the hub is built for takes commands, so
-  there is nothing to send yet. Scripts and Home Assistant get to set devices once one
-  that takes commands is paired.
+- **Commanding devices**: On/Off (plugs, relays) from scripts (`zb.set`, `zb.toggle`), Home
+  Assistant (switch) and the device card; the last command wins. Commands are queued to the
+  Zigbee task and never block; the state is read back from the device after each one, so a
+  lost report can't leave a wrong state. Reporting setup is confirmed per cluster and re-sent
+  to always-on devices until they answer (frames get lost while Wi-Fi has the shared radio).
+- **Plugs that freeze their meter when off** (the SONOFF S60ZBTPF keeps reporting its last
+  reading): power and current show 0 while the plug reports off.
 
 ### Flash layout (16 MB)
 

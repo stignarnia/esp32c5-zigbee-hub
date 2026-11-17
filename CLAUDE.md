@@ -251,9 +251,14 @@ evidence; where something is still open there, it points here.
       over without re-pairing; the Wi-Fi watchdog's reboot gate must defer while a backup runs
       (Phase 1 lists it) (Phase 7)
 - [ ] Factory reset: UI + long-press BOOT (Phase 7)
-- [ ] `zb.set` and commands from Home Assistant (switch / light / … entities), when the first
-      device that takes commands is paired. Not built only because none of the paired devices
-      can be commanded (Decisions: "not yet, not never")
+- [ ] lights (Level / Color Control: brightness, colour), when the first one is paired. On/Off is
+      built (`zb.set`, `zb.toggle`, HA switch, UI button; 2026-11-17, Phase 3)
+- [ ] pairing reliability: a router's Device_annce is a broadcast and is lost when it lands in
+      Wi-Fi's coex slot (measured 2026-11-17, Phase 3). Registration no longer depends on it;
+      giving 802.15.4 priority while pairing is open would make joins themselves more reliable
+      (user's call: Wi-Fi slower during those minutes)
+- [ ] the S60ZBTPF's energy counter (Metering 0x0702) read 0 kWh after several minutes at 88 W:
+      watch whether it counts at all; SONOFF may count only in its own cluster 0xFC11
 - [ ] Optional: signed updates (design in Phase 2)
 
 ### Tests: router off for about an hour (one session)
@@ -287,11 +292,10 @@ evidence; where something is still open there, it points here.
 - [ ] temperature, humidity and occupancy sensors (UI, `zb.*`, HA entities)
 - [ ] motion, water leak, smoke, CO and vibration sensors: only contact sensors were verified;
       the others depend on the IAS zone type, never seen for those kinds
-- [ ] on/off reporting ("Power" in HA)
-- [ ] the network map with a device more than one hop away (behind a repeater)
-- not a test, a decision (2026-11-06): repeaters and other mains devices (plugs, bulbs) are not
-  tested and the hub isn't built for them; what happens when one joins, and its availability
-  pings (after 10 min of silence), have never run
+- [ ] the network map with a device more than one hop away (behind a repeater): shown unlinked,
+  the coordinator's table doesn't say which router it is behind
+- [ ] mains devices: the first plug is paired (2026-11-17, Phase 3); its availability pings
+  (after 10 min of silence) and a device paired through it (more than one hop) never seen
 
 ### Small leftovers
 - [ ] `examples/morning-check.lua` never run
@@ -825,15 +829,70 @@ For long tests without a serial cable: log on the board, download later.
       re-interview (redoes every step; battery devices at their next check-in) — verified
       2026-11-06 on the Door sensor: pressed twice, each time "waiting for it to wake up",
       then on the next open/close the full interview ran and completed in 620 / 639 ms.
-      **No controls in the UI (user decision 2026-11-06)**; since 2026-11-07 nothing
-      commands devices at all (no `zb.set` in Lua, no commands from Home Assistant) —
-      only because none of the paired devices can be commanded (see Decisions)
+      No controls in the UI was the user's decision of 2026-11-06, reversed 2026-11-17 with
+      the first plug: on/off from Lua, Home Assistant and the card's button (below)
 - Availability tracking — built: battery devices offline after 25 h of silence; mains devices
       pinged after 10 min of silence. Never seen firing: see Still to do
 - [x] Network map from the coordinator's neighbour table (both sensors listed with
       LQI/RSSI/depth; only direct neighbours have been seen)
-- **Zigbee routers (mains devices: plugs, bulbs) are not tested, and this hub is not
-  built for them** (user decision 2026-11-06)
+- Zigbee routers (mains devices: plugs, bulbs) were "not tested and not built for" (user
+  decision 2026-11-06). The first one, a plug, was paired 2026-11-17 and is supported
+  (below); bulbs (Level / Color Control) still aren't
+- [x] **First router: a SONOFF S60ZBTPF smart plug (2026-11-17)**. It joined (neighbour
+      table, and its own 180 s permit-join broadcast at the moment it joined) but never
+      showed up as a device: the registry was filled only from `DEVICE_ANNCE`, and no announce
+      reached the hub (none logged); `DEVICE_UPDATE` / `DEVICE_AUTHORIZED` were dropped
+      silently. Now three ways in: announce, join signals (logged, a new device adopted and
+      interviewed at once), and the neighbour table every second (children and routers the
+      registry doesn't know; devices removed since boot are skipped until they announce or
+      join again). Without an announce the MAC capability is guessed: a router is FFD + mains
+      + receiver on (the table's rx-on flag is false for a router heard only via link status;
+      trusting it made the plug "battery (sleepy)" for one build). The interview also reads
+      On/Off at once. Verified: adopted from the neighbour table 57 s after boot, interview
+      379 ms (ep 1: Basic, Identify, Groups, Scenes, On/Off, Metering, Electrical
+      Measurement, Diagnostics, 0xFC57, 0xFC11; ep 242 Green Power proxy), on/off reporting
+      configured, `on: false` read, HA reloaded with it as a sub-device. Join path seen at
+      the next pairings: `DEVICE_UPDATE` (status 1) → adopted and interviewed in 395 ms →
+      `DEVICE_AUTHORIZED` (type 1) 2 s later
+- [x] **Why the plug's announce never arrived (measured 2026-11-17)**. Four pairings: the
+      stack signalled `DEVICE_ANNCE` once (18:00, the raw frame logged 1 ms before the
+      signal: the stack doesn't drop it). At 18:14 a temporary raw 802.15.4 receive log
+      (`--wrap=esp_ieee802154_receive_done`, MAC + NWK sequence numbers) showed the plug's
+      MAC seq 219 (NWK 255) and 223 (NWK 3) received, **MAC 220–222 (NWK 0–2) never
+      delivered by the hub's radio**, all within 63 ms; the announce was among them. RSSI
+      −54 dBm, 0 CRC errors (driver counters, `CONFIG_IEEE802154_TXRX_STATISTIC`): the radio
+      wasn't listening. Those counters: ~1,190 "rx aborted by coex" per 2 min with or
+      without Wi-Fi load (the radio handed to Wi-Fi ~10×/s, Phase 4's 102.4 ms cycle), and
+      47–70 % of the hub's own 802.15.4 transmissions aborted by coex. A unicast lost that way
+      is retried by the MAC; a broadcast isn't. Door/Keys never lost theirs: an end device
+      sends its announce as a MAC unicast to its parent (the hub). The diagnostics were
+      removed afterwards. Also seen: after `Mgmt_Leave` with rejoin the S60ZBTPF went silent
+      (no rejoin) until its button was held
+- [x] **On/Off and the meter (2026-11-17)**: `zb_set_on()` (ZB_ON/OFF/TOGGLE, queued to the
+      Zigbee task) behind Lua `zb.set(dev, "on", bool)` / `zb.toggle(dev)`, the HA switch
+      "Power" (was a binary sensor) and `POST /api/zb/set` (the card's Turn on/off button).
+      Electrical Measurement (W, V, A) and Metering (kWh) with the device's own multipliers
+      and divisors (read at the interview, persisted); in the UI, `zb.get` ("power",
+      "voltage", "current", "energy"), `zb.on` and HA. Found while testing:
+  - reporting setup frames get lost (coex): the plug once confirmed only 0x0B04, so on/off
+    never reported. The setup is now tracked per cluster (answered = configured or refused)
+    and re-sent to always-on devices every 20 s, up to 5 times, and again 30 s after each boot.
+    Seen: try 1 after boot → 0x0006, 0x0B04, 0x0702 all configured
+  - after every on/off command the state is read back at 1.5 s and 4 s (the meter at 4 s), so
+    a lost report can't leave a wrong state
+  - the S60ZBTPF freezes its meter while the relay is off (same raw 88 / 22111 / 66 at 4 s and
+    30 s after off; live values while on): power and current are shown as 0 while the device
+    reports off, voltage keeps its last reading
+  - verified on the plug (an ~88 W load: 88 W / 221 V / 0.63–0.66 A): Lua set/toggle/off with
+    `zb.on` firing true then false and the errors (unknown device, contact sensor, "power"
+    not settable); aioesphomeapi 46.30.0: switch + 4 sensors listed, switch on → on, 88 W,
+    0.66 A; off → off, 0 W, 0 A; `/api/zb/set` on/off. UI: the card and map code run in Node
+    against live `/api/zb` data, the map rendered (rsvg) and looked at; the card's button and
+    the map tested in the browser by the user (2026-11-17)
+- [x] **Network map drawn** (2026-11-17): SVG, hub in the middle, every device around it; a line
+      per direct link from the neighbour table, coloured by LQI, dashed for sleepy end devices;
+      square = router, circle = end device; devices not in the table sit unlinked ("route
+      unknown")
 - [x] **Web server stalls (found and fixed 2026-11-06; re-interview re-tested by the user)**:
   - one WebSocket client that stops reading blocked the server's only task for
     `send_wait_timeout` (10 s) per push — measured 12 s + 7 s freezes for every page
@@ -1638,13 +1697,16 @@ connect sequence).
   - verified: Door, Keys, "Script keys-alarm" listed as sub-devices, entities attached
 - [x] Capability → entity mapping (same capabilities as the UI uses):
       sensors → sensor with device_class, IAS zone → binary_sensor,
-      battery/LQI/last seen → diagnostic entities. Read-only for now: no paired device
-      takes commands. Commandable devices get switch/light/... entities when they come
+      battery/LQI/last seen → diagnostic entities. On/Off → a switch (2026-11-17, Phase 3);
+      lights get light entities when the first one comes
   - from the server clusters (`zb_snapshot`): IAS → "Contact" (`opening`) / "Motion" /
     "Smoke" / "Water leak" / "Carbon monoxide" / "Vibration" + "Tamper", "Battery low";
     Power Config → "Battery" %, "Battery voltage" (disabled by default); Temperature,
-    Humidity, Occupancy, On/Off ("Power", binary); every device: "Online" (connectivity),
-    "Signal" dBm (RSSI: the registry has no LQI; disabled by default), "Last seen" (text
+    Humidity, Occupancy, On/Off ("Power": binary sensor until 2026-11-17, now a switch),
+    Electrical Measurement ("Power draw" W, "Voltage", "Current"), Metering ("Energy" kWh,
+    total_increasing); every device: "Online" (connectivity),
+    "Signal" dBm (RSSI: the registry has no LQI; disabled by default, Claude's choice as ZHA
+    and Zigbee2MQTT do for signal/LQI: diagnostic, noisy history), "Last seen" (text
     sensor, class `timestamp`, ISO UTC; made once per frame so it doesn't wobble)
   - offline device → its values unknown (Online / Last seen still reported)
   - verified: both contact sensors with 8 entities each, states right (Door closed, Keys
@@ -1785,9 +1847,9 @@ All measured there on the same chip; re-verify, don't assume.
 - **Light/dark**: follows the system, with a header toggle that overrides it (2026-11-08).
 - **GPIO pins are claimed only while a script loads** (2026-11-07), so conflicts show at
   Save. Secrets and GPIO settings live on the Automations page (2026-11-07).
-- **Commanding Zigbee devices: not yet, not never** (2026-11-07, clarified 2026-11-08): in
-  principle scripts (and HA) set devices; there's no `zb.set` and no HA commands only
-  because none of the paired devices (contact sensors) can be commanded.
+- **Commanding Zigbee devices** (2026-11-07, built 2026-11-17 with the first plug): scripts
+  (`zb.set`, `zb.toggle`), Home Assistant (switch) and the UI (Turn on/off on the device card;
+  user, 2026-11-17, replacing "no controls in the UI") switch On/Off devices; last command wins.
 - **No last-known clock in NVS** (2026-11-07): after a power-off it would be wrong; cron
   waits for SNTP instead. Soft resets keep the RTC time.
 - **Router**: test on DFS channel 52 first; move to 36–48 only if measurements are bad.

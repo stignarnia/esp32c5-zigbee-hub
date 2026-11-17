@@ -128,7 +128,14 @@ void ha_model_build(ha_model_t *m, const ha_inputs_t *in)
         if (d->temp_meas) set(add(m, ET_SENSOR, V_ZB_TEMP, id, "Temperature"), "temperature", "°C", 1, MEAS, 0, false);
         if (d->hum_meas) set(add(m, ET_SENSOR, V_ZB_HUM, id, "Humidity"), "humidity", "%", 0, MEAS, 0, false);
         if (d->occ_sensing) set(add(m, ET_BINARY, V_ZB_OCC, id, "Occupancy"), "occupancy", NULL, 0, 0, 0, false);
-        if (d->on_off) set(add(m, ET_BINARY, V_ZB_ON, id, "Power"), "power", NULL, 0, 0, 0, false);
+        // A switch: Home Assistant turns it on/off through zb_set_on (ha_server.c)
+        if (d->on_off) set(add(m, ET_SWITCH, V_ZB_ON, id, "Power"), "outlet", NULL, 0, 0, 0, false);
+        if (d->elec_meas) {
+            set(add(m, ET_SENSOR, V_ZB_WATTS, id, "Power draw"), "power", "W", 1, MEAS, 0, false);
+            set(add(m, ET_SENSOR, V_ZB_VOLTS, id, "Voltage"), "voltage", "V", 1, MEAS, 0, false);
+            set(add(m, ET_SENSOR, V_ZB_AMPS, id, "Current"), "current", "A", 3, MEAS, 0, false);
+        }
+        if (d->metering) set(add(m, ET_SENSOR, V_ZB_KWH, id, "Energy"), "energy", "kWh", 3, 2, 0, false);
         set(add(m, ET_BINARY, V_ZB_ONLINE, id, "Online"), "connectivity", NULL, 0, 0, DIAG, false);
         set(add(m, ET_SENSOR, V_ZB_RSSI, id, "Signal"), "signal_strength", "dBm", 0, MEAS, DIAG, true);
         set(add(m, ET_TEXT, V_ZB_SEEN, id, "Last seen"), "timestamp", NULL, 0, 0, DIAG, false);
@@ -229,6 +236,10 @@ static void zb_state(const ha_ent_t *e, const zb_dev_info_t *d, const ha_state_t
     case V_ZB_HUM:      st->missing = !d->has_hum; st->f = d->hum; break;
     case V_ZB_OCC:      st->missing = !d->has_occ; st->b = d->occ; break;
     case V_ZB_ON:       st->missing = !d->has_on; st->b = d->on; break;
+    case V_ZB_WATTS:    st->missing = !d->has_power; st->f = d->power; break;
+    case V_ZB_VOLTS:    st->missing = !d->has_volt; st->f = d->volt; break;
+    case V_ZB_AMPS:     st->missing = !d->has_curr; st->f = d->curr; break;
+    case V_ZB_KWH:      st->missing = !d->has_energy; st->f = d->energy; break;
     case V_ZB_ONLINE:   st->missing = false; st->b = d->available; break;
     case V_ZB_RSSI:     st->missing = d->rssi == 0; st->f = d->rssi; break;
     case V_ZB_SEEN:

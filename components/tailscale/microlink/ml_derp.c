@@ -397,8 +397,13 @@ static int poll_derp_read(microlink_t *ml, ml_derp_conn_t *c) {
         return n;
     }
     if (n < 5) {
-        ESP_LOGW(TAG, "DERP partial header: got %d of 5 bytes", n);
-        return -1;
+        /* mbedtls_ssl_read returns at most the rest of the current TLS record, so the 5-byte
+         * header can arrive in two reads: finish it instead of reconnecting (upstream 6a7d72f,
+         * 0a1e403) */
+        if (derp_tls_read_all(c, header + n, 5 - n, 5000) < 0) {
+            ESP_LOGW(TAG, "DERP partial header: got %d of 5 bytes", n);
+            return -1;
+        }
     }
 
     uint8_t frame_type = header[0];
@@ -579,8 +584,11 @@ void ml_derp_tx_task(void *arg) {
         /* ---- Handle DERP connect request from coord task ---- */
         {
             EventBits_t bits = xEventGroupGetBits(ml->events);
-            if ((bits & ML_EVT_DERP_CONNECT_REQ) && !c->connected) {
-                xEventGroupClearBits(ml->events, ML_EVT_DERP_CONNECT_REQ);
+            /* A connect request is always consumed when seen; with a reconnect pending, that
+             * does the disconnect + connect. Left set, it ran after the next read error over the
+             * failed, not yet freed session (TLS context + socket leaked; upstream 2778a2d) */
+            if (bits & ML_EVT_DERP_CONNECT_REQ) xEventGroupClearBits(ml->events, ML_EVT_DERP_CONNECT_REQ);
+            if ((bits & ML_EVT_DERP_CONNECT_REQ) && !c->connected && !(bits & ML_EVT_DERP_RECONNECT)) {
                 /* Retry up to 3 times with 2s backoff */
                 for (int attempt = 0; attempt < 3 && !c->connected; attempt++) {
                     if (attempt > 0) {
@@ -734,6 +742,10 @@ static void derp_tls_abort(ml_derp_conn_t *c) {
 /* Hub port: one function for the home connection and the other-region ones. The host
  * is copied: the coord task may re-parse the DERPMap while this runs. */
 static esp_err_t derp_connect_conn(microlink_t *ml, ml_derp_conn_t *c, uint16_t region) {
+    /* A session that is still open (failed, not yet freed) is torn down first, never
+     * overwritten (upstream 2778a2d). All callers run on the DERP I/O task */
+    if (c->sockfd >= 0) derp_close_conn(c);
+
     /* Determine DERP host/port from DERPMap.
      * Always use the first DERP node of the region (the one most peers use). */
     char derp_host[64] = "";

@@ -23,6 +23,8 @@
 
 #include "microlink_internal.h"
 #include "ml_filter.h"
+
+static void lp_reset(void);  /* long-poll reassembly state (poll_map_update) */
 #include "x25519.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -2028,6 +2030,7 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
     }
     free(h2_buf);
 
+    lp_reset();  /* a new long-poll stream: nothing carried over from the last one */
     ESP_LOGI(TAG, "Streaming MapRequest sent on stream 5");
     return 0;
 }
@@ -2140,115 +2143,48 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
 }
 
 /* Try to read one incremental MapResponse update (non-blocking) */
-static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
-    /* Use select() to check if data is available before blocking in recv */
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(ml->coord_sock, &readfds);
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };  /* 50ms */
-    int sel = ml_select_fds(ml->coord_sock + 1, &readfds, NULL, NULL, &tv);
-    if (sel <= 0) return 0;  /* No data available or error */
+/* Long-poll stream reassembly (upstream microlink 630a525, 963298c, 847f2b0, ideas only).
+ * Before, each decrypted Noise frame was parsed on its own and only the last stream-5 DATA
+ * frame was kept: an HTTP/2 frame continuing into the next Noise frame was cut (everything after
+ * it misparsed) and a MapResponse spread over several DATA frames was silently dropped, while
+ * the hub still said "connected". Such a delta can carry PeersRemoved or a PacketFilter change.
+ * Now partial HTTP/2 frames carry over, stream-5 payload is buffered and split into messages by
+ * the 4-byte little-endian length prefix, and anything out of bounds reconnects. */
+#define LP_H2_MAX_FRAME 16384  /* SETTINGS_MAX_FRAME_SIZE default; our preface never raises it */
+static uint8_t *s_lp_h2;   static size_t s_lp_h2_len, s_lp_h2_cap;    /* partial HTTP/2 frame(s) */
+static uint8_t *s_lp_msg;  static size_t s_lp_msg_len, s_lp_msg_cap;  /* stream-5 bytes not yet a message */
 
-    /* Data available — set short recv timeout for partial frame safety */
-    struct timeval tv_recv = { .tv_sec = 2, .tv_usec = 0 };
-    ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv));
+static void lp_reset(void) {
+    free(s_lp_h2);  s_lp_h2 = NULL;  s_lp_h2_len = s_lp_h2_cap = 0;
+    free(s_lp_msg); s_lp_msg = NULL; s_lp_msg_len = s_lp_msg_cap = 0;
+}
 
-    uint8_t *frame_buf = ml_psram_malloc(65536);
-    if (!frame_buf) return 0;
+/* Grows *buf to hold need bytes (PSRAM), at most max; false if that's not possible */
+static bool lp_reserve(uint8_t **buf, size_t *cap, size_t need, size_t max) {
+    if (need <= *cap) return true;
+    if (need > max) return false;
+    size_t c = *cap ? *cap : 8192;
+    while (c < need) c *= 2;
+    if (c > max) c = max;
+    uint8_t *n = ml_psram_malloc(c);
+    if (!n) return false;
+    if (*buf && *cap) memcpy(n, *buf, *cap);
+    free(*buf);
+    *buf = n;
+    *cap = c;
+    return true;
+}
 
-    int frame_len = noise_recv(ml, noise, frame_buf, 65536);
-
-    if (frame_len <= 0) {
-        free(frame_buf);
-        int saved_errno = errno;
-        /* EAGAIN/EWOULDBLOCK = no data yet = not an error */
-        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) return 0;
-        return frame_len;  /* Real error or connection closed */
+/* One complete long-poll message (a MapResponse, keepalives included) */
+static void lp_handle_message(microlink_t *ml, char *json, size_t len) {
+    char saved = json[len];
+    json[len] = '\0';
+    cJSON *update_json = cJSON_Parse(json);
+    json[len] = saved;
+    if (!update_json) {
+        ESP_LOGW(TAG, "Long-poll message of %u bytes isn't JSON, ignored", (unsigned)len);
+        return;
     }
-
-    /* Extract DATA frame payload from H2 frames, track flow control */
-    uint8_t *json_data = NULL;
-    size_t json_data_len = 0;
-    uint32_t total_data_bytes = 0;
-    uint32_t data_stream_id = 0;
-    int pos = 0;
-
-    while (pos + 9 <= frame_len) {
-        uint32_t f_len = (frame_buf[pos] << 16) | (frame_buf[pos + 1] << 8) | frame_buf[pos + 2];
-        uint8_t f_type = frame_buf[pos + 3];
-        uint8_t f_flags = frame_buf[pos + 4];
-        uint32_t f_stream = ((frame_buf[pos + 5] & 0x7F) << 24) | (frame_buf[pos + 6] << 16) |
-                             (frame_buf[pos + 7] << 8) | frame_buf[pos + 8];
-        pos += 9;
-
-        if (pos + (int)f_len > frame_len) break;
-
-        if (f_type == 0x00) {  /* DATA frame */
-            total_data_bytes += f_len;
-            if (f_stream == 5) {
-                /* Long-poll MapResponse data (stream 5) — parse as JSON */
-                data_stream_id = f_stream;
-                if (f_len > 0) {
-                    json_data = frame_buf + pos;
-                    json_data_len = f_len;
-                }
-            } else if (f_len > 0) {
-                /* Endpoint update response (stream 7+) — discard body */
-                ESP_LOGD(TAG, "H2 stream %lu DATA: %lu bytes (discarded)",
-                         (unsigned long)f_stream, (unsigned long)f_len);
-            }
-        } else if (f_type == 0x06 && f_len == 8 && !(f_flags & 0x01)) {
-            /* HTTP/2 PING from server — respond with PONG (same payload, ACK flag) */
-            uint8_t pong[17];
-            pong[0] = 0x00; pong[1] = 0x00; pong[2] = 0x08;
-            pong[3] = 0x06; pong[4] = 0x01;
-            pong[5] = 0x00; pong[6] = 0x00; pong[7] = 0x00; pong[8] = 0x00;
-            memcpy(pong + 9, frame_buf + pos, 8);
-            noise_send(ml, noise, pong, sizeof(pong));
-            ESP_LOGI(TAG, "Sent HTTP/2 PONG in response to server PING");
-        } else if (f_type == 0x04 && !(f_flags & 0x01)) {
-            /* HTTP/2 SETTINGS from server — respond with SETTINGS ACK */
-            uint8_t settings_ack[9] = {0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00};
-            noise_send(ml, noise, settings_ack, sizeof(settings_ack));
-        }
-        pos += f_len;
-    }
-
-    /* Send HTTP/2 WINDOW_UPDATE to replenish flow control after receiving DATA.
-     * Without this, the server's send window exhausts and the connection stalls.
-     * Must send for BOTH connection-level (stream 0) AND stream-level. (v1 reference) */
-    if (total_data_bytes > 0) {
-        uint8_t wu_buf[26];  /* 2 WINDOW_UPDATE frames: 13 bytes each */
-        /* Connection-level (stream 0) */
-        int wu_len = ml_h2_build_window_update(wu_buf, 13, 0, total_data_bytes);
-        /* Stream-level */
-        if (data_stream_id > 0) {
-            wu_len += ml_h2_build_window_update(wu_buf + wu_len, 13,
-                                                  data_stream_id, total_data_bytes);
-        }
-        noise_send(ml, noise, wu_buf, wu_len);
-    }
-
-    if (!json_data || json_data_len == 0) {
-        /* Keepalive, SETTINGS, or PING frame - not an error */
-        free(frame_buf);
-        return 1;  /* Got data, reset watchdog */
-    }
-
-    /* Skip 4-byte length prefix if present */
-    char *parse_start = (char *)json_data;
-    size_t parse_len = json_data_len;
-    if (parse_len > 4 && parse_start[4] == '{') {
-        parse_start += 4;
-        parse_len -= 4;
-    }
-
-    char saved = parse_start[parse_len];
-    parse_start[parse_len] = '\0';
-
-    cJSON *update_json = cJSON_Parse(parse_start);
-    parse_start[parse_len] = saved;
-
     if (update_json) {
         ESP_LOGI(TAG, "Long-poll MapResponse update received");
 
@@ -2277,8 +2213,137 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
         cJSON_Delete(update_json);
     }
 
-    free(frame_buf);
-    return 1;
+}
+
+static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
+    /* Use select() to check if data is available before blocking in recv */
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(ml->coord_sock, &readfds);
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };  /* 50ms */
+    int sel = ml_select_fds(ml->coord_sock + 1, &readfds, NULL, NULL, &tv);
+    if (sel <= 0) return 0;  /* No data available or error */
+
+    /* Data available — set short recv timeout for partial frame safety */
+    struct timeval tv_recv = { .tv_sec = 2, .tv_usec = 0 };
+    ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv));
+
+    /* A Noise frame is at most 16 KB + tag (noise_recv refuses more): append it to the H2 bytes */
+    if (!lp_reserve(&s_lp_h2, &s_lp_h2_cap, s_lp_h2_len + 16384 + 16, LP_H2_MAX_FRAME * 2 + 9 + 16400)) {
+        ESP_LOGW(TAG, "Long-poll: no memory for the HTTP/2 buffer");
+        return -1;
+    }
+    int frame_len = noise_recv(ml, noise, s_lp_h2 + s_lp_h2_len, s_lp_h2_cap - s_lp_h2_len);
+    if (frame_len <= 0) {
+        int saved_errno = errno;
+        /* EAGAIN/EWOULDBLOCK = no data yet = not an error */
+        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) return 0;
+        return frame_len < 0 ? frame_len : -1;  /* Real error or connection closed */
+    }
+    s_lp_h2_len += (size_t)frame_len;
+
+    /* Consume every complete HTTP/2 frame; a partial one stays for the next Noise frame */
+    uint32_t data_bytes = 0, data5_bytes = 0;
+    size_t pos = 0;
+    int ret = 1;
+    while (s_lp_h2_len - pos >= 9) {
+        const uint8_t *f = s_lp_h2 + pos;
+        uint32_t f_len = ((uint32_t)f[0] << 16) | ((uint32_t)f[1] << 8) | f[2];
+        uint8_t f_type = f[3], f_flags = f[4];
+        uint32_t f_stream = ((uint32_t)(f[5] & 0x7F) << 24) | ((uint32_t)f[6] << 16) | ((uint32_t)f[7] << 8) | f[8];
+        if (f_len > LP_H2_MAX_FRAME) {
+            ESP_LOGW(TAG, "Long-poll: HTTP/2 frame of %lu bytes, stream misaligned", (unsigned long)f_len);
+            ret = -1;
+            break;
+        }
+        if (s_lp_h2_len - pos < 9 + (size_t)f_len) break;  /* rest comes with the next Noise frame */
+        const uint8_t *payload = f + 9;
+
+        if (f_type == 0x00) {  /* DATA */
+            data_bytes += f_len;
+            size_t pad = 0;
+            if (f_flags & 0x08) {  /* PADDED */
+                pad = f_len ? payload[0] + 1u : 1u;
+                if (pad > f_len) { ret = -1; break; }
+                payload++;
+            }
+            size_t body = f_len - pad;
+            if (f_stream == 5) {
+                data5_bytes += f_len;
+                if (body) {
+                    if (!lp_reserve(&s_lp_msg, &s_lp_msg_cap, s_lp_msg_len + body, ML_JSON_BUFFER_SIZE)) {
+                        ESP_LOGW(TAG, "Long-poll: message over %d KB or no memory", (int)(ML_JSON_BUFFER_SIZE / 1024));
+                        ret = -1;
+                        break;
+                    }
+                    memcpy(s_lp_msg + s_lp_msg_len, payload, body);
+                    s_lp_msg_len += body;
+                }
+                if (f_flags & 0x01) {  /* END_STREAM: the server ended the long-poll */
+                    ESP_LOGW(TAG, "Long-poll stream ended by the server");
+                    ret = -1;
+                }
+            } else if (body) {
+                /* Endpoint update response (stream 7+) — discard body */
+                ESP_LOGD(TAG, "H2 stream %lu DATA: %lu bytes (discarded)",
+                         (unsigned long)f_stream, (unsigned long)body);
+            }
+        } else if (f_type == 0x01 && f_stream == 5 && (f_flags & 0x01)) {
+            /* HEADERS with END_STREAM on stream 5 (e.g. an error status): the long-poll is over */
+            ESP_LOGW(TAG, "Long-poll stream closed by the server (HEADERS)");
+            ret = -1;
+        } else if (f_type == 0x06 && f_len == 8 && !(f_flags & 0x01)) {
+            /* HTTP/2 PING from server — respond with PONG (same payload, ACK flag) */
+            uint8_t pong[17];
+            pong[0] = 0x00; pong[1] = 0x00; pong[2] = 0x08;
+            pong[3] = 0x06; pong[4] = 0x01;
+            pong[5] = 0x00; pong[6] = 0x00; pong[7] = 0x00; pong[8] = 0x00;
+            memcpy(pong + 9, payload, 8);
+            noise_send(ml, noise, pong, sizeof(pong));
+            ESP_LOGI(TAG, "Sent HTTP/2 PONG in response to server PING");
+        } else if (f_type == 0x04 && !(f_flags & 0x01)) {
+            /* HTTP/2 SETTINGS from server — respond with SETTINGS ACK */
+            uint8_t settings_ack[9] = {0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00};
+            noise_send(ml, noise, settings_ack, sizeof(settings_ack));
+        } else if (f_type == 0x07) {  /* GOAWAY */
+            ESP_LOGW(TAG, "Long-poll: server sent GOAWAY");
+            ret = -1;
+        }
+        pos += 9 + f_len;
+        if (ret < 0) break;
+    }
+    if (pos) {
+        memmove(s_lp_h2, s_lp_h2 + pos, s_lp_h2_len - pos);
+        s_lp_h2_len -= pos;
+    }
+
+    /* Replenish HTTP/2 flow control (connection + stream 5) for the DATA consumed */
+    if (data_bytes > 0) {
+        uint8_t wu_buf[26];
+        int wu_len = ml_h2_build_window_update(wu_buf, 13, 0, data_bytes);
+        if (data5_bytes > 0) wu_len += ml_h2_build_window_update(wu_buf + wu_len, 13, 5, data5_bytes);
+        noise_send(ml, noise, wu_buf, wu_len);
+    }
+
+    /* Hand over every complete message: 4-byte little-endian length, then the JSON */
+    while (ret > 0 && s_lp_msg_len >= 4) {
+        uint32_t m_len = (uint32_t)s_lp_msg[0] | ((uint32_t)s_lp_msg[1] << 8) |
+                         ((uint32_t)s_lp_msg[2] << 16) | ((uint32_t)s_lp_msg[3] << 24);
+        if (m_len == 0 || m_len > ML_JSON_BUFFER_SIZE - 5) {
+            ESP_LOGW(TAG, "Long-poll: message length %lu out of range, stream misaligned", (unsigned long)m_len);
+            ret = -1;
+            break;
+        }
+        if (s_lp_msg_len < 4 + (size_t)m_len) break;  /* not complete yet */
+        /* the JSON needs a terminator: make room for one byte past it */
+        if (!lp_reserve(&s_lp_msg, &s_lp_msg_cap, 4 + (size_t)m_len + 1, ML_JSON_BUFFER_SIZE)) { ret = -1; break; }
+        lp_handle_message(ml, (char *)s_lp_msg + 4, m_len);
+        size_t used = 4 + (size_t)m_len;
+        memmove(s_lp_msg, s_lp_msg + used, s_lp_msg_len - used);
+        s_lp_msg_len -= used;
+    }
+    if (ret < 0) lp_reset();
+    return ret;
 }
 
 /* ============================================================================

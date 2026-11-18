@@ -655,6 +655,10 @@ bool ml_filter_check_inbound(const uint8_t *pkt, size_t len, uint32_t now) {
      * under 80 bytes; do the same. */
     bool more_frags = (rd16(pkt + 6) & 0x2000) != 0;
     if (more_frags && (rd16(pkt + 6) & 0x1FFF) == 0 && len < 80) return false;
+    /* hub port: TSMP (IP protocol 99, Tailscale's own messages, e.g. the disco key advertisement
+     * peers send after a handshake) is handled before the filter in Tailscale, not filtered: let it
+     * through when addressed to us (lwIP ignores it) */
+    if (proto == 99 && dst_is_local(dst)) return true;
     if (!dst_is_local(dst)) {
         F_LOGD("drop proto=%u to %u.%u.%u.%u: destination not local", proto,
                (unsigned)(dst >> 24), (unsigned)((dst >> 16) & 0xFF),

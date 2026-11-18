@@ -28,9 +28,10 @@
 #include "wireguard-platform.h"
 #include "ml_filter.h"
 
-// Tailnet packet filter mode. "log" counts what it would drop and delivers everything: the
-// first install with the filter runs so, to check the real policy is read right before enforcing
-#define TS_FILTER_MODE ML_FILTER_MODE_LOG
+// Tailnet packet filter mode. Enforced since 2026-11-18, after a log-only run on the hub: with
+// the real policy every packet but TSMP was accepted. ML_FILTER_MODE_LOG counts would-drops and
+// delivers everything (and logs them), for checking a policy change
+#define TS_FILTER_MODE ML_FILTER_MODE_ENFORCE
 
 static const char *TAG = "ts";
 

@@ -1,5 +1,5 @@
 name: Zigbee Hub
-version: "1.2.0"
+version: "1.2.1"
 slug: zigbee_hub
 description: The ESP32-C5 Zigbee Hub's web UI over Tailscale, and firmware update checks for its devices
 arch:

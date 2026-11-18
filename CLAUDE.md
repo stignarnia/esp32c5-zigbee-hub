@@ -302,8 +302,6 @@ evidence; where something is still open there, it points here.
 - [ ] the hub's own handshake initiation right after a reboot accepted by a peer (monotonic
       timestamps); and a long-poll delta (a peer going on- or offline) shown in `/api/ts` after
       the reassembly rewrite, compared with `tailscale status`
-- [ ] the HA app rebuilt in Home Assistant so it picks up nginx 1.30.7 (Alpine 3.24's package;
-      the app installs nginx at build time, no code change; the user's action)
 
 ### Tests: waiting or long runs
 - [ ] availability: a battery sensor marked offline after 25 h of silence (Phase 3)
@@ -2098,6 +2096,9 @@ connect sequence).
 - [x] **The hub's UI inside Home Assistant** (2026-11-17, for networks that reach HA but not the
       tailnet): local HA app `local_zigbee_hub` (`ha_app/`, installed in
       `/mnt/data/supervisor/apps/local/zigbee_hub` on the HAOS VM), Alpine 3.24 + nginx 1.30.6
+      (1.30.7 since app 1.2.1, 2026-11-18: a plain rebuild kept 1.30.6 from Docker's cached `apk add`
+      layer, so the Dockerfile now puts `BUILD_VERSION` into that step and each version bump
+      reinstalls the packages; installed through `vpn-it` → `ha apps update`, verified `nginx -v`)
       reverse proxy to the hub's tailnet IP on Ingress port 8099 (`allow 172.30.32.2; deny all`),
       shown as a sidebar panel ("Zigbee Hub", `mdi:zigbee`, `panel_admin: false`).
   - UI (`index.html`, `app.js`) switched to relative paths (`style.css`, `app.js`, `cm.js`,

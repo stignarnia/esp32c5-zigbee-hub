@@ -269,8 +269,8 @@ evidence; where something is still open there, it points here.
       wrong sha512, a battery device's update. Open decision: how HA shows versions (now the
       decimal OTA file version, 4098 / 8451; proposed: hex `0x00001002`)
 - [ ] SONOFF inching (the plug switching itself off N s after being turned on): built 2026-11-18
-      as SONOFF's 0xFC11 command, no effect on the S60ZBTPF, removed the same day (Phase 3). Next
-      (user, 2026-11-18): a radio capture of what Zigbee2MQTT really sends
+      as SONOFF's 0xFC11 command, no effect on the S60ZBTPF, removed the same day (Phase 3). The
+      frame matches Zigbee2MQTT's and the plug accepts it; left: an off → on test after enabling
 
 ### Tests: router off for about an hour (one session)
 - [ ] triggers, timers, cron and buzzers keep working; `net.on("down")` fires; a `retry_for`
@@ -1103,7 +1103,17 @@ For long tests without a serial cable: log on the board, download later.
       5 s at 18:16:17: the plug didn't switch itself off, and the "off" sent right after was
       ignored (no change in HA's history at 18:16:18), so the command may leave the plug in an
       odd state. Set back to off at 18:18:22. The plug can't be asked for its inching setting.
-      Code removed (user, 2026-11-18); next: a radio capture (Still to do)
+      Code removed (user, 2026-11-18). Then compared with zigbee-herdsman-converters
+      (`src/devices/sonoff.ts`, `inchingControlSet`, master 2026-11-18): S60ZBTPF has it; same
+      payload, `protocolData` 0x01 with the bytes as `LIST_UINT8` (no length prefix), manufacturer
+      code 0x1286, endpoint 1. Sent again through `/api/zb/raw`: enable 5 s → status 0, disable →
+      status 0, and also status 0 without the manufacturer code (so acceptance proves nothing).
+      Not yet tried: an off → on cycle after enabling, with mode 0x81 and with 0x80
+  - the same file names more of 0xFC11 (`addCustomClusterEwelink`): 0x7009 energyToday, 0x700a
+    energyMonth, 0x700b energyYesterday (uint32), read 2026-11-18 on 2.1.3: 56 / 136 / 80
+    (0 on 1.0.2; Wh by their size: yesterday's charge was ~70 Wh). 0x0010 faultCode =
+    50462720. 0x0002 backLight, 0x0014/0x0015 delayed power-on, 0x0017 detach relay: 0x86
+    (unsupported) on this plug
 - **Green Power is not supported** (user, 2026-11-18): battery-free switches (Hue Tap and
   similar) need a Green Power sink on the coordinator; the hub has none, so their presses are
   never received, even when a mains device (the S60ZBTPF has a proxy on ep 242) relays them.

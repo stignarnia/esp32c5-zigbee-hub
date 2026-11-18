@@ -180,7 +180,7 @@ typedef struct {
 } disco_probe_t;
 
 #define MAX_PENDING_PROBES 64  /* one probe per destination (see disco_send_ping_to_peer) */
-static disco_probe_t pending_probes[MAX_PENDING_PROBES];
+static disco_probe_t *pending_probes;  /* MAX_PENDING_PROBES, PSRAM (hub port: internal RAM is short) */
 
 /* ============================================================================
  * Base64 Key Encoding (wireguard-lwip API requires base64 keys)
@@ -1860,7 +1860,11 @@ void ml_wg_mgr_task(void *arg) {
     ESP_LOGI(TAG, "WG Manager task started (Core %d)", xPortGetCoreID());
 
     /* Initialize probe tracking */
-    memset(pending_probes, 0, sizeof(pending_probes));
+    if (!pending_probes) {
+        pending_probes = heap_caps_calloc(MAX_PENDING_PROBES, sizeof(disco_probe_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!pending_probes) pending_probes = calloc(MAX_PENDING_PROBES, sizeof(disco_probe_t));
+    }
+    if (pending_probes) memset(pending_probes, 0, MAX_PENDING_PROBES * sizeof(disco_probe_t));
 
     /* Wait for registration OR shutdown before proceeding */
     EventBits_t wait_bits = xEventGroupWaitBits(ml->events,

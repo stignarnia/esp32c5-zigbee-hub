@@ -13,6 +13,7 @@
 #include "sdkconfig.h"
 #include "lwip/ip6_addr.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 static const char *TAG = "ml_filter";
@@ -74,9 +75,10 @@ typedef struct {
 } flow_t;
 
 static ml_filter_mode_t s_mode = ML_FILTER_MODE_OFF;
-static set_t   s_sets[MAX_SETS];
+/* hub port: both tables in PSRAM, allocated by ml_filter_init (internal RAM is short) */
+static set_t   *s_sets;     /* MAX_SETS */
 static bool    s_configured;
-static flow_t  s_flows[FLOW_SLOTS];
+static flow_t  *s_flows;    /* FLOW_SLOTS */
 static ml_filter_stats_t s_stats;
 static uint32_t   s_self_ip;                    /* 0 = not known yet */
 static ml_route_t s_local_routes[ML_MAX_ROUTES];
@@ -361,17 +363,24 @@ static uint32_t count_rules_locked(void) {
 void ml_filter_init(ml_filter_mode_t mode) {
 #ifdef ESP_PLATFORM
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
+    if (!s_sets) s_sets = heap_caps_calloc(MAX_SETS, sizeof(set_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_flows) s_flows = heap_caps_calloc(FLOW_SLOTS, sizeof(flow_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    if (!s_sets) s_sets = calloc(MAX_SETS, sizeof(set_t));
+    if (!s_flows) s_flows = calloc(FLOW_SLOTS, sizeof(flow_t));
 #endif
+    if (!s_sets || !s_flows) F_LOGE("no memory for the packet filter: inbound tunnel traffic is dropped");
     s_mode = mode;
 }
 
 void ml_filter_reset(void) {
+    if (!s_sets || !s_flows) return;
     FLT_LOCK();
     for (int i = 0; i < MAX_SETS; i++) {
         policy_free(s_sets[i].pol);
         memset(&s_sets[i], 0, sizeof(s_sets[i]));
     }
-    memset(s_flows, 0, sizeof(s_flows));
+    memset(s_flows, 0, FLOW_SLOTS * sizeof(flow_t));
     memset(&s_stats, 0, sizeof(s_stats));
     s_configured = false;
     s_self_ip = 0;
@@ -420,6 +429,7 @@ static policy_t *policy_parse_or_deny(const cJSON *rules, const char *name) {
 }
 
 bool ml_filter_update_from_map(const cJSON *map) {
+    if (!s_sets) return false;
     if (!map || s_mode == ML_FILTER_MODE_OFF) return false;
     const cJSON *single = cJSON_GetObjectItemCaseSensitive(map, "PacketFilter");
     const cJSON *multi = cJSON_GetObjectItemCaseSensitive(map, "PacketFilters");
@@ -551,6 +561,7 @@ static inline uint32_t rd32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | 
 static inline uint16_t rd16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 
 void ml_filter_note_outbound(const uint8_t *pkt, size_t len, uint32_t now) {
+    if (!s_flows) return;
     if (s_mode == ML_FILTER_MODE_OFF || !pkt || len < 20 || (pkt[0] >> 4) != 4) return;
     size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
     if (pkt[9] != PROTO_UDP || ihl < 20 || len < ihl + 4) return;
@@ -637,6 +648,7 @@ static bool check_inbound6(const uint8_t *pkt, size_t len) {
 }
 
 bool ml_filter_check_inbound(const uint8_t *pkt, size_t len, uint32_t now) {
+    if (!s_sets || !s_flows) return s_mode != ML_FILTER_MODE_ENFORCE;  /* no tables: fail closed when enforcing */
     if (!pkt || len < 1) return false;
     if ((pkt[0] >> 4) == 6) return check_inbound6(pkt, len);
     if (len < 20 || (pkt[0] >> 4) != 4) return false;

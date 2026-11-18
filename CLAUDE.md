@@ -13,7 +13,9 @@ One ESP32-C5 board that is, on its own:
    firmware; the 2.4 GHz band belongs to Zigbee.
 2. **A web UI** served by the board itself.
 3. **A Zigbee 3.0 coordinator**, with device enrollment driven from the UI
-   (scan / permit-join, live discovery, interview, naming).
+   (scan / permit-join, live discovery, interview, naming), and the OTA Upgrade server that
+   updates the devices' firmware (added 2026-11-18; Home Assistant's app finds the updates,
+   the hub keeps no OTA database).
 4. **A Tailscale node** on the user's tailnet, so the UI is reachable from anywhere.
 5. **A local automation engine** — scripts in an interpreted language (Lua),
    pasted into the UI and run on the board, with no cloud and no Home Assistant.
@@ -411,7 +413,8 @@ Notes from the first boot:
     being written; flushes the device registry before allowing it. Since Phase 5
     (`automation_reboot_blocker`) also: a script running, a timer or cron job due within
     2 min, a buzzer pattern playing; script `state` and named timers saved first (timers
-    with a global function name survive in RTC memory; anonymous ones are lost). Seeing the
+    with a global function name survive in RTC memory; anonymous ones are lost). Since
+    2026-11-18 also: a device firmware update being fetched or sent (`zb_ota_busy`). Seeing the
     watchdog fire and the gate defer it: see Still to do (router-off session)
   - the cost being guarded: a reboot takes a few seconds until Zigbee is back
     (network restored from `zb_storage`, no re-pairing), and reports sent in that
@@ -1957,6 +1960,9 @@ With the Home Assistant API on and a client connected (2026-11-15): **62–64 KB
 back. Its 5 KB stack is internal only because a switch command saves the script list to
 flash: handing that write to another task (e.g. `auto_io`) would let the stack move to PSRAM
 if RAM gets short.
+With device firmware updates (OTA server, update entities; 2026-11-18): **64.7 KB free, lowest
+24.6 KB**. The image, the download task's stack and mbedTLS are in PSRAM; what's new on the
+internal side is the stack's OTA server and esp_http_client's small buffers during a download.
 
 Levers, roughly cheapest first — pull only what's needed:
 1. Wi-Fi code out of IRAM (`CONFIG_ESP_WIFI_IRAM_OPT`, `_RX_IRAM_OPT`,

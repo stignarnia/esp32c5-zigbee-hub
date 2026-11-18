@@ -714,7 +714,9 @@ USB flashing always works either way.
 - **Zigbee**: Espressif's Zigbee stack (`esp-zigbee-lib`) running as coordinator
   on the C5's native 802.15.4 radio. On first boot it forms a network on the
   quietest of channels 15 and 25, with a random PAN ID and a network key from the
-  hardware RNG.
+  hardware RNG. The hub is also the network's OTA Upgrade server: it serves a device the
+  firmware image it was asked to install, block by block (see *Updating a device's
+  firmware*); finding new firmware is left to the Home Assistant app.
 - **Wi-Fi**: station mode, band locked to 5 GHz before the radio starts, with no
   fallback. WPA2 minimum, WPA3 when the router offers it. If the access point
   disappears, a watchdog reconnects, then restarts the Wi-Fi driver, and after 20

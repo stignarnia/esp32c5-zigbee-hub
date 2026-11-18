@@ -80,6 +80,15 @@ static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t max_len) {
     return hex_len / 2;
 }
 
+/* Decode a 32-byte key. Only an exact 64-digit hex string counts: on any other input the key is
+ * zeroed and false is returned, so a malformed key is never taken for a (rotated) key (upstream
+ * e72ef92) */
+static bool parse_key32(const char *hex, uint8_t key[32]) {
+    if (hex_to_bytes(hex, key, 32) == 32) return true;
+    memset(key, 0, 32);
+    return false;
+}
+
 /* ============================================================================
  * TCP I/O helpers for coord socket (owned exclusively by this task)
  * ========================================================================== */
@@ -176,6 +185,13 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
 
     uint16_t ct_len = (hdr[1] << 8) | hdr[2];
     if (ct_len < 16) return -1;
+    /* The header is not authenticated, and its length decides how much is allocated before the
+     * MAC check. Go's controlbase never writes a frame over 4 KB: anything past 16 KB is a broken
+     * or hostile stream (upstream d6493c0) */
+    if (ct_len > 16384 + 16) {
+        ESP_LOGE(TAG, "Noise frame length %d over the limit", ct_len);
+        return -1;
+    }
     size_t pt_len = ct_len - 16;
     if (pt_len > max_len) {
         ESP_LOGE(TAG, "Noise frame too large: %d > %d", (int)pt_len, (int)max_len);
@@ -343,8 +359,8 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
 
     ESP_LOGI(TAG, "HTTP response received: %d bytes", total);
 
-    /* Verify 101 Switching Protocols */
-    if (strstr((char *)resp, "101") == NULL) {
+    /* Verify 101 Switching Protocols (the status line only, not anywhere in the body; upstream af3a58e) */
+    if (strncmp((char *)resp, "HTTP/1.1 101", 12) != 0) {
         ESP_LOGE(TAG, "Noise upgrade rejected: %.200s", resp);
         free(resp);
         return -1;
@@ -368,7 +384,9 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
     int body_buf_len = 0;
 
     if (body_len > 0) {
-        body_buf = ml_psram_malloc(body_len);
+        /* The 3-byte header read below may write into this buffer even when body_len is 1-2
+         * bytes: never allocate less than it may receive (heap overflow; upstream af3a58e) */
+        body_buf = ml_psram_malloc(body_len < 512 ? 512 : body_len);
         if (body_buf) {
             memcpy(body_buf, body_start, body_len);
             body_buf_len = body_len;
@@ -400,6 +418,14 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
 
     if (msg_type != 0x02) {
         ESP_LOGE(TAG, "Unexpected Noise msg type: 0x%02x (expected 0x02)", msg_type);
+        free(body_buf);
+        return -1;
+    }
+
+    /* Noise IK msg2 is exactly the 32-byte ephemeral key + 16-byte tag. Anything else is not a
+     * coordinator we understand: refuse it rather than decrypt an attacker-chosen length */
+    if (payload_len != 48) {
+        ESP_LOGE(TAG, "Unexpected Noise msg2 length: %d (expected 48)", payload_len);
         free(body_buf);
         return -1;
     }
@@ -604,10 +630,11 @@ static void process_proactive_frames(microlink_t *ml, ml_noise_state_t *noise) {
                     /* Parse "chalpub:hex..." format (v1 lines 1402-1424) */
                     if (strncmp(chal_str, "chalpub:", 8) == 0) {
                         const char *hex = chal_str + 8;
-                        if (strlen(hex) >= 64) {
-                            hex_to_bytes(hex, s_node_key_challenge, 32);
+                        if (parse_key32(hex, s_node_key_challenge)) {
                             s_has_node_key_challenge = true;
                             ESP_LOGI(TAG, "NodeKeyChallenge decoded (32 bytes)");
+                        } else {
+                            ESP_LOGW(TAG, "NodeKeyChallenge malformed, ignored");
                         }
                     }
                 }
@@ -1086,7 +1113,17 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
         if (key && key->valuestring) {
             const char *hex = key->valuestring;
             if (strncmp(hex, "nodekey:", 8) == 0) hex += 8;
-            hex_to_bytes(hex, update->public_key, 32);
+            if (!parse_key32(hex, update->public_key)) {
+                /* Installing it would give the peer an all-zero or partial key: drop the record
+                 * and keep whatever entry we already have (upstream e72ef92) */
+                ESP_LOGW(TAG, "  Peer with malformed Key ignored");
+                free(update);
+                continue;
+            }
+        } else {
+            ESP_LOGW(TAG, "  Peer without Key ignored");
+            free(update);
+            continue;
         }
 
         /* DiscoKey: "discokey:HEX..." */
@@ -1094,7 +1131,7 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
         if (disco && disco->valuestring) {
             const char *hex = disco->valuestring;
             if (strncmp(hex, "discokey:", 9) == 0) hex += 9;
-            hex_to_bytes(hex, update->disco_key, 32);
+            parse_key32(hex, update->disco_key);  /* zeroed when malformed: no DISCO for that peer */
         }
 
         /* VPN IP from Addresses */
@@ -1177,7 +1214,11 @@ check_removed:
 
             const char *hex = key_item->valuestring;
             if (strncmp(hex, "nodekey:", 8) == 0) hex += 8;
-            hex_to_bytes(hex, update->public_key, 32);
+            if (!parse_key32(hex, update->public_key)) {
+                ESP_LOGW(TAG, "  PeersRemoved entry with malformed key ignored");
+                free(update);
+                continue;
+            }
 
             ESP_LOGI(TAG, "  Remove peer: %02x%02x%02x%02x...",
                      update->public_key[0], update->public_key[1],
@@ -1204,7 +1245,12 @@ check_removed:
 
                     const char *hex = patch->string;
                     if (strncmp(hex, "nodekey:", 8) == 0) hex += 8;
-                    hex_to_bytes(hex, update->public_key, 32);
+                    if (!parse_key32(hex, update->public_key)) {
+                        ESP_LOGW(TAG, "  PeersChangedPatch with malformed key ignored");
+                        free(update);
+                        patch = patch->next;
+                        continue;
+                    }
 
                     /* Parse DERP region if present — try DERPRegion (int) first,
                      * then legacy DERP string */
@@ -1751,7 +1797,10 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
             if (key_expiry && key_expiry->valuestring) {
                 int yr, mo, dy, hr, mn, sc;
                 if (sscanf(key_expiry->valuestring, "%d-%d-%dT%d:%d:%d",
-                           &yr, &mo, &dy, &hr, &mn, &sc) >= 6) {
+                           &yr, &mo, &dy, &hr, &mn, &sc) >= 6 &&
+                    /* range-checked: a huge year looped for billions of iterations (upstream f2ade3e) */
+                    yr >= 1970 && yr <= 2200 && mo >= 1 && mo <= 12 && dy >= 1 && dy <= 31 &&
+                    hr >= 0 && hr <= 23 && mn >= 0 && mn <= 59 && sc >= 0 && sc <= 60) {
                     /* Simple epoch calculation (approximate, no leap second) */
                     /* Days from year 1970 */
                     int64_t days = 0;

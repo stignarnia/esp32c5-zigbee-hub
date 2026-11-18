@@ -105,6 +105,17 @@ static void update_peer_addr(struct wireguard_peer *peer, const ip_addr_t *addr,
 		WG_DEBUG("[WG] update_peer_addr: skipping DERP (0.0.0.0)\n");
 		return;  // Skip updating endpoint for DERP packets
 	}
+	// A peer endpoint must be a real underlay address: a packet that reached our VPN IP through
+	// the tunnel would otherwise make every later send loop back into this netif (stack overflow,
+	// triggerable by any tailnet peer; upstream microlink 2e567c6)
+	if (IP_IS_V4(addr)) {
+		const uint32_t a = PP_NTOHL(ip4_addr_get_u32(ip_2_ip4(addr)));
+		if ((a >> 24) == 0 || (a >> 24) == 127 || (a & 0xFFC00000u) == 0x64400000u ||
+				(a & 0xFFFF0000u) == 0xA9FE0000u || (a >> 28) >= 0xE) {
+			WG_DEBUG("[WG] update_peer_addr: refusing non-underlay endpoint %s\n", ipaddr_ntoa(addr));
+			return;
+		}
+	}
 	WG_DEBUG("[WG] update_peer_addr: %s:%u\n", ipaddr_ntoa(addr), port);
 	peer->ip = *addr;
 	peer->port = port;

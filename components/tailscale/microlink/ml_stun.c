@@ -380,8 +380,10 @@ bool ml_stun_parse_response(const uint8_t *data, size_t len,
         return false;
     }
 
-    /* Check txid against IPv4 txid (IPv6 responses use separate parser) */
-    if (txid_v4_valid && memcmp(data + 8, txid_v4, 12) != 0) {
+    /* Only a response to a request we have outstanding (IPv6 responses use a separate parser).
+     * Before, with no probe outstanding any Binding Response from anyone was accepted and could
+     * rewrite our advertised public endpoint (upstream f2ade3e) */
+    if (!txid_v4_valid || memcmp(data + 8, txid_v4, 12) != 0) {
         /* Could be an IPv6 response arriving on IPv4 queue — don't warn */
         ESP_LOGD(TAG, "STUN IPv4 txid mismatch (may be IPv6 response)");
         return false;
@@ -664,20 +666,27 @@ uint16_t ml_stun_pick_home_region(microlink_t *ml) {
             ml_rx_packet_t pkt;
             if (xQueueReceive(ml->stun_rx_queue, &pkt, pdMS_TO_TICKS(deadline - now)) != pdTRUE) break;
             now = ml_get_time_ms();
+            int matched = -1;
             for (int i = 0; i < n; i++) {
                 if (ip[i] && ip[i] == pkt.src_ip && port[i] == pkt.src_port &&
                     pkt.len >= 20 && memcmp(pkt.data + 8, txid[i], 12) == 0) {
                     uint32_t rtt = (uint32_t)(now - sent[i]);
                     if (rtt < best[i]) best[i] = rtt;
+                    matched = i;
                     break;
                 }
+            }
+            if (matched < 0) {
+                free(pkt.data);  /* not an answer to one of our probes: never trust its address */
+                continue;
             }
             /* Every reply carries our public address, and this loop consumes the reply
              * the coord loop was waiting for: take the address from here. Several
              * servers seeing different ports = the NAT maps per destination. */
             uint32_t pub_ip;
             uint16_t pub_port;
-            txid_v4_valid = false;  /* many probes in flight; any one of ours will do */
+            memcpy(txid_v4, txid[matched], 12);  /* parse it as the answer to that probe */
+            txid_v4_valid = true;
             if (ml_stun_parse_response(pkt.data, pkt.len, &pub_ip, &pub_port)) {
                 if (ml->stun_public_ip == 0) {
                     ml->stun_public_ip = pub_ip;

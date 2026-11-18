@@ -663,8 +663,10 @@ tailnet is the login.
 - You can only turn it on from a browser that is itself connected over Tailscale,
   so you can't lock yourself out by switching it on from a connection that's
   about to be cut off.
-- If your tailnet is shared with other people, restrict who can reach
-  `zigbee-hub` with a [Tailscale ACL](https://tailscale.com/kb/1018/acls).
+- Who on your tailnet can reach the hub is decided by your
+  [Tailscale access policy](https://tailscale.com/kb/1018/acls), and the hub enforces it
+  itself, as every Tailscale client does: a new connection or packet from a peer needs a
+  rule that allows it; replies to the hub's own connections always pass.
 
 **Locked out?** (expired key, tailnet changed.) Hold the board's BOOT button for
 10 seconds: LAN access with the password re-opens for 15 minutes. Or over USB,
@@ -760,7 +762,9 @@ USB flashing always works either way.
   latency, reaches peers homed elsewhere through their own region, and asks your
   router for a port mapping (NAT-PMP) so peers behind the same ISP can connect
   directly. It only probes paths when they're in use or the UI is open, so an idle
-  hub stays quiet on the network.
+  hub stays quiet on the network. It enforces your tailnet's access policy on what
+  arrives through the tunnel, and a device you remove or revoke in the admin console loses
+  access to the hub at once.
 - **Automations**: Lua 5.5, unmodified. Each script has its own Lua state with a
   capped heap in PSRAM; all of them run on one task (its 160 KB stack in PSRAM), fed
   events through a queue. Lua never runs on the Zigbee or web server task, and
@@ -829,7 +833,7 @@ instead of flagging them as undefined globals.
 
 | | |
 |---|---|
-| ESP-IDF | v6.1 |
+| ESP-IDF | v6.1.1 |
 | Compiler | riscv32-esp-elf-gcc 15.2 |
 | Python | 3.14, uv-managed, used only by ESP-IDF's build scripts |
 | Node | only to rebuild the editor bundle (`tools/codemirror/build.sh`) |

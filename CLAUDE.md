@@ -77,11 +77,12 @@ Everything below follows from that ordering:
 
 | | |
 |---|---|
-| ESP-IDF | **v6.1**, shallow clone in `.esp/esp-idf` |
+| ESP-IDF | **v6.1.1** (since 2026-11-18; v6.1 before), shallow clone in `.esp/esp-idf` |
 | Compiler | `riscv32-esp-elf-gcc` 15.2.0 in `.esp/tools` |
 | Python | CPython 3.14.10 via uv, venv `.esp/venv`, deps via `uv pip` + Espressif constraints |
 | Activate | `source ./env.sh` (sets `IDF_*`, `UV_*`, `ESPPORT`, runs `export.sh`) |
 | Verified | hello_world built, flashed, ran (`.esp/smoke-test`) |
+| Updating IDF | `git fetch --depth 1 origin tag vX` + checkout + `git submodule update --init --depth 1 --recursive`, then `idf_tools.py install --targets esp32c5` (tools only) and the venv with `uv pip install -r requirements.core.txt -c espidf.constraints.vX.Y.txt` (fresh constraints from dl.espressif.com). **Never `install.sh`**: it deleted the uv venv to rebuild its own and failed (2026-11-18). `idf_tools.py uninstall --remove-archives` drops tools the version no longer uses |
 
 Serial monitor without a TTY (what Claude uses):
 
@@ -291,10 +292,24 @@ evidence; where something is still open there, it points here.
       marker moves to NVS, written by the automation task when a pattern starts (the plan's
       fallback) (Phase 5)
 
+### Tests: Tailscale security update (2026-11-18, Phase 4)
+- [ ] a refused connection under the enforced packet filter: every peer that talks to the hub is
+      allowed by the policy's one rule, so a drop was never shown live (needs a tailnet device
+      the policy doesn't allow)
+- [ ] the WireGuard replay fix's positive control: a fresh (not yet delivered) packet from
+      another port must move the endpoint; capturing one needs NFQUEUE/tcpdump, not on the dev
+      machine
+- [ ] the hub's own handshake initiation right after a reboot accepted by a peer (monotonic
+      timestamps); and a long-poll delta (a peer going on- or offline) shown in `/api/ts` after
+      the reassembly rewrite, compared with `tailscale status`
+- [ ] the HA app rebuilt in Home Assistant so it picks up nginx 1.30.7 (Alpine 3.24's package;
+      the app installs nginx at build time, no code change; the user's action)
+
 ### Tests: waiting or long runs
 - [ ] availability: a battery sensor marked offline after 25 h of silence (Phase 3)
 - [ ] internal heap low-water mark under full load: Zigbee + Tailscale + a UI client + 3
-      scripts, and the same with HA connected (24.6 KB lowest with HA at boot, 2026-11-18) (Phase 7)
+      scripts, and the same with HA connected (20.9 KB lowest with HA at boot after the Tailscale
+      security update, 2026-11-18) (Phase 7)
 
 ### Built, never seen with a real device of that kind (none here)
 - [ ] temperature, humidity and occupancy sensors (UI, `zb.*`, HA entities)
@@ -1320,7 +1335,9 @@ Offered in the UI (Settings → Tailscale) once Tailscale is connected. Code:
       nonce into `prov` (`lanreset`), a nonce not seen before turns the mode off at
       boot. USB path verified by Claude; BOOT press verified by the user (2026-11-07).
       GPIO28 reads 1 = released at boot
-- [x] Who on the tailnet can reach it is decided by Tailscale ACLs (README says so)
+- [x] Who on the tailnet can reach it is decided by Tailscale ACLs (README says so). **Not
+      true until 2026-11-18**: microlink had no packet filter, so any peer in the hub's netmap
+      reached any port (in this mode without a password). Enforced since (below)
 - [x] Verified 2026-11-07:
   - forged TCP SYNs from a LAN host (scapy, Ethernet frames straight to the hub's MAC)
     to <tailnet IP>:80: 0 of 3 answered, `forged_dropped` 3; control SYNs to the LAN
@@ -1333,6 +1350,69 @@ Offered in the UI (Settings → Tailscale) once Tailscale is connected. Code:
   - `flash.sh --ota` with no `--host`: `.local` doesn't answer → tailnet name, login
     without password, upload 22.8 s over the tunnel, confirmed; mode kept after reboot
   - `flash.sh --prov-only --lan-access`: mode off, LAN + password and mDNS back
+
+#### Security update from upstream (2026-11-18)
+Library check (user: "check if ANY of the libraries we use have updates"): ESP-IDF v6.1.1 (same
+gcc, `esp-15.2.0_20251204`; newer crosstool releases exist but IDF doesn't recommend them),
+wireguard-lwip advisory **GHSA-7grw-r329-8g8c** (2026-11-10), and microlink 207 commits past our
+base (216da33, 2026-03-17) including a release audit. Up to date then: esp-zigbee-lib 2.1.0, mdns
+1.15.1, cJSON 1.7.19~2, littlefs 1.23.1, Lua 5.5.1, CodeMirror packages, esbuild, Python 3.14.10,
+uv 0.13.9, Alpine 3.24; ESPHome 2026.11.0 still API 1.19. Ported by hand into our fork (security
+first, then robustness; feature commits like cellular, subnet router, OTA, Ethernet skipped):
+- [x] **WireGuard (GHSA-7grw)**, `wireguard.c` and the refc crypto patched as is, `wireguardif.c`
+  by hand: the replay check runs right after authentication and before the endpoint or any state
+  moves, keep-alives included (ours also skipped it for keep-alives); a cookie reply doesn't move
+  the endpoint; inner IPv4 header length checked; 64-bit replay difference; base64 padding;
+  Reject-After-Messages on the received counter; index collision loop; initiation rate limit (it
+  was inverted, never applied); keys wiped after use; a peer reset wipes the handshake and all
+  three keypairs expire. Kept ours: the endpoint revert on peer reset (microlink: "any" = DERP).
+  Test: 40 replays of a captured transport packet from another port during a download, **0** hub
+  packets reached that port (no positive control: Still to do)
+- [x] **Control plane**: Noise msg2 heap overflow on a 1–2 byte body, msg2 exactly 48 bytes, "HTTP/1.1
+  101" status line (af3a58e, dd29cf6); Noise frames over 16 KB refused before allocating (d6493c0);
+  keys used only when exactly 32 bytes (e72ef92); KeyExpiry range-checked; H2 window underflow and
+  stitched JSON (d0aa0c3). The server is authenticated by its pinned Noise key (`ml_noise.c`), so
+  port 80 needs no TLS
+- [x] **Revocation**: `PeersRemoved` is a list of NodeIDs and `PeersChangedPatch` of PeerChange objects
+  by NodeID; both were parsed as nodekeys, so **a removed or revoked node kept WireGuard access
+  until a reboot** (5d4536b). Now by NodeID, a rotated key replaces the old one (patch or peer list,
+  944055b), and after a complete peer list the peers not in it are removed
+- [x] **Long-poll reassembly** (ideas of 630a525, 963298c, 847f2b0, b133022; our own code): one Noise
+  frame was parsed alone and only the last stream-5 DATA frame kept, so an HTTP/2 frame continuing
+  into the next Noise frame was cut and a MapResponse over several DATA frames silently dropped,
+  while "connected" — a missed `PeersRemoved` or `PacketFilter`. Now partial frames carry over,
+  messages split by the 4-byte LE length, anything out of bounds reconnects
+- [x] **Packet filter (ACLs)**, `ml_filter.c` + `ml_routes.c` copied from upstream 1cb8d1c (MIT; IPv6
+  parsing compiled out): new TCP connections and UDP/ICMP need a rule of `PacketFilter(s)`, replies
+  to the hub's flows pass, only the tailnet IP is a destination, nothing new before the first policy.
+  First installed **log-only** with would-drops logged: 306 accepted, 9 would-drops, all IP protocol
+  99 (TSMP disco-key advertisements, which Tailscale handles before its filter, so they pass now).
+  Then **enforced** (`TS_FILTER_MODE` in `ts.c`): 72 accepted, 0 dropped, UI and HA fine.
+  `/api/ts` `filter` {mode, policy, rules, accepted, dropped}. A refusal not seen live: Still to do
+- [x] **STUN / DISCO / endpoints**: our home-region probe loop parsed *every* STUN reply, so anyone
+  could set our advertised public address; now only an answer to one of our probes (f2ade3e,
+  worse here). DISCO from keys not in the netmap dropped before X25519 (CPU DoS). One ping per
+  destination with its own txid, a pong accepted only from the address pinged and sealed by that
+  peer's key (2cfc1fb: a re-sent pong made an attacker the "direct path"); first pong of a round
+  wins and a trusted path stays unless a LAN one appears (1637300, simplified). Tunnel-internal,
+  loopback, link-local, multicast endpoints refused (2e567c6, 3f2216a); no unvalidated endpoint at
+  peer-add, DERP until DISCO validates (da55beb: one-way tunnels to CGNAT peers). Seen: all 4 online
+  peers direct (two VPN nodes, HA, the dev machine)
+- [x] **WireGuard robustness**: handshake timestamps from wall time, else an NVS floor + uptime, so peers
+  don't drop the hub's initiations after a reboot (484fcc4, aec27f9; NVS by `ts_task`, never the
+  PSRAM-stack task). It was uptime: maybe the unexplained first HA dial with no answer (Phase 6).
+  Timer handshake retries stop after 90 s (a476b46); 64-packet replay window; MTU 1280 like
+  Tailscale (2748d1c, was 1420); nonstring constants for GCC 15
+- [x] **DERP**: a frame header split across TLS records is finished, not a reconnect (6a7d72f,
+  0a1e403); a stale connect request no longer reconnects over an unfreed session (2778a2d, leak)
+- Not ported, and why: the keypair locking commits (d17a212, ac8ad21, f389f4f, 12796da): every
+  WireGuard call here already holds the lwIP core lock (`wgl_*`), so TX can't reuse a nonce; RX via
+  `netif->input` (5c8d60c…): ours calls `ip_input` under the core lock; event-driven idle, subnet
+  router/exit node, OTA, Ethernet, cellular, config UI: features we don't use
+- RAM: the 64-slot probe table and the filter's tables first sat in internal RAM (lowest 16.7 KB),
+  then were moved to PSRAM: **58 KB free, lowest 20.9 KB** (22.0 KB before the update)
+- `tailscale ping` 5–61 ms direct, UI requests 33–95 ms, `cm.js` 120 KB in 0.74 s over the tunnel
+  (as before); HA (2026.11.2) reconnected after every install
 
 ### Phase 4b — Subnet router for a remote Home Assistant (not doing, user decision 2026-11-07)
 Asked: could the hub advertise the home LAN on the tailnet so a remote HA finds devices
@@ -2071,7 +2151,9 @@ back. Its 5 KB stack is internal only because a switch command saves the script 
 flash: handing that write to another task (e.g. `auto_io`) would let the stack move to PSRAM
 if RAM gets short.
 With device firmware updates (OTA server, update entities; 2026-11-18): **64.7 KB free, lowest
-24.6 KB**. The image, the download task's stack and mbedTLS are in PSRAM; where the other
+24.6 KB** After the per-device HA settings and the Tailscale security update
+(2026-11-18): **58 KB free, lowest 20.9 KB** (16.7 KB until the new DISCO probe and filter tables
+moved to PSRAM). The image, the download task's stack and mbedTLS are in PSRAM; where the other
 1.5 KB went (the stack's OTA server cluster, the larger HA entity table?) was not measured.
 
 Levers, roughly cheapest first — pull only what's needed:

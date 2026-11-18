@@ -40,6 +40,14 @@ esp_err_t zb_set_on(const char *device, int mode);  // sleepy devices: at their 
 // zb_devices_json. Same errors as zb_set_on. Any task.
 enum { ZB_POWER_ON_OFF = 0, ZB_POWER_ON_ON, ZB_POWER_ON_TOGGLE, ZB_POWER_ON_PREVIOUS };
 esp_err_t zb_set_power_on(const char *device, int mode);
+// SONOFF eWeLink devices (cluster 0xFC11), "inching": after each turn-on the device switches
+// itself off `seconds` later (ZB_INCHING_OFF, mode byte 0x80), or after each turn-off back on
+// (ZB_INCHING_ON, 0x81); ZB_INCHING_NONE = never. 1..3599 s. Sent as SONOFF's command; the device
+// can't be asked for it, so the hub keeps what was last set (persisted). ESP_ERR_NOT_SUPPORTED:
+// not such a device. Any task.
+enum { ZB_INCHING_NONE = 0, ZB_INCHING_OFF, ZB_INCHING_ON };
+#define ZB_INCHING_MAX_S 3599
+esp_err_t zb_set_inching(const char *device, int mode, uint16_t seconds);
 // ---- device firmware updates (OTA Upgrade server) ----------------------------------------
 // One image at a time, in PSRAM, lost on restart. Any task.
 // Stage: fetch `url` (https://, or http:// to a LAN/tailnet host) for the device with IEEE
@@ -210,6 +218,8 @@ typedef struct {
     bool has_offer; uint32_t offer_ver;      // newer file version offered (zb_ota_offer)
     char offer_notes[128];                   // its release notes, "" = none
     bool has_startup; uint8_t startup;       // StartUpOnOff: 0 off, 1 on, 2 toggle, 0xFF previous
+    bool ewelink;                            // SONOFF eWeLink cluster: inching (zb_set_inching)
+    bool has_inching; uint8_t inching; uint16_t inching_s;  // last set: ZB_INCHING_*, seconds
     char ha_hide[ZB_HA_HIDE_LEN];            // keys of the hub's own entities not to publish
     uint8_t n_custom;
     zb_custom_t custom[ZB_CUSTOM_MAX];       // the user's own entities

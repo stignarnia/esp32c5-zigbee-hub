@@ -268,9 +268,6 @@ evidence; where something is still open there, it points here.
       from HA): still unseen: the jitter-only notify of a real offer, Cancel during a transfer, a
       wrong sha512, a battery device's update. Open decision: how HA shows versions (now the
       decimal OTA file version, 4098 / 8451; proposed: hex `0x00001002`)
-- [ ] SONOFF inching (the plug switching itself off N s after being turned on): built 2026-11-18
-      as SONOFF's 0xFC11 command and removed the same day: it sent mode 0x81, which turns the plug
-      back on after an off; 0x80 is the auto-off (tested, Phase 3). Rebuild only if the user wants it
 
 ### Tests: router off for about an hour (one session)
 - [ ] triggers, timers, cron and buzzers keep working; `net.on("down")` fires; a `retry_for`
@@ -1113,6 +1110,17 @@ For long tests without a serial cable: log on the board, download later.
       19:36:25; a later on stayed on); mode 0x80 = **off** 5 s after each on (on 19:36:54 → off
       19:37:00). The build had sent 0x81, so the auto-off never happened and the "off" at
       18:16:18 was undone 5 s later. Disabled again afterwards, Bike left on
+- [x] **Inching, rebuilt with both modes** (user, 2026-11-18): `zb_set_inching(device, mode,
+      seconds)`: never (mode byte 0x00), turn off N s after each on (0x80), turn on N s after each
+      off (0x81); 1–3599 s. For eWeLink devices (0xFC11 server, manufacturer code 0x1286 or Basic
+      "SONOFF"). The plug can't be asked, so the hub keeps what it last sent (`devices.json`
+      `st.inching` / `st.inching_s`; unknown until first set). HA select "Inching" (config, key
+      `inching`): Never, Turn off after 5 s / 30 s / 1 min / 5 min / 15 min / 30 min / 59 min, Turn on
+      after the same; card select "By itself"; `/api/zb/set {"inching": "none"|"off"|"on",
+      "seconds"}`. **Verified through the ESPHome API** (aioesphomeapi `select_command`, as HA sends
+      it), relay read from the plug every second: "Turn off after 5 s", on at 19:41:32 → off by
+      19:41:37; "Turn on after 5 s", off at 19:41:47 → on at 19:41:53; "Never" → state Never, Bike
+      left on. The name is SONOFF's (eWeLink calls the feature "inching")
   - the same file names more of 0xFC11 (`addCustomClusterEwelink`): 0x7009 energyToday, 0x700a
     energyMonth, 0x700b energyYesterday (uint32), read 2026-11-18 on 2.1.3: 56 / 136 / 80
     (0 on 1.0.2; Wh by their size: yesterday's charge was ~70 Wh). 0x0010 faultCode =

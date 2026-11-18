@@ -95,6 +95,7 @@ static const char *zb_key(uint8_t val)
     case V_ZB_BATT_V: return "battery_v";    case V_ZB_TEMP: return "temperature";
     case V_ZB_HUM: return "humidity";        case V_ZB_OCC: return "occupancy";
     case V_ZB_ON: return "power";            case V_ZB_POWER_ON: return "power_on";
+    case V_ZB_INCHING: return "inching";
     case V_ZB_WATTS: return "power_draw";    case V_ZB_VOLTS: return "voltage";
     case V_ZB_AMPS: return "current";        case V_ZB_KWH: return "energy";
     case V_ZB_ONLINE: return "online";       case V_ZB_RSSI: return "signal";
@@ -145,6 +146,12 @@ static void zb_entities(ha_model_t *m, const zb_dev_info_t *d, uint32_t id, bool
         e = add(m, ET_SELECT, V_ZB_POWER_ON, id, "Power on behavior");
         set(e, NULL, NULL, 0, 0, 1, false);
         if (e) strlcpy(e->icon, "mdi:power-settings", sizeof(e->icon));
+    }
+    // SONOFF: switches itself off after each on, or back on after each off (zb_set_inching)
+    if (d->ewelink) {
+        e = add(m, ET_SELECT, V_ZB_INCHING, id, "Inching");
+        set(e, NULL, NULL, 0, 0, 1, false);
+        if (e) strlcpy(e->icon, "mdi:timer-outline", sizeof(e->icon));
     }
     if (d->elec_meas) {
         set(add(m, ET_SENSOR, V_ZB_WATTS, id, "Power draw"), "power", "W", 1, MEAS, 0, false);
@@ -338,6 +345,23 @@ static void zb_state(const ha_ent_t *e, const zb_dev_info_t *d, const ha_state_t
             st->b = !zero && d->custom[i].value != 0;
         }
         break;
+    case V_ZB_INCHING: {
+        static const char *const OPT[] = HA_INCHING_OPTIONS;
+        static const uint16_t SEC[] = HA_INCHING_SECONDS;
+        st->missing = !d->has_inching;  // never set from the hub: unknown (the plug can't be asked)
+        if (d->has_inching) {
+            int i = 0;
+            if (d->inching != ZB_INCHING_NONE) {
+                int best = 0;  // the nearest option, for a time set through the API
+                for (int k = 1; k < HA_INCHING_STEPS; k++) {
+                    if (abs((int)SEC[k] - d->inching_s) < abs((int)SEC[best] - d->inching_s)) best = k;
+                }
+                i = 1 + best + (d->inching == ZB_INCHING_ON ? HA_INCHING_STEPS : 0);
+            }
+            strlcpy(st->text, OPT[i], sizeof(st->text));
+        }
+        break;
+    }
     case V_ZB_POWER_ON: {
         static const char *const OPT[] = HA_POWER_ON_OPTIONS;
         int i = !d->has_startup ? -1 : d->startup == 0x00 ? 0 : d->startup == 0x01 ? 1 : d->startup == 0x02 ? 2
@@ -433,8 +457,12 @@ void ha_model_state(const ha_ent_t *e, const ha_inputs_t *in, const ha_state_t *
 
 int ha_select_options(uint8_t val, const char *const **opts)
 {
-    (void)val;  // the only select so far: a plug's power-on behaviour
     static const char *const POWER_ON[] = HA_POWER_ON_OPTIONS;
+    static const char *const INCHING[] = HA_INCHING_OPTIONS;
+    if (val == V_ZB_INCHING) {
+        *opts = INCHING;
+        return sizeof(INCHING) / sizeof(INCHING[0]);
+    }
     *opts = POWER_ON;
     return sizeof(POWER_ON) / sizeof(POWER_ON[0]);
 }

@@ -729,6 +729,12 @@ static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *
         esp_err_t err = ESP_ERR_NOT_SUPPORTED;
         if (e->val == V_ZB_POWER_ON) {
             err = zb_set_power_on(e->ref, mode);
+        } else if (e->val == V_ZB_INCHING) {
+            // option 0 = never, then HA_INCHING_STEPS "off after", then as many "on after"
+            static const uint16_t SEC[] = HA_INCHING_SECONDS;
+            int im = mode == 0 ? ZB_INCHING_NONE : mode <= HA_INCHING_STEPS ? ZB_INCHING_OFF : ZB_INCHING_ON;
+            err = zb_set_inching(e->ref, im, mode == 0 ? 0 : SEC[(mode - 1) % HA_INCHING_STEPS]);
+            S->next_poll_us = 0;  // the hub keeps the value: show it at once
         }
         ESP_LOGI(TAG, "%s: %s of %s: %s (%s)", c->info, e->name, e->ref, opt, esp_err_to_name(err));
         break;

@@ -116,6 +116,7 @@ typedef struct {
     int64_t onoff_read_us[2];
     uint8_t onoff_ep;
     uint8_t startup;  bool has_startup;  // StartUpOnOff: 0 off, 1 on, 2 toggle, 0xFF previous; persisted
+    uint8_t inching; uint16_t inching_s; bool has_inching;  // SONOFF inching, last set (ZB_INCHING_*); persisted
     // On/Off state read from always-on devices every STATE_READ_US and when one rejoins: after a
     // power cut a device may come back in another state without reporting it. 0 = due now
     int64_t state_read_us;
@@ -231,6 +232,16 @@ static bool has_server(const zdev_t *d, uint16_t cluster, uint8_t *ep_out)
 static uint8_t first_ep(const zdev_t *d)
 {
     return d->n_ep ? d->ep[0].id : 1;
+}
+
+#define EWELINK_CLUSTER 0xFC11
+#define EWELINK_MANUF   0x1286  // Shenzhen CoolKit (SONOFF)
+
+// SONOFF's own cluster, on a device made by them
+static bool is_ewelink(const zdev_t *d)
+{
+    return has_server(d, EWELINK_CLUSTER, NULL) && ((d->has_ota_manuf && d->ota_manuf == EWELINK_MANUF) ||
+                                                   strcasecmp(d->manuf, "SONOFF") == 0);
 }
 
 static void changed(bool persist)
@@ -1409,6 +1420,10 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
         if (d->has_batt_v) cJSON_AddNumberToObject(st, "batt_v", d->batt_v);
         if (d->has_on) cJSON_AddBoolToObject(st, "on", d->on);
         if (d->has_startup) cJSON_AddNumberToObject(st, "startup", d->startup);
+        if (d->has_inching) {
+            cJSON_AddNumberToObject(st, "inching", d->inching);
+            cJSON_AddNumberToObject(st, "inching_s", d->inching_s);
+        }
         if (d->has_occ) cJSON_AddNumberToObject(st, "occ", d->occ);
         if (d->has_power) cJSON_AddNumberToObject(st, "pw", d->power);
         if (d->has_volt) cJSON_AddNumberToObject(st, "volt", d->volt);
@@ -1450,6 +1465,13 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
             const char *s = d->startup == 0x00 ? "off" : d->startup == 0x01 ? "on" : d->startup == 0x02 ? "toggle"
                           : d->startup == 0xFF ? "previous" : "other";
             cJSON_AddStringToObject(o, "power_on", s);
+        }
+        if (is_ewelink(d)) {
+            cJSON_AddBoolToObject(o, "ewelink", true);
+            if (d->has_inching) {
+                cJSON_AddStringToObject(o, "inching", d->inching == ZB_INCHING_OFF ? "off" : d->inching == ZB_INCHING_ON ? "on" : "none");
+                cJSON_AddNumberToObject(o, "inching_s", d->inching_s);
+            }
         }
         if (d->has_power) cJSON_AddNumberToObject(o, "watts", watts(d));
         if (d->has_volt) cJSON_AddNumberToObject(o, "volts", volts(d));
@@ -1621,6 +1643,12 @@ static void load(void)
         if (cJSON_IsBool(on)) { d->on = cJSON_IsTrue(on); d->has_on = true; }
         const cJSON *su = cJSON_GetObjectItem(st, "startup");
         if (cJSON_IsNumber(su)) { d->startup = (uint8_t)su->valueint; d->has_startup = true; }
+        const cJSON *in = cJSON_GetObjectItem(st, "inching"), *ins = cJSON_GetObjectItem(st, "inching_s");
+        if (cJSON_IsNumber(in) && in->valueint <= ZB_INCHING_ON) {
+            d->inching = (uint8_t)in->valueint;
+            d->inching_s = cJSON_IsNumber(ins) ? (uint16_t)ins->valueint : 0;
+            d->has_inching = true;
+        }
         const cJSON *fw = cJSON_GetObjectItem(o, "fw");
         const cJSON *fv;
         if (cJSON_IsNumber(fv = cJSON_GetObjectItem(fw, "app"))) { d->app_ver = fv->valueint; d->has_app_ver = true; }
@@ -1754,6 +1782,8 @@ int zb_snapshot(zb_dev_info_t *out, int max)
         o->has_offer = d->has_offer;      o->offer_ver = d->offer_ver;
         strlcpy(o->offer_notes, d->has_offer ? d->offer_notes : "", sizeof(o->offer_notes));
         o->has_startup = d->has_startup;  o->startup = d->startup;
+        o->ewelink = is_ewelink(d);
+        o->has_inching = d->has_inching;  o->inching = d->inching;  o->inching_s = d->inching_s;
         strlcpy(o->ha_hide, d->ha_hide, sizeof(o->ha_hide));
         o->n_custom = d->n_custom;
         memcpy(o->custom, d->custom, sizeof(o->custom));
@@ -2072,6 +2102,57 @@ esp_err_t zb_custom_write(const char *ieee_hex, int index, bool on)
         q->type = c->type;
         err = zb_raw_encode(c->type, on ? 1 : 0, NULL, q->value, &q->len);
         d->custom_next_us[index] = esp_timer_get_time() + 1500000;  // read the result back
+    }
+    UNLOCK();
+    if (err == ESP_OK) err = zb_raw_request(q, NULL, NULL);
+    free(q);
+    return err;
+}
+
+// SONOFF inching: command 0x01 ("protocolData") on 0xFC11 with manufacturer code 0x1286, as
+// zigbee-herdsman-converters' inchingControlSet. Payload: command 0x01, sub-command 0x17, length
+// 7, sequence 0x80, mode (0x80 enabled, | 0x01 = turn back on after an off; 0x00 disabled),
+// channel 0, time in half seconds (little-endian), 2 reserved bytes, XOR of the 10 bytes before.
+// Measured on the S60ZBTPF (2026-11-18): 0x80 = off 5 s after each on, 0x81 = on 5 s after each off.
+esp_err_t zb_set_inching(const char *device, int mode, uint16_t seconds)
+{
+    if (mode < ZB_INCHING_NONE || mode > ZB_INCHING_ON || (mode != ZB_INCHING_NONE && (seconds < 1 || seconds > ZB_INCHING_MAX_S))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (mode == ZB_INCHING_NONE) seconds = 0;
+    zb_raw_req_t *q = calloc(1, sizeof(*q));
+    if (!q) return ESP_ERR_NO_MEM;
+    esp_err_t err = ESP_OK;
+    LOCK();
+    zdev_t *d = device ? by_name_or_ieee(device) : NULL;
+    if (!d) err = ESP_ERR_NOT_FOUND;
+    else if (!is_ewelink(d)) err = ESP_ERR_NOT_SUPPORTED;
+    else {
+        snprintf(q->device, sizeof(q->device), "%016llx", (unsigned long long)d->ieee);
+        q->op = ZB_RAW_COMMAND;
+        q->cluster = EWELINK_CLUSTER;
+        q->manuf = EWELINK_MANUF;
+        q->cmd = 0x01;
+        uint16_t half = (uint16_t)(seconds * 2);
+        uint8_t *p = q->payload;
+        p[0] = 0x01;
+        p[1] = 0x17;
+        p[2] = 0x07;
+        p[3] = 0x80;
+        p[4] = mode == ZB_INCHING_OFF ? 0x80 : mode == ZB_INCHING_ON ? 0x81 : 0x00;
+        p[5] = 0x00;
+        p[6] = half & 0xFF;
+        p[7] = half >> 8;
+        p[8] = p[9] = 0x00;
+        p[10] = 0;
+        for (int i = 0; i < 10; i++) p[10] ^= p[i];
+        q->payload_len = 11;
+        d->inching = (uint8_t)mode;
+        d->inching_s = seconds;
+        d->has_inching = true;
+        changed(true);
+        ESP_LOGI(TAG, "0x%04x %s: inching %s %u s", d->short_addr, d->name[0] ? d->name : d->model,
+                 mode == ZB_INCHING_OFF ? "off after" : mode == ZB_INCHING_ON ? "on after" : "disabled,", seconds);
     }
     UNLOCK();
     if (err == ESP_OK) err = zb_raw_request(q, NULL, NULL);

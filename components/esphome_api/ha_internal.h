@@ -65,6 +65,15 @@ typedef enum { ET_BINARY = 1, ET_SENSOR, ET_TEXT, ET_SWITCH, ET_BUTTON, ET_EVENT
 
 // Options of a plug's "after a power cut" select, in zb.h's ZB_POWER_ON_* order
 #define HA_POWER_ON_OPTIONS {"Off", "On", "Toggle", "Previous"}
+// Options of a SONOFF plug's "Inching" select (zb_set_inching): never, then off after each of
+// HA_INCHING_SECONDS, then on after each
+#define HA_INCHING_SECONDS {5, 30, 60, 300, 900, 1800, 3540}
+#define HA_INCHING_STEPS 7
+#define HA_INCHING_OPTIONS {"Never", \
+    "Turn off after 5 s", "Turn off after 30 s", "Turn off after 1 min", "Turn off after 5 min", \
+    "Turn off after 15 min", "Turn off after 30 min", "Turn off after 59 min", \
+    "Turn on after 5 s", "Turn on after 30 s", "Turn on after 1 min", "Turn on after 5 min", \
+    "Turn on after 15 min", "Turn on after 30 min", "Turn on after 59 min"}
 
 // A select's options: count and list for that entity
 int ha_select_options(uint8_t val, const char *const **opts);
@@ -72,7 +81,7 @@ int ha_select_options(uint8_t val, const char *const **opts);
 typedef enum {
     V_HUB_PERMIT = 1, V_HUB_PAIRING, V_HUB_CHANNEL, V_HUB_DEVICES, V_HUB_RSSI, V_HUB_UPTIME, V_HUB_MOTION,
     V_ZB_ZONE, V_ZB_TAMPER, V_ZB_BATT_LOW, V_ZB_BATT, V_ZB_BATT_V, V_ZB_TEMP, V_ZB_HUM, V_ZB_OCC, V_ZB_ON,
-    V_ZB_ONLINE, V_ZB_RSSI, V_ZB_SEEN, V_ZB_WATTS, V_ZB_VOLTS, V_ZB_AMPS, V_ZB_KWH, V_ZB_FW, V_ZB_POWER_ON, V_ZB_CUSTOM,
+    V_ZB_ONLINE, V_ZB_RSSI, V_ZB_SEEN, V_ZB_WATTS, V_ZB_VOLTS, V_ZB_AMPS, V_ZB_KWH, V_ZB_FW, V_ZB_POWER_ON, V_ZB_CUSTOM, V_ZB_INCHING,
     V_SCRIPT_ENABLED, V_SCRIPT_VALUE,
 } ent_val_t;
 

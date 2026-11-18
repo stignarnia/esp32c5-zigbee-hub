@@ -155,8 +155,11 @@ Turn off** button, what they do **after a power cut** (stay off, turn on, toggle
 to how they were; set on the card, stored in the plug), and, for those that measure it, their
 power draw (W), voltage, current and energy (kWh). The hub reads a plug's on/off state every 5
 minutes and whenever it rejoins, so the card is right after a power cut even if the plug
-doesn't report it. Each device shows signal strength, last seen, availability and the
-firmware it runs. Rename, re-interview or remove them.
+doesn't report it. SONOFF plugs also get **By itself** ("inching" in SONOFF's terms): turn off
+a set time after every turn-on (5 s to 59 min), or turn back on a set time after every
+turn-off. The plug can't be asked for this setting, so the hub shows what it last set. Each
+device shows signal strength, last seen, availability and the firmware it runs. Rename,
+re-interview or remove them.
 
 **Home Assistant** on a device card lists what that device publishes to Home Assistant. Untick
 any of the hub's own entities to leave it out, or add up to 8 of your own from any attribute
@@ -556,6 +559,7 @@ shows the hub's ("Espressif, ESP32-C5 Zigbee hub") on each, and you set the area
 | contact, motion, leak, smoke, CO, vibration sensor | a binary sensor of the right class (listed once the interview knows which it is) |
 | temperature / humidity sensor | sensors of the right class |
 | plug / relay (On/Off) | a switch, **Power**: Home Assistant turns it on and off; and a select, **Power on behavior** (Off, On, Toggle, Previous: what it does after a power cut) |
+| SONOFF plug | a select, **Inching**: Never, Turn off after 5 s … 59 min, Turn on after 5 s … 59 min (what it does by itself after each on / off) |
 | plug with metering | power draw (W), voltage, current, energy (kWh, for the energy dashboard) |
 | any IAS sensor | tamper, battery low (diagnostic) |
 | any battery device | battery %, battery voltage (diagnostic; voltage disabled by default) |

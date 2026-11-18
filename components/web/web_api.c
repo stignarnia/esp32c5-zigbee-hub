@@ -670,6 +670,12 @@ static esp_err_t h_zb_set(httpd_req_t *req)
     const cJSON *ieee = cJSON_GetObjectItem(j, "ieee");
     const cJSON *on = cJSON_GetObjectItem(j, "on");
     const cJSON *po = cJSON_GetObjectItem(j, "power_on");  // what it does when power comes back
+    const cJSON *in = cJSON_GetObjectItem(j, "inching"), *ins = cJSON_GetObjectItem(j, "seconds");  // SONOFF
+    int imode = !cJSON_IsString(in) ? -1
+              : strcmp(in->valuestring, "none") == 0 ? ZB_INCHING_NONE
+              : strcmp(in->valuestring, "off") == 0 ? ZB_INCHING_OFF
+              : strcmp(in->valuestring, "on") == 0 ? ZB_INCHING_ON : -1;
+    double isec = cJSON_IsNumber(ins) ? ins->valuedouble : 0;
     int mode = cJSON_IsBool(on) ? (cJSON_IsTrue(on) ? ZB_ON : ZB_OFF)
              : (cJSON_IsString(on) && strcmp(on->valuestring, "toggle") == 0) ? ZB_TOGGLE : -1;
     int pmode = !cJSON_IsString(po) ? -1
@@ -680,11 +686,14 @@ static esp_err_t h_zb_set(httpd_req_t *req)
     esp_err_t err = !cJSON_IsString(ieee) ? ESP_ERR_INVALID_ARG
                   : mode >= 0 ? zb_set_on(ieee->valuestring, mode)
                   : pmode >= 0 ? zb_set_power_on(ieee->valuestring, pmode)
-                  : ESP_ERR_INVALID_ARG;
+                  : imode >= 0 && isec >= 0 && isec <= ZB_INCHING_MAX_S
+                        ? zb_set_inching(ieee->valuestring, imode, (uint16_t)isec)
+                        : ESP_ERR_INVALID_ARG;
     cJSON_Delete(j);
     if (err == ESP_ERR_INVALID_ARG) {
         return web_send_error(req, "400 Bad Request",
-                              "ieee and on (true, false or \"toggle\") or power_on (off, on, toggle, previous) required");
+                              "ieee and on (true, false or \"toggle\"), power_on (off, on, toggle, previous) or inching "
+                              "(none, off, on) with seconds (1-3599) required");
     }
     if (err == ESP_ERR_NOT_FOUND) return web_send_error(req, "404 Not Found", "no such device");
     if (err == ESP_ERR_NOT_SUPPORTED) return web_send_error(req, "409 Conflict", "the device doesn't support that");

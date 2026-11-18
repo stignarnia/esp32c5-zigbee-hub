@@ -230,6 +230,7 @@ pages.devices = {
     el.querySelectorAll('[data-install]').forEach((b) => b.addEventListener('click', () => this.install(b.dataset.install)));
     el.querySelectorAll('[data-ha]').forEach((b) => b.addEventListener('click', () => this.haOpen(b.dataset.ha)));
     el.querySelectorAll('[data-poweron]').forEach((s) => s.addEventListener('change', () => this.setPowerOn(s.dataset.poweron, s.value, s)));
+    el.querySelectorAll('[data-inching]').forEach((s) => s.addEventListener('change', () => this.setInching(s.dataset.inching, s.value, s)));
   },
   card(v) {
     const title = v.name || [v.manuf, v.model].filter(Boolean).join(' ') || `0x${v.short.toString(16).padStart(4, '0')}`;
@@ -256,6 +257,16 @@ pages.devices = {
       const cur = v.power_on || '';
       const sel = `<select data-poweron="${v.ieee}">${cur ? '' : '<option value="" selected>unknown</option>'}${opts.map(([k, t]) => `<option value="${k}"${k === cur ? ' selected' : ''}>${t}</option>`).join('')}</select>`;
       rows.push(['After a power cut', sel]);
+    }
+    if (v.ewelink) {
+      // SONOFF inching: off after each on, or back on after each off
+      const times = [[5, '5 s'], [30, '30 s'], [60, '1 min'], [300, '5 min'], [900, '15 min'], [1800, '30 min'], [3540, '59 min']];
+      const opts = [['none:0', 'never'], ...times.map(([s, t]) => [`off:${s}`, `turn off ${t} after it's turned on`]),
+        ...times.map(([s, t]) => [`on:${s}`, `turn on ${t} after it's turned off`])];
+      const cur = v.inching === undefined ? '' : v.inching === 'none' ? 'none:0' : `${v.inching}:${v.inching_s}`;
+      const known = !cur || opts.some(([k]) => k === cur);
+      const sel = `<select data-inching="${v.ieee}">${cur ? '' : '<option value="" selected>unknown</option>'}${known ? '' : `<option value="${cur}" selected>${v.inching} after ${v.inching_s} s</option>`}${opts.map(([k, t]) => `<option value="${k}"${k === cur ? ' selected' : ''}>${t}</option>`).join('')}</select>`;
+      rows.push(['By itself', sel]);
     }
     if (v.watts !== undefined) rows.push(['Power draw', `${v.watts.toFixed(1)} W`]);
     if (v.volts !== undefined) rows.push(['Voltage', `${v.volts.toFixed(1)} V`]);
@@ -446,6 +457,13 @@ pages.devices = {
     if (!mode) return;
     try { await api('api/zb/set', { method: 'POST', json: { ieee, power_on: mode } }); } catch (e) { alert(e.message); }
     el.blur();  // lets the cards redraw with what the device confirmed
+    this.poll();
+  },
+  async setInching(ieee, value, el) {
+    if (!value) return;
+    const [inching, seconds] = value.split(':');
+    try { await api('api/zb/set', { method: 'POST', json: { ieee, inching, seconds: Number(seconds) } }); } catch (e) { alert(e.message); }
+    el.blur();
     this.poll();
   },
   async install(ieee) {

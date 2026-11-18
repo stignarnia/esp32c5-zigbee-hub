@@ -2109,11 +2109,10 @@ esp_err_t zb_custom_write(const char *ieee_hex, int index, bool on)
     return err;
 }
 
-// SONOFF inching: command 0x01 ("protocolData") on 0xFC11 with manufacturer code 0x1286, as
-// zigbee-herdsman-converters' inchingControlSet. Payload: command 0x01, sub-command 0x17, length
-// 7, sequence 0x80, mode (0x80 enabled, | 0x01 = turn back on after an off; 0x00 disabled),
-// channel 0, time in half seconds (little-endian), 2 reserved bytes, XOR of the 10 bytes before.
-// Measured on the S60ZBTPF (2026-11-18): 0x80 = off 5 s after each on, 0x81 = on 5 s after each off.
+// SONOFF inching: command 0x01 ("protocolData") on 0xFC11 with manufacturer code 0x1286. Payload:
+// command 0x01, sub-command 0x17, length 7, sequence 0x80, mode (0x80 = turn off after each on,
+// 0x81 = turn back on after each off, 0x00 = disabled), channel 0, time in half seconds
+// (little-endian), 2 reserved bytes, XOR of the 10 bytes before.
 esp_err_t zb_set_inching(const char *device, int mode, uint16_t seconds)
 {
     if (mode < ZB_INCHING_NONE || mode > ZB_INCHING_ON || (mode != ZB_INCHING_NONE && (seconds < 1 || seconds > ZB_INCHING_MAX_S))) {

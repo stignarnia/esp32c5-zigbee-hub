@@ -23,10 +23,9 @@ uint32_t wireguard_sys_now() {
 }
 
 /*
- * Handshake timestamp (TAI64N): strictly increasing across reboots (upstream microlink 484fcc4,
- * aec27f9). A peer remembers the greatest timestamp it accepted from our static key and silently
- * drops any initiation that isn't newer (WireGuard 5.1). This used uptime, so after a reboot every
- * initiation of ours was dropped until uptime passed the previous session's.
+ * Handshake timestamp (TAI64N): strictly increasing across reboots. A peer remembers the greatest
+ * timestamp it accepted from our static key and silently drops any initiation that isn't newer
+ * (WireGuard 5.1), so an uptime-based value would be dropped after every reboot.
  *
  *   t = max(wall clock if set, base + uptime)
  *   base = (floor saved in NVS) + SAVE_INTERVAL + 1 at boot, so t exceeds anything sent before.

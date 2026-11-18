@@ -160,7 +160,7 @@ static inline bool is_lan_ip(uint32_t ip) {
 
 /* A peer endpoint must be a real underlay address (host byte order). Tunnel-internal 100.64/10,
  * loopback, unspecified, link-local, multicast and broadcast are refused: an endpoint inside the
- * tunnel makes every encrypted packet loop back into the WireGuard netif (upstream 2e567c6) */
+ * tunnel makes every encrypted packet loop back into the WireGuard netif */
 static bool ip4_valid_underlay(uint32_t a) {
     if ((a >> 24) == 0 || (a >> 24) == 127) return false;      /* 0/8, loopback */
     if ((a & 0xFFC00000u) == 0x64400000u) return false;        /* 100.64/10 tailnet (CGNAT) */
@@ -180,7 +180,7 @@ typedef struct {
 } disco_probe_t;
 
 #define MAX_PENDING_PROBES 64  /* one probe per destination (see disco_send_ping_to_peer) */
-static disco_probe_t *pending_probes;  /* MAX_PENDING_PROBES, PSRAM (hub port: internal RAM is short) */
+static disco_probe_t *pending_probes;  /* MAX_PENDING_PROBES, in PSRAM: internal RAM is short */
 
 /* ============================================================================
  * Base64 Key Encoding (wireguard-lwip API requires base64 keys)
@@ -405,7 +405,7 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
     /* Register output callbacks for magicsock mode */
     wireguardif_set_derp_output(netif, wg_derp_output_cb, ml);
     wireguardif_set_udp_output(netif, wg_udp_output_cb, ml);
-    /* Tailnet packet filter (ACLs), upstream 82f05fd; the hooks run under the lwIP core lock */
+    /* Tailnet packet filter (ACLs), the hooks run under the lwIP core lock */
     LOCK_TCPIP_CORE();
     wireguardif_set_ip_filter(netif, wg_filter_rx_cb, wg_filter_tx_cb, ml);
     UNLOCK_TCPIP_CORE();
@@ -488,7 +488,7 @@ static int find_peer_by_disco_key(microlink_t *ml, const uint8_t *disco_key) {
 
 static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     /* A known NodeID with another key is a key rotation: the old key must stop working, so its
-     * WireGuard peer goes before the new one is added (upstream 5d4536b, 944055b) */
+     * WireGuard peer goes before the new one is added */
     int old = find_peer_by_node_id(ml, update->node_id);
     if (old >= 0 && memcmp(ml->peers[old].public_key, update->public_key, 32) != 0) {
         ESP_LOGI(TAG, "Peer %s rotated its key", ml->peers[old].hostname);
@@ -622,11 +622,11 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         IP4_ADDR(ip_2_ip4(&wg_peer.allowed_ip), ip_a, ip_b, ip_c, ip_d);
         IP4_ADDR(ip_2_ip4(&wg_peer.allowed_mask), 255, 255, 255, 255);
 
-        /* Endpoint blank (DERP) until DISCO validates a direct path, as Tailscale does: the
-         * advertised endpoints[0] used to be installed unvalidated, and wireguardif treats any
-         * non-zero endpoint as a working direct path, so for a peer behind CGNAT the tunnel went
-         * one-way (upstream da55beb). The only installs are gated ones: process_disco_pong() on
-         * a direct pong from the pinged address, and the handshake path gated on best_ip */
+        /* Endpoint blank (DERP) until DISCO validates a direct path, as Tailscale does:
+         * wireguardif treats any non-zero endpoint as a working direct path, and an advertised but
+         * unreachable one (a peer behind CGNAT) would make the tunnel one-way. The only installs
+         * are gated ones: process_disco_pong() on a direct pong from the pinged address, and the
+         * handshake path gated on best_ip */
         ip_addr_set_any(false, &wg_peer.endpoint_ip);
         wg_peer.endport_port = 0;
 
@@ -757,7 +757,7 @@ static void process_peer_updates(microlink_t *ml) {
             break;
         case ML_PEER_SYNC_DONE:
             /* A complete peer list ended: every peer that wasn't in it is gone from the tailnet
-             * (removed, revoked) and loses WireGuard access now (upstream 5d4536b) */
+             * (removed, revoked) and loses WireGuard access now */
             for (int i = 0; i < ml->peer_count; i++) {
                 if (ml->peers[i].active && ml->peers[i].netmap_gen != update->netmap_gen) {
                     ESP_LOGI(TAG, "Peer %s is no longer in the netmap", ml->peers[i].hostname);
@@ -826,7 +826,7 @@ static void process_peer_updates(microlink_t *ml) {
 
 /* dest_ip/dest_port: the single address this ping is sent to (host byte order), or 0/0 when it
  * goes via DERP. Recorded in the probe, so a PONG only proves a direct path to the exact address
- * pinged (Tailscale: one txid per endpoint; upstream 2cfc1fb) */
+ * pinged (Tailscale: one txid per endpoint) */
 static void disco_build_ping(microlink_t *ml, int peer_idx,
                                uint32_t dest_ip, uint16_t dest_port,
                                uint8_t *out, size_t *out_len) {
@@ -933,7 +933,7 @@ static void disco_send_ping_to_peer(microlink_t *ml, int peer_idx, bool force) {
 
     /* SECURITY: every destination gets its own ping (own txid), like Tailscale. A PONG's outer
      * UDP source is not authenticated, so process_disco_pong() accepts a direct path only if the
-     * PONG comes back from the exact address that txid was sent to (upstream 2cfc1fb) */
+     * PONG comes back from the exact address that txid was sent to */
     uint8_t pkt[256];
     size_t pkt_len = 0;
 
@@ -1143,7 +1143,7 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
         ml_peer_t *p = &ml->peers[peer_idx];
         uint64_t rtt_ms = now - pending_probes[i].sent_ms;
 
-        /* The PONG must be boxed by the disco key of the peer we pinged (upstream 2cfc1fb) */
+        /* The PONG must be boxed by the disco key of the peer we pinged */
         if (memcmp(sender_disco_key, p->disco_key, 32) != 0) {
             ESP_LOGW(TAG, "DISCO PONG txid match but wrong disco key for %s, ignoring", p->hostname);
             continue;
@@ -1175,8 +1175,8 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
         p->last_pong_recv_ms = now;
 
         /* A trusted direct path stays while its own pongs keep it trusted: another address of the
-         * same peer answering takes over only if it is LAN and the current one isn't (upstream
-         * 1637300's hysteresis, simplified). Its pong still counts as liveness */
+         * same peer answering takes over only if it is LAN and the current one isn't. Its pong
+         * still counts as liveness */
         if (path_ok && p->has_direct_path && now < p->trust_until_ms &&
             (pkt->src_ip != p->best_ip || pkt->src_port != p->best_port) &&
             !(ip_is_private_hbo(pkt->src_ip) && !ip_is_private_hbo(p->best_ip))) {
@@ -1186,7 +1186,7 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
             break;
         }
 
-        /* First direct pong of a round wins (upstream 1637300, simplified): the peer's other probes
+        /* First direct pong of a round wins: the peer's other probes
          * sent in the same round are retired, so a slower second address (wired + Wi-Fi, hairpin)
          * can't take the path over on every heartbeat */
         if (path_ok) {
@@ -1322,7 +1322,7 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
 
     /* Drop DISCO from disco keys that aren't in our netmap BEFORE any X25519: random sender keys
      * would force a scalar multiplication per packet (unauthenticated CPU DoS, reachable via DERP).
-     * Tailscale's magicsock ignores them too (upstream f2ade3e) */
+     * Tailscale's magicsock ignores them too */
     if (find_peer_by_disco_key(ml, sender_disco_key) < 0) {
         ESP_LOGD(TAG, "DISCO from unknown disco key, ignoring");
         return;
@@ -1411,7 +1411,7 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
                               ((uint32_t)entry[14] << 8) |
                               (uint32_t)entry[15];
                 /* Never probe tunnel-internal, loopback, multicast or broadcast addresses offered
-                 * in a CallMeMaybe (upstream 2e567c6) */
+                 * in a CallMeMaybe */
                 if (!ip4_valid_underlay(ip)) continue;
 
                 /* Send DISCO ping to this endpoint */

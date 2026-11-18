@@ -69,7 +69,7 @@
 #define REKEY_AFTER_TIME			(120)
 #define REJECT_AFTER_TIME			(180)
 #define REKEY_TIMEOUT				(5)
-// wireguard-go gives up timer-driven handshake retries after RekeyAttemptTime (upstream microlink a476b46)
+// wireguard-go gives up timer-driven handshake retries after RekeyAttemptTime
 #define REKEY_ATTEMPT_TIME			(90)
 #define MAX_TIMER_HANDSHAKES		((REKEY_ATTEMPT_TIME) / (REKEY_TIMEOUT) - 1)
 #define KEEPALIVE_TIMEOUT			(10)
@@ -104,7 +104,7 @@ struct wireguard_keypair {
 	uint32_t last_tx;
 	uint32_t last_rx;
 
-	uint64_t replay_bitmap;  // 64-packet replay window (upstream microlink 98cf1b7)
+	uint64_t replay_bitmap;  // 64-packet replay window
 	uint64_t replay_counter;
 
 	uint32_t local_index; // This is the index we generated for our end
@@ -223,7 +223,7 @@ struct wireguard_device {
 	// Force all peer output through DERP relay (cellular mode)
 	bool force_derp_output;
 
-	// Optional IP packet filter (tailnet ACLs; upstream microlink 82f05fd): rx_filter_fn decides
+	// Optional IP packet filter (tailnet ACLs): rx_filter_fn decides
 	// whether a decrypted inbound packet is delivered; tx_note_fn sees the start (up to 28 bytes)
 	// of every outbound packet. Set once at init
 	bool (*rx_filter_fn)(void *ctx, const uint8_t *pkt, size_t len);

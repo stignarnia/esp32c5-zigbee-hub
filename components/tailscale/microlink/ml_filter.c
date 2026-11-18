@@ -1,5 +1,5 @@
-/* Copied from microlink (MIT, see LICENSE) at upstream 1cb8d1c, 2026-11-18; hub port: IPv6 parsing
- * guarded (this lwIP has no IPv6). */
+/* From microlink (MIT, see LICENSE), https://github.com/CamM2325/microlink commit 1cb8d1c; IPv6
+ * address parsing compiled out when lwIP has no IPv6. */
 /*
  * ml_filter: on-device enforcement of the tailnet packet filter.
  * See ml_filter.h for semantics. IPv4 only (MicroLink's tunnel is IPv4).
@@ -75,7 +75,7 @@ typedef struct {
 } flow_t;
 
 static ml_filter_mode_t s_mode = ML_FILTER_MODE_OFF;
-/* hub port: both tables in PSRAM, allocated by ml_filter_init (internal RAM is short) */
+/* both tables in PSRAM, allocated by ml_filter_init: internal RAM is short */
 static set_t   *s_sets;     /* MAX_SETS */
 static bool    s_configured;
 static flow_t  *s_flows;    /* FLOW_SLOTS */
@@ -123,7 +123,7 @@ static bool parse_ip6(const char *s, const char *end, uint8_t out[16]) {
     buf[n] = '\0';
 #ifdef ESP_PLATFORM
 #if !LWIP_IPV6
-    (void)buf; (void)out;  /* hub port: lwIP without IPv6, IPv6 entries are skipped */
+    (void)buf; (void)out;  /* lwIP without IPv6: IPv6 entries are skipped */
     return false;
 #else
     ip6_addr_t a;
@@ -667,9 +667,9 @@ bool ml_filter_check_inbound(const uint8_t *pkt, size_t len, uint32_t now) {
      * under 80 bytes; do the same. */
     bool more_frags = (rd16(pkt + 6) & 0x2000) != 0;
     if (more_frags && (rd16(pkt + 6) & 0x1FFF) == 0 && len < 80) return false;
-    /* hub port: TSMP (IP protocol 99, Tailscale's own messages, e.g. the disco key advertisement
-     * peers send after a handshake) is handled before the filter in Tailscale, not filtered: let it
-     * through when addressed to us (lwIP ignores it) */
+    /* TSMP (IP protocol 99, Tailscale's own messages, e.g. the disco key advertisement peers send
+     * after a handshake) is handled before the filter in Tailscale, not filtered: let it through
+     * when addressed to us (lwIP ignores it) */
     if (proto == 99 && dst_is_local(dst)) return true;
     if (!dst_is_local(dst)) {
         F_LOGD("drop proto=%u to %u.%u.%u.%u: destination not local", proto,
@@ -714,8 +714,8 @@ bool ml_filter_check_inbound(const uint8_t *pkt, size_t len, uint32_t now) {
 
     (void)why;   /* only used by the debug log */
     if (!accept && s_mode == ML_FILTER_MODE_LOG) {
-        /* hub port: in log-only mode say what would be dropped (first 30, then every 100th), so the
-         * real policy can be checked before enforcing it */
+        /* log-only mode says what would be dropped (first 30, then every 100th), so a policy can
+         * be checked before enforcing it */
         static uint32_t n_logged;
         if (n_logged < 30 || n_logged % 100 == 0) {
             F_LOGW("would drop proto=%u %u.%u.%u.%u -> %u.%u.%u.%u port %u (%s)", proto,

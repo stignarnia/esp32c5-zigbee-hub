@@ -41,7 +41,7 @@
 
 // Default MTU for WireGuard is 1420 bytes
 // Tailscale's tunnel MTU: 1420 inner + overhead overflowed paths under 1500 (PPPoE, cellular);
-// lwIP sizes TCP segments from it (upstream microlink 2748d1c)
+// lwIP sizes TCP segments from it
 #define WIREGUARDIF_MTU (1280)
 
 #define WIREGUARDIF_DEFAULT_PORT		(51820)

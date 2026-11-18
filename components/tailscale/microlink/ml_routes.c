@@ -1,5 +1,5 @@
-/* Copied from microlink (MIT, see LICENSE) at upstream 1cb8d1c, 2026-11-18; hub port: IPv6 parsing
- * guarded (this lwIP has no IPv6). */
+/* From microlink (MIT, see LICENSE), https://github.com/CamM2325/microlink commit 1cb8d1c; IPv6
+ * address parsing compiled out when lwIP has no IPv6. */
 /*
  * ml_routes: parse and format advertised subnet routes. See ml_routes.h.
  */
@@ -95,7 +95,7 @@ static bool parse_cidr6(const char *s, const char *end, ml_route6_t *out) {
     buf[n] = '\0';
 #ifdef ESP_PLATFORM
 #if !LWIP_IPV6
-    (void)buf; (void)out;  /* hub port: lwIP without IPv6, IPv6 entries are skipped */
+    (void)buf; (void)out;  /* lwIP without IPv6: IPv6 entries are skipped */
     return false;
 #else
     ip6_addr_t a;

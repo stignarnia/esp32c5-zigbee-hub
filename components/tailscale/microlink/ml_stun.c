@@ -380,9 +380,8 @@ bool ml_stun_parse_response(const uint8_t *data, size_t len,
         return false;
     }
 
-    /* Only a response to a request we have outstanding (IPv6 responses use a separate parser).
-     * Before, with no probe outstanding any Binding Response from anyone was accepted and could
-     * rewrite our advertised public endpoint (upstream f2ade3e) */
+    /* Only a response to a request we have outstanding (IPv6 responses use a separate parser):
+     * anyone can send a Binding Response, and it sets our advertised public endpoint */
     if (!txid_v4_valid || memcmp(data + 8, txid_v4, 12) != 0) {
         /* Could be an IPv6 response arriving on IPv4 queue — don't warn */
         ESP_LOGD(TAG, "STUN IPv4 txid mismatch (may be IPv6 response)");

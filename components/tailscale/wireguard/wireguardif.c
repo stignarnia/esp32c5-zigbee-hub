@@ -107,7 +107,7 @@ static void update_peer_addr(struct wireguard_peer *peer, const ip_addr_t *addr,
 	}
 	// A peer endpoint must be a real underlay address: a packet that reached our VPN IP through
 	// the tunnel would otherwise make every later send loop back into this netif (stack overflow,
-	// triggerable by any tailnet peer; upstream microlink 2e567c6)
+	// triggerable by any tailnet peer)
 	if (IP_IS_V4(addr)) {
 		const uint32_t a = PP_NTOHL(ip4_addr_get_u32(ip_2_ip4(addr)));
 		if ((a >> 24) == 0 || (a >> 24) == 127 || (a & 0xFFC00000u) == 0x64400000u ||
@@ -496,7 +496,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 
 			pbuf = NULL;
 			// 6.2 Refuse to receive any more transport data messages after Reject-After-Messages.
-			// The counter has not been authenticated yet, so only drop this packet (GHSA-7grw-r329-8g8c)
+			// The counter has not been authenticated yet, so only drop this packet
 			if (nonce < REJECT_AFTER_MESSAGES) {
 				// We don't know the unpadded size until we have decrypted the packet and validated/inspected the IP header
 				pbuf = pbuf_alloc(PBUF_TRANSPORT, src_len - WIREGUARD_AUTHTAG_LEN, PBUF_RAM);
@@ -510,7 +510,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 				if (decrypt_ok) {
 					// 5.4.6 The counter is checked against the sliding window only after the authentication tag,
 					// and before any peer state is updated - keep-alives included (6.5). Before this fix a
-					// replayed packet from another address moved the peer's endpoint there (GHSA-7grw-r329-8g8c)
+					// replayed packet from another address moved the peer's endpoint there
 					if (wireguard_check_replay(keypair, nonce)) {
 
 						// 3. Since the packet has authenticated correctly, the source IP of the outer UDP/IP packet is used to update the endpoint for peer
@@ -542,7 +542,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 							// 4b. Otherwise, WireGuard checks to see if the source IP address of the plaintext inner-packet routes correspondingly in the cryptokey routing table
 #if LWIP_IPV4
 							// The plaintext length is set by the (authenticated) peer and need not be padded, so make
-							// sure a full header is there before reading it (GHSA-7grw-r329-8g8c)
+							// sure a full header is there before reading it
 							if ((IPH_V(iphdr) == 4) && (pbuf->tot_len >= IP_HLEN)) {
 								ip_addr_t src_ip;
 								ip_addr_copy_from_ip4(src_ip, iphdr->src);
@@ -574,7 +574,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 							}
 #endif /* LWIP_IPV4 */
 #if LWIP_IPV6
-							// No route filtering for IPv6 yet: dropped (upstream does the same until it has it)
+							// No route filtering for IPv6 yet: dropped
 							if ((IP_HDR_GET_VERSION(pbuf->payload) == 6) && (pbuf->tot_len >= IP6_HLEN)) {
 								dest_ok = false;
 							}
@@ -882,7 +882,7 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 			peer = peer_lookup_by_handshake(device, msg_cookie->receiver);
 			if (peer) {
 				// Process the cookie but don't move the endpoint (a cookie reply isn't authenticated
-				// by the peer's key: GHSA-7grw-r329-8g8c) and send nothing until the next initiation
+				// by the peer's key) and send nothing until the next initiation
 				wireguard_process_cookie_message(device, peer, msg_cookie);
 			}
 			break;
@@ -1131,8 +1131,8 @@ static bool should_send_initiation(struct wireguard_peer *peer) {
 		} else if (peer->curr_keypair.valid && !peer->curr_keypair.initiator && wireguard_expired(peer->curr_keypair.keypair_millis, REJECT_AFTER_TIME - peer->keepalive_interval)) {
 			result = true;
 		} else if (!peer->curr_keypair.valid && peer->active) {
-			// A peer that never answers (unreachable, or it trimmed us) was retried every 5 s
-			// forever, a full X25519 handshake each time: give up after 90 s like wireguard-go
+			// A peer that never answers (unreachable, or it trimmed us) costs a full X25519
+			// handshake every 5 s: give up after 90 s like wireguard-go
 			if (peer->handshake_attempts >= MAX_TIMER_HANDSHAKES) {
 				peer->active = false;
 			} else {

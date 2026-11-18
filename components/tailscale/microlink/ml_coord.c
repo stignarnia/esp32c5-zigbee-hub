@@ -84,8 +84,7 @@ static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t max_len) {
 }
 
 /* Decode a 32-byte key. Only an exact 64-digit hex string counts: on any other input the key is
- * zeroed and false is returned, so a malformed key is never taken for a (rotated) key (upstream
- * e72ef92) */
+ * zeroed and false is returned, so a malformed key is never taken for a (rotated) key */
 static bool parse_key32(const char *hex, uint8_t key[32]) {
     if (hex_to_bytes(hex, key, 32) == 32) return true;
     memset(key, 0, 32);
@@ -190,7 +189,7 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
     if (ct_len < 16) return -1;
     /* The header is not authenticated, and its length decides how much is allocated before the
      * MAC check. Go's controlbase never writes a frame over 4 KB: anything past 16 KB is a broken
-     * or hostile stream (upstream d6493c0) */
+     * or hostile stream */
     if (ct_len > 16384 + 16) {
         ESP_LOGE(TAG, "Noise frame length %d over the limit", ct_len);
         return -1;
@@ -362,7 +361,7 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
 
     ESP_LOGI(TAG, "HTTP response received: %d bytes", total);
 
-    /* Verify 101 Switching Protocols (the status line only, not anywhere in the body; upstream af3a58e) */
+    /* Verify 101 Switching Protocols (the status line only, not anywhere in the body) */
     if (strncmp((char *)resp, "HTTP/1.1 101", 12) != 0) {
         ESP_LOGE(TAG, "Noise upgrade rejected: %.200s", resp);
         free(resp);
@@ -388,7 +387,7 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
 
     if (body_len > 0) {
         /* The 3-byte header read below may write into this buffer even when body_len is 1-2
-         * bytes: never allocate less than it may receive (heap overflow; upstream af3a58e) */
+         * bytes: never allocate less than it may receive (heap overflow) */
         body_buf = ml_psram_malloc(body_len < 512 ? 512 : body_len);
         if (body_buf) {
             memcpy(body_buf, body_start, body_len);
@@ -680,7 +679,7 @@ static int do_h2_preface(microlink_t *ml, ml_noise_state_t *noise) {
      * beyond the 65535 default. SETTINGS INITIAL_WINDOW_SIZE only sets per-stream
      * window; the connection-level window starts at 65535 and must be explicitly
      * expanded with WINDOW_UPDATE on stream 0. */
-    /* unsigned: a buffer under 64 KB underflowed to a ~4 GB delta (upstream d0aa0c3) */
+    /* unsigned: a buffer under 64 KB underflowed to a ~4 GB delta */
     uint32_t conn_window_delta = (ML_H2_BUFFER_SIZE > 65535) ? (ML_H2_BUFFER_SIZE - 65535) : 0;
     if (conn_window_delta > 0) {
         int wu_len = ml_h2_build_window_update(h2_init + pos, sizeof(h2_init) - pos,
@@ -1071,7 +1070,7 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
      *   "peers"        - Lowercase fallback */
     cJSON *peers = cJSON_GetObjectItem(root, "Peers");
     /* "Peers" is the complete set, "PeersChanged" a delta. After a complete list, peers not in
-     * it are dropped (removed or revoked nodes; upstream 5d4536b) */
+     * it are dropped (removed or revoked nodes) */
     static uint32_t s_netmap_gen = 0;
     bool full_list = cJSON_IsArray(peers);
     bool dropped_any = false;
@@ -1130,7 +1129,7 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
             if (strncmp(hex, "nodekey:", 8) == 0) hex += 8;
             if (!parse_key32(hex, update->public_key)) {
                 /* Installing it would give the peer an all-zero or partial key: drop the record
-                 * and keep whatever entry we already have (upstream e72ef92) */
+                 * and keep whatever entry we already have */
                 ESP_LOGW(TAG, "  Peer with malformed Key ignored");
                 free(update);
                 dropped_any = true;
@@ -1230,10 +1229,9 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
     }
 
 check_removed:
-    /* PeersRemoved: per tailcfg.MapResponse a []NodeID (integers), which is what Tailscale sends.
-     * Only nodekey strings were accepted, so every removal was ignored and a deleted or revoked
-     * node kept WireGuard access until a reboot (upstream 5d4536b). A nodekey string is still
-     * accepted as a fallback */
+    /* PeersRemoved: per tailcfg.MapResponse a []NodeID (integers), which is what Tailscale sends;
+     * a removed or revoked node must lose WireGuard access at once. A nodekey string is accepted
+     * as a fallback */
     cJSON *removed = cJSON_GetObjectItem(root, "PeersRemoved");
     if (removed && cJSON_IsArray(removed)) {
         ESP_LOGI(TAG, "PeersRemoved: %d peers", cJSON_GetArraySize(removed));
@@ -1264,8 +1262,7 @@ check_removed:
     }
 
     /* PeersChangedPatch: per tailcfg a []*PeerChange keyed by NodeID, with optional DERPRegion,
-     * Endpoints, Key, DiscoKey (Online: below). It was parsed as an object keyed by nodekey, so
-     * every patch, key rotations included, was ignored (upstream 5d4536b) */
+     * Endpoints, Key, DiscoKey (Online: below). A new Key is a key rotation */
     cJSON *patches = cJSON_GetObjectItem(root, "PeersChangedPatch");
     if (patches && cJSON_IsArray(patches)) {
         cJSON *patch;
@@ -1652,7 +1649,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                 json_total += f_len;
             } else {
                 /* Skipping this frame and appending later ones would stitch non-contiguous pieces
-                 * into plausible but corrupted JSON: stop here instead (upstream d0aa0c3) */
+                 * into plausible but corrupted JSON: stop here instead */
                 ESP_LOGW(TAG, "  JSON buffer full at %dKB, truncating", (int)(json_total / 1024));
                 break;
             }
@@ -1815,7 +1812,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                 int yr, mo, dy, hr, mn, sc;
                 if (sscanf(key_expiry->valuestring, "%d-%d-%dT%d:%d:%d",
                            &yr, &mo, &dy, &hr, &mn, &sc) >= 6 &&
-                    /* range-checked: a huge year looped for billions of iterations (upstream f2ade3e) */
+                    /* range-checked: a huge year looped for billions of iterations */
                     yr >= 1970 && yr <= 2200 && mo >= 1 && mo <= 12 && dy >= 1 && dy <= 31 &&
                     hr >= 0 && hr <= 23 && mn >= 0 && mn <= 59 && sc >= 0 && sc <= 60) {
                     /* Simple epoch calculation (approximate, no leap second) */
@@ -2142,14 +2139,11 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
     return 0;
 }
 
-/* Try to read one incremental MapResponse update (non-blocking) */
-/* Long-poll stream reassembly (upstream microlink 630a525, 963298c, 847f2b0, ideas only).
- * Before, each decrypted Noise frame was parsed on its own and only the last stream-5 DATA
- * frame was kept: an HTTP/2 frame continuing into the next Noise frame was cut (everything after
- * it misparsed) and a MapResponse spread over several DATA frames was silently dropped, while
- * the hub still said "connected". Such a delta can carry PeersRemoved or a PacketFilter change.
- * Now partial HTTP/2 frames carry over, stream-5 payload is buffered and split into messages by
- * the 4-byte little-endian length prefix, and anything out of bounds reconnects. */
+/* Long-poll stream reassembly. An HTTP/2 frame can continue into the next Noise frame and a
+ * MapResponse can span several DATA frames, and a lost one could be a PeersRemoved or a
+ * PacketFilter change: partial HTTP/2 frames carry over, stream-5 payload is buffered and split
+ * into messages by the 4-byte little-endian length prefix, and anything out of bounds reconnects
+ * rather than desynchronising. */
 #define LP_H2_MAX_FRAME 16384  /* SETTINGS_MAX_FRAME_SIZE default; our preface never raises it */
 static uint8_t *s_lp_h2;   static size_t s_lp_h2_len, s_lp_h2_cap;    /* partial HTTP/2 frame(s) */
 static uint8_t *s_lp_msg;  static size_t s_lp_msg_len, s_lp_msg_cap;  /* stream-5 bytes not yet a message */

@@ -22,6 +22,7 @@
  */
 
 #include "microlink_internal.h"
+#include "ml_filter.h"
 #include "x25519.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -1846,6 +1847,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
 
     /* Parse peers */
     parse_peers_from_map_response(ml, map_json);
+    ml_filter_update_from_map(map_json);  /* PacketFilter(s): the tailnet ACLs */
 
     /* Extract DERPMap if present — parse all regions and nodes */
     cJSON *derp_map = cJSON_GetObjectItem(map_json, "DERPMap");
@@ -2271,6 +2273,7 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
 
         /* Parse peer updates */
         parse_peers_from_map_response(ml, update_json);
+        ml_filter_update_from_map(update_json);  /* PacketFilter(s): the tailnet ACLs */
         cJSON_Delete(update_json);
     }
 

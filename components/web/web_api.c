@@ -82,6 +82,14 @@ static void add_ts_status(cJSON *o, const ts_status_t *t)
     cJSON_AddNumberToObject(o, "connected_ms", (double)t->connected_ms);
     cJSON_AddNumberToObject(o, "peers", t->peer_count);
     cJSON_AddStringToObject(o, "home_derp", t->home_derp);
+    if (t->filter_mode) {
+        cJSON *f = cJSON_AddObjectToObject(o, "filter");
+        cJSON_AddStringToObject(f, "mode", t->filter_mode);
+        cJSON_AddBoolToObject(f, "policy", t->filter_configured);
+        cJSON_AddNumberToObject(f, "rules", t->filter_rules);
+        cJSON_AddNumberToObject(f, "accepted", t->filter_accepted);
+        cJSON_AddNumberToObject(f, "dropped", t->filter_dropped);
+    }
 }
 
 char *api_status_json(void)

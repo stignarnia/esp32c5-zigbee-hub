@@ -110,6 +110,10 @@ err_t wireguardif_init(struct netif *netif);
 // Helper to initialise the peer struct with defaults
 void wireguardif_peer_init(struct wireguardif_peer *peer);
 
+// Install an IP packet filter (tailnet ACLs; call once, before traffic flows)
+void wireguardif_set_ip_filter(struct netif *netif, bool (*rx_allow)(void *, const uint8_t *, size_t),
+                               void (*tx_note)(void *, const uint8_t *, size_t), void *ctx);
+
 // Add a new peer to the specified interface - see wireguard.h for maximum number of peers allowed
 // On success the peer_index can be used to reference this peer in future function calls
 err_t wireguardif_add_peer(struct netif *netif, struct wireguardif_peer *peer, u8_t *peer_index);

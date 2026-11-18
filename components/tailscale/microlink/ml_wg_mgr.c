@@ -29,6 +29,7 @@
 #include "wireguardif.h"
 #include "wireguard.h"
 #include "wireguard-platform.h"
+#include "ml_filter.h"
 #include "mbedtls/base64.h"
 #include <string.h>
 #include <errno.h>
@@ -316,6 +317,17 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
  * WireGuard Interface Initialization
  * ========================================================================== */
 
+/* Tailnet packet filter hooks (RX path / tcpip_thread, under the lwIP core lock) */
+static bool wg_filter_rx_cb(void *ctx, const uint8_t *pkt, size_t len) {
+    (void)ctx;
+    return ml_filter_check_inbound(pkt, len, (uint32_t)ml_get_time_ms());
+}
+
+static void wg_filter_tx_cb(void *ctx, const uint8_t *pkt, size_t len) {
+    (void)ctx;
+    ml_filter_note_outbound(pkt, len, (uint32_t)ml_get_time_ms());
+}
+
 static esp_err_t wg_init_interface(microlink_t *ml) {
     /* Convert our WG private key to base64 */
     char privkey_b64[64];
@@ -393,6 +405,11 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
     /* Register output callbacks for magicsock mode */
     wireguardif_set_derp_output(netif, wg_derp_output_cb, ml);
     wireguardif_set_udp_output(netif, wg_udp_output_cb, ml);
+    /* Tailnet packet filter (ACLs), upstream 82f05fd; the hooks run under the lwIP core lock */
+    LOCK_TCPIP_CORE();
+    wireguardif_set_ip_filter(netif, wg_filter_rx_cb, wg_filter_tx_cb, ml);
+    UNLOCK_TCPIP_CORE();
+    if (ml->vpn_ip) ml_filter_set_local(ml->vpn_ip, NULL, 0);
 
     ml->wg_netif = netif;
 
@@ -1852,6 +1869,13 @@ void ml_wg_mgr_task(void *arg) {
     while (!(xEventGroupGetBits(ml->events) & ML_EVT_SHUTDOWN_REQUEST)) {
         /* Process peer updates from coord task */
         process_peer_updates(ml);
+        {   /* the filter accepts only traffic addressed to our tailnet IP */
+            static uint32_t s_filter_ip;
+            if (ml->vpn_ip && ml->vpn_ip != s_filter_ip) {
+                s_filter_ip = ml->vpn_ip;
+                ml_filter_set_local(ml->vpn_ip, NULL, 0);
+            }
+        }
 
         /* Track DERP connection state for DISCO.
          * Note: We DON'T re-initiate WG handshakes on DERP connect because

@@ -217,6 +217,13 @@ struct wireguard_device {
 	// Force all peer output through DERP relay (cellular mode)
 	bool force_derp_output;
 
+	// Optional IP packet filter (tailnet ACLs; upstream microlink 82f05fd): rx_filter_fn decides
+	// whether a decrypted inbound packet is delivered; tx_note_fn sees the start (up to 28 bytes)
+	// of every outbound packet. Set once at init
+	bool (*rx_filter_fn)(void *ctx, const uint8_t *pkt, size_t len);
+	void (*tx_note_fn)(void *ctx, const uint8_t *pkt, size_t len);
+	void *filter_ctx;
+
 	bool valid;
 };
 

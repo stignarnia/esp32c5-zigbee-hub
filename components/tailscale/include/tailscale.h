@@ -31,6 +31,11 @@ typedef struct {
     int64_t connected_ms;   // uptime (ms) when first connected, -1 = not yet
     int peer_count;
     char home_derp[8];      // our home DERP region code, "" = not connected
+    // Tailnet packet filter (ACLs enforced on the hub): "enforce", "log" (counts only), "off";
+    // whether a policy arrived, its rules, packets accepted / dropped (would-drop in "log")
+    const char *filter_mode;
+    bool filter_configured;
+    uint32_t filter_rules, filter_accepted, filter_dropped;
 } ts_status_t;
 
 typedef struct {

@@ -11,6 +11,8 @@ idf_component_register(
          "microlink/ml_wg_mgr.c"
          "microlink/ml_stun.c"
          "microlink/ml_pmp.c"
+         "microlink/ml_filter.c"
+         "microlink/ml_routes.c"
          "microlink/ml_noise.c"
          "microlink/ml_h2.c"
          "microlink/nacl_box.c"

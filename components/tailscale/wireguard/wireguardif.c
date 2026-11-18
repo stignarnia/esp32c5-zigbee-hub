@@ -247,6 +247,13 @@ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, con
 	uint32_t now;
 	struct wireguard_keypair *keypair = &peer->curr_keypair;
 
+	struct wireguard_device *fdev = wg_dev(netif);
+	if (fdev && fdev->tx_note_fn && q) {  // tailnet packet filter: replies to our own flows
+		uint8_t fhdr[28];
+		u16_t fn = pbuf_copy_partial(q, fhdr, sizeof(fhdr), 0);
+		fdev->tx_note_fn(fdev->filter_ctx, fhdr, fn);
+	}
+
 	// Note: We may not be able to use the current keypair if we haven't received data, may need to resort to using previous keypair
 	if (keypair->valid && (!keypair->initiator) && (keypair->last_rx == 0)) {
 		keypair = &peer->prev_keypair;
@@ -573,7 +580,11 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 #endif /* LWIP_IPV6 */
 							if (header_len <= pbuf->tot_len) {
 								// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
-								if (dest_ok) {
+								if (dest_ok && device->rx_filter_fn &&
+										!device->rx_filter_fn(device->filter_ctx, (const uint8_t *)pbuf->payload, pbuf->tot_len)) {
+									// Not allowed by the tailnet packet filter (ACLs)
+									WG_DEBUG("[WG_RX_IP] DROPPED by packet filter\n");
+								} else if (dest_ok) {
 									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
 									ip_input(pbuf, device->netif);
 									// pbuf is owned by IP layer now
@@ -1416,6 +1427,16 @@ err_t wireguardif_init(struct netif *netif) {
 	// Wipe the decoded private key: a copy is kept in the device structure
 	crypto_zero(private_key, sizeof(private_key));
 	return result;
+}
+
+void wireguardif_set_ip_filter(struct netif *netif, bool (*rx_allow)(void *, const uint8_t *, size_t),
+                               void (*tx_note)(void *, const uint8_t *, size_t), void *ctx) {
+	struct wireguard_device *device = wg_dev(netif);
+	if (device && device->valid) {
+		device->filter_ctx = ctx;
+		device->tx_note_fn = tx_note;
+		device->rx_filter_fn = rx_allow;
+	}
 }
 
 void wireguardif_peer_init(struct wireguardif_peer *peer) {

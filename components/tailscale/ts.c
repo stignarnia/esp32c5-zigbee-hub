@@ -26,6 +26,11 @@
 #include "esp_netif_net_stack.h"
 #include "hub_lwip_hooks.h"
 #include "wireguard-platform.h"
+#include "ml_filter.h"
+
+// Tailnet packet filter mode. "log" counts what it would drop and delivers everything: the
+// first install with the filter runs so, to check the real policy is read right before enforcing
+#define TS_FILTER_MODE ML_FILTER_MODE_LOG
 
 static const char *TAG = "ts";
 
@@ -178,6 +183,7 @@ static void ts_task(void *arg)
         .enable_disco = true,
     };
     microlink_t *ml = microlink_init(&cfg);
+    ml_filter_init(TS_FILTER_MODE);  // before WireGuard can deliver anything
     if (!ml || microlink_start(ml) != ESP_OK) {
         ESP_LOGE(TAG, "start failed");
         s_task = NULL;
@@ -447,6 +453,13 @@ void ts_get_status(ts_status_t *out)
     }
     out->peer_count = microlink_get_peer_count(ml);
     strlcpy(out->home_derp, microlink_get_home_derp(ml), sizeof(out->home_derp));
+    ml_filter_stats_t fs;
+    ml_filter_get_stats(&fs);
+    out->filter_mode = TS_FILTER_MODE == ML_FILTER_MODE_ENFORCE ? "enforce" : TS_FILTER_MODE == ML_FILTER_MODE_LOG ? "log" : "off";
+    out->filter_configured = fs.configured;
+    out->filter_rules = fs.rules;
+    out->filter_accepted = fs.accepted;
+    out->filter_dropped = fs.dropped;
 }
 
 int ts_get_peers(ts_peer_t *out, int max)

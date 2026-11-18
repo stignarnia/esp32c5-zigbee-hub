@@ -315,10 +315,6 @@ evidence; where something is still open there, it points here.
 - [ ] the forged-packet test with the tailnet input hook removed (the control experiment) (Phase 4)
 - [ ] `gpio.beep`'s cap of 2 s per pulse stays until a longer continuous tone is measured on the
       buzzers (only up to 1 s was) (Phase 1b)
-- [ ] the per-device Home Assistant dialog's last version (Class, Statistics, "0 while the
-      device's switch is off") not looked at in a browser yet (Phase 3)
-- [ ] `zb.read`, `zb.write`, `zb.command` never run from a script; the same requests ran through
-      `/api/zb/raw` (Phase 3)
 
 ### Open decisions (the user's)
 - [ ] keys alarm M2: what if Wi-Fi sensing misses a walk to the door (decided by the sensing
@@ -1072,7 +1068,7 @@ For long tests without a serial cable: log on the board, download later.
       The registry still applies every answer. Exposed as `POST /api/zb/raw` (waits up to 5 s;
       numbers as JSON numbers or "0x…" strings) and Lua `zb.read` / `zb.write` / `zb.command`
       (the answer comes back through the automation queue to a callback; a script never waits).
-      Used through the API (the dialog's Test read, below); never yet from a script (Still to do)
+      Used through the API (the dialog's Test read, below) and from scripts (user, 2026-11-18)
 - [x] **Per-device Home Assistant settings** (2026-11-18): a **Home Assistant** button on each
       device card opens a dialog listing what the device publishes:
   - the hub's own entities, each with a publish checkbox; a hidden one is stored by a stable key
@@ -1081,7 +1077,8 @@ For long tests without a serial cable: log on the board, download later.
   - up to 8 own entities per device: name, sensor / on-off / switch, cluster, attribute, ZCL
     type, manufacturer code, endpoint, scale (value = raw ÷ scale), unit, device class, state
     class (none / measurement / total_increasing), read interval (10 s – 1 h; sleepy devices:
-    when heard from), and "0 while the device's switch is off". **Test read** reads the
+    when heard from), and "0 while the device's switch is off" (the dialog, all fields, seen in
+    the browser by the user, 2026-11-18). **Test read** reads the
     attribute through `/api/zb/raw` and fills in its type. The hub reads each at its interval
     (first read 45 s after boot) and also takes reports of that attribute; a switch writes 0/1
     and reads it back 1.5 s later

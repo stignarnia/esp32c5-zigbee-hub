@@ -1067,6 +1067,16 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
      *   "PeersChanged" - Incremental updates (Stream=true long-poll)
      *   "peers"        - Lowercase fallback */
     cJSON *peers = cJSON_GetObjectItem(root, "Peers");
+    /* "Peers" is the complete set, "PeersChanged" a delta. After a complete list, peers not in
+     * it are dropped (removed or revoked nodes; upstream 5d4536b) */
+    static uint32_t s_netmap_gen = 0;
+    bool full_list = cJSON_IsArray(peers);
+    bool dropped_any = false;
+    uint32_t gen = 0;
+    if (full_list) {
+        gen = ++s_netmap_gen;
+        if (gen == 0) gen = ++s_netmap_gen;  /* 0 means "delta" */
+    }
     if (!peers) {
         peers = cJSON_GetObjectItem(root, "PeersChanged");
         if (peers) ESP_LOGI(TAG, "Using 'PeersChanged' field for peer list");
@@ -1090,6 +1100,7 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
         if (!update) continue;
 
         update->action = ML_PEER_ADD;
+        update->netmap_gen = gen;
 
         /* Node ID and online state */
         update->online = -1;
@@ -1119,11 +1130,13 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
                  * and keep whatever entry we already have (upstream e72ef92) */
                 ESP_LOGW(TAG, "  Peer with malformed Key ignored");
                 free(update);
+                dropped_any = true;
                 continue;
             }
         } else {
             ESP_LOGW(TAG, "  Peer without Key ignored");
             free(update);
+            dropped_any = true;
             continue;
         }
 
@@ -1194,113 +1207,108 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
         if (xQueueSend(ml->peer_update_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
             ESP_LOGW(TAG, "Peer update queue full, dropping %s", update->hostname);
             free(update);
+            dropped_any = true;
+        }
+    }
+
+    /* After a COMPLETE list, wg_mgr drops every peer that wasn't in it. Skipped if any add was
+     * dropped, so a full queue can never evict a live peer */
+    if (full_list) {
+        if (dropped_any) {
+            ESP_LOGW(TAG, "Full peer list partially queued; skipping stale-peer sweep");
+        } else {
+            ml_peer_update_t *done = ml_psram_calloc(1, sizeof(ml_peer_update_t));
+            if (done) {
+                done->action = ML_PEER_SYNC_DONE;
+                done->netmap_gen = gen;
+                if (xQueueSend(ml->peer_update_queue, &done, pdMS_TO_TICKS(500)) != pdTRUE) free(done);
+            }
         }
     }
 
 check_removed:
-    /* Handle PeersRemoved — array of nodekey strings (long-poll delta updates) */
+    /* PeersRemoved: per tailcfg.MapResponse a []NodeID (integers), which is what Tailscale sends.
+     * Only nodekey strings were accepted, so every removal was ignored and a deleted or revoked
+     * node kept WireGuard access until a reboot (upstream 5d4536b). A nodekey string is still
+     * accepted as a fallback */
     cJSON *removed = cJSON_GetObjectItem(root, "PeersRemoved");
     if (removed && cJSON_IsArray(removed)) {
-        int rm_count = cJSON_GetArraySize(removed);
-        ESP_LOGI(TAG, "PeersRemoved: %d peers", rm_count);
-
-        cJSON *key_item;
-        cJSON_ArrayForEach(key_item, removed) {
-            if (!key_item->valuestring) continue;
-
+        ESP_LOGI(TAG, "PeersRemoved: %d peers", cJSON_GetArraySize(removed));
+        cJSON *item;
+        cJSON_ArrayForEach(item, removed) {
+            bool is_id = cJSON_IsNumber(item);
+            if (!is_id && !(cJSON_IsString(item) && item->valuestring)) continue;
             ml_peer_update_t *update = ml_psram_calloc(1, sizeof(ml_peer_update_t));
             if (!update) continue;
-
             update->action = ML_PEER_REMOVE;
-
-            const char *hex = key_item->valuestring;
-            if (strncmp(hex, "nodekey:", 8) == 0) hex += 8;
-            if (!parse_key32(hex, update->public_key)) {
-                ESP_LOGW(TAG, "  PeersRemoved entry with malformed key ignored");
-                free(update);
-                continue;
+            if (is_id) {
+                update->node_id = (int64_t)item->valuedouble;
+                ESP_LOGI(TAG, "  Remove peer: NodeID %lld", (long long)update->node_id);
+            } else {
+                const char *hex = item->valuestring;
+                if (strncmp(hex, "nodekey:", 8) == 0) hex += 8;
+                if (!parse_key32(hex, update->public_key)) {
+                    ESP_LOGW(TAG, "  PeersRemoved entry with malformed key ignored");
+                    free(update);
+                    continue;
+                }
+                update->key_valid = true;
+                ESP_LOGI(TAG, "  Remove peer: %02x%02x%02x%02x...", update->public_key[0],
+                         update->public_key[1], update->public_key[2], update->public_key[3]);
             }
-
-            ESP_LOGI(TAG, "  Remove peer: %02x%02x%02x%02x...",
-                     update->public_key[0], update->public_key[1],
-                     update->public_key[2], update->public_key[3]);
-
-            if (xQueueSend(ml->peer_update_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
-                free(update);
-            }
+            if (xQueueSend(ml->peer_update_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) free(update);
         }
     }
 
-    /* Handle PeersChangedPatch — lightweight endpoint-only updates */
+    /* PeersChangedPatch: per tailcfg a []*PeerChange keyed by NodeID, with optional DERPRegion,
+     * Endpoints, Key, DiscoKey (Online: below). It was parsed as an object keyed by nodekey, so
+     * every patch, key rotations included, was ignored (upstream 5d4536b) */
     cJSON *patches = cJSON_GetObjectItem(root, "PeersChangedPatch");
-    if (patches && cJSON_IsObject(patches)) {
-        ESP_LOGI(TAG, "PeersChangedPatch: processing lightweight updates");
-        cJSON *patch = patches->child;
-        while (patch) {
-            if (patch->string && cJSON_IsObject(patch)) {
-                /* Key is nodekey string, value has optional fields like Endpoints, DERP */
-                ml_peer_update_t *update = ml_psram_calloc(1, sizeof(ml_peer_update_t));
-                if (update) {
-                    update->action = ML_PEER_UPDATE_ENDPOINT;
-                    update->online = -1;
-
-                    const char *hex = patch->string;
-                    if (strncmp(hex, "nodekey:", 8) == 0) hex += 8;
-                    if (!parse_key32(hex, update->public_key)) {
-                        ESP_LOGW(TAG, "  PeersChangedPatch with malformed key ignored");
-                        free(update);
-                        patch = patch->next;
-                        continue;
-                    }
-
-                    /* Parse DERP region if present — try DERPRegion (int) first,
-                     * then legacy DERP string */
-                    cJSON *patch_derp_region = cJSON_GetObjectItem(patch, "DERPRegion");
-                    if (patch_derp_region && cJSON_IsNumber(patch_derp_region) && patch_derp_region->valueint > 0) {
-                        update->derp_region = (uint16_t)patch_derp_region->valueint;
-                    } else {
-                        cJSON *derp = cJSON_GetObjectItem(patch, "DERP");
-                        if (derp && derp->valuestring) {
-                            unsigned dr;
-                            if (sscanf(derp->valuestring, "127.3.3.40:%u", &dr) == 1) {
-                                update->derp_region = (uint16_t)dr;
-                            }
-                        }
-                    }
-
-                    /* Parse endpoints if present */
-                    cJSON *endpoints = cJSON_GetObjectItem(patch, "Endpoints");
-                    if (endpoints) {
-                        int ep_count = 0;
-                        cJSON *ep;
-                        cJSON_ArrayForEach(ep, endpoints) {
-                            if (ep_count >= ML_MAX_ENDPOINTS) break;
-                            if (ep->valuestring) {
-                                unsigned ea, eb, ec, ed, eport;
-                                if (sscanf(ep->valuestring, "%u.%u.%u.%u:%u",
-                                           &ea, &eb, &ec, &ed, &eport) == 5) {
-                                    update->endpoints[ep_count].ip =
-                                        (ea << 24) | (eb << 16) | (ec << 8) | ed;
-                                    update->endpoints[ep_count].port = (uint16_t)eport;
-                                    update->endpoints[ep_count].is_ipv6 = false;
-                                    ep_count++;
-                                }
-                            }
-                        }
-                        update->endpoint_count = ep_count;
-                    }
-
-                    ESP_LOGI(TAG, "  Patch peer: %02x%02x%02x%02x... eps=%d",
-                             update->public_key[0], update->public_key[1],
-                             update->public_key[2], update->public_key[3],
-                             update->endpoint_count);
-
-                    if (xQueueSend(ml->peer_update_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
-                        free(update);
+    if (patches && cJSON_IsArray(patches)) {
+        cJSON *patch;
+        cJSON_ArrayForEach(patch, patches) {
+            cJSON *pid = cJSON_GetObjectItem(patch, "NodeID");
+            if (!cJSON_IsNumber(pid)) continue;
+            cJSON *pderp = cJSON_GetObjectItem(patch, "DERPRegion");
+            cJSON *peps = cJSON_GetObjectItem(patch, "Endpoints");
+            cJSON *pkey = cJSON_GetObjectItem(patch, "Key");
+            cJSON *pdisco = cJSON_GetObjectItem(patch, "DiscoKey");
+            if (!pderp && !peps && !pkey && !pdisco) continue;  /* e.g. only Online/LastSeen */
+            ml_peer_update_t *update = ml_psram_calloc(1, sizeof(ml_peer_update_t));
+            if (!update) continue;
+            update->action = ML_PEER_UPDATE_ENDPOINT;
+            update->online = -1;
+            update->node_id = (int64_t)pid->valuedouble;
+            if (cJSON_IsNumber(pderp) && pderp->valueint > 0) update->derp_region = (uint16_t)pderp->valueint;
+            if (cJSON_IsArray(peps)) {
+                int ep_count = 0;
+                cJSON *ep;
+                cJSON_ArrayForEach(ep, peps) {
+                    if (ep_count >= ML_MAX_ENDPOINTS) break;
+                    unsigned ea, eb, ec, ed, eport;
+                    if (cJSON_IsString(ep) &&
+                        sscanf(ep->valuestring, "%u.%u.%u.%u:%u", &ea, &eb, &ec, &ed, &eport) == 5 &&
+                        ea < 256 && eb < 256 && ec < 256 && ed < 256 && eport < 65536) {
+                        update->endpoints[ep_count].ip = (ea << 24) | (eb << 16) | (ec << 8) | ed;
+                        update->endpoints[ep_count].port = (uint16_t)eport;
+                        ep_count++;
                     }
                 }
+                update->endpoint_count = ep_count;
             }
-            patch = patch->next;
+            if (cJSON_IsString(pkey)) {
+                const char *hex = pkey->valuestring;
+                if (strncmp(hex, "nodekey:", 8) == 0) hex += 8;
+                update->key_valid = parse_key32(hex, update->public_key);
+            }
+            if (cJSON_IsString(pdisco)) {
+                const char *hex = pdisco->valuestring;
+                if (strncmp(hex, "discokey:", 9) == 0) hex += 9;
+                update->disco_valid = parse_key32(hex, update->disco_key);
+            }
+            ESP_LOGD(TAG, "  Patch peer: NodeID %lld eps=%d key=%d disco=%d", (long long)update->node_id,
+                     update->endpoint_count, update->key_valid, update->disco_valid);
+            if (xQueueSend(ml->peer_update_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) free(update);
         }
     }
 

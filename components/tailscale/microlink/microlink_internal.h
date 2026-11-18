@@ -177,8 +177,12 @@ typedef struct {
         ML_PEER_REMOVE,
         ML_PEER_UPDATE_ENDPOINT,
         ML_PEER_SET_ONLINE,     /* hub port: online state change, by node_id */
+        ML_PEER_SYNC_DONE,      /* a complete peer list ended: drop peers not in it (netmap_gen) */
     } action;
     int64_t node_id;            /* hub port: tailcfg NodeID (0 = unknown) */
+    uint32_t netmap_gen;        /* ADD from a complete peer list / SYNC_DONE: its generation, 0 = delta */
+    bool key_valid;             /* UPDATE_ENDPOINT / REMOVE: public_key is set */
+    bool disco_valid;           /* UPDATE_ENDPOINT: disco_key is set */
     int8_t online;              /* hub port: 1 online, 0 offline, -1 not in this update */
     uint32_t vpn_ip;
     uint8_t public_key[32];
@@ -206,6 +210,7 @@ typedef struct {
     char hostname[64];
     bool active;
     int64_t node_id;            /* hub port: tailcfg NodeID */
+    uint32_t netmap_gen;        /* the last complete peer list this peer was in */
     int8_t ts_online;           /* hub port: control server's view: 1/0, -1 unknown */
 
     /* Endpoints */

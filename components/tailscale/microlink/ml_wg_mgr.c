@@ -441,6 +441,16 @@ static int find_peer_by_key(microlink_t *ml, const uint8_t *pubkey) {
     return -1;
 }
 
+static void remove_peer_idx(microlink_t *ml, int idx);
+
+static int find_peer_by_node_id(microlink_t *ml, int64_t node_id) {
+    if (!node_id) return -1;
+    for (int i = 0; i < ml->peer_count; i++) {
+        if (ml->peers[i].active && ml->peers[i].node_id == node_id) return i;
+    }
+    return -1;
+}
+
 static int find_peer_by_ip(microlink_t *ml, uint32_t vpn_ip) {
     for (int i = 0; i < ml->peer_count; i++) {
         if (ml->peers[i].active && ml->peers[i].vpn_ip == vpn_ip) {
@@ -460,6 +470,13 @@ static int find_peer_by_disco_key(microlink_t *ml, const uint8_t *disco_key) {
 }
 
 static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+    /* A known NodeID with another key is a key rotation: the old key must stop working, so its
+     * WireGuard peer goes before the new one is added (upstream 5d4536b, 944055b) */
+    int old = find_peer_by_node_id(ml, update->node_id);
+    if (old >= 0 && memcmp(ml->peers[old].public_key, update->public_key, 32) != 0) {
+        ESP_LOGI(TAG, "Peer %s rotated its key", ml->peers[old].hostname);
+        remove_peer_idx(ml, old);
+    }
     /* Check if peer already exists */
     int idx = find_peer_by_key(ml, update->public_key);
     bool existed = idx >= 0;
@@ -523,6 +540,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->hostname[sizeof(p->hostname) - 1] = '\0';
     p->derp_region = update->derp_region;
     if (update->node_id) p->node_id = update->node_id;
+    if (update->netmap_gen) p->netmap_gen = update->netmap_gen;
+    else if (!existed) p->netmap_gen = 0;
     if (update->online >= 0) p->ts_online = update->online;
     else if (!existed) p->ts_online = -1;  /* new slot: don't inherit a removed peer's state */
     p->active = true;
@@ -670,8 +689,16 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
 }
 
 static void remove_peer(microlink_t *ml, const ml_peer_update_t *update) {
-    int idx = find_peer_by_key(ml, update->public_key);
+    int idx = update->node_id ? find_peer_by_node_id(ml, update->node_id) : -1;
+    if (idx < 0 && (update->key_valid || !update->node_id)) idx = find_peer_by_key(ml, update->public_key);
     if (idx < 0) return;
+    remove_peer_idx(ml, idx);
+}
+
+static void remove_peer_idx(microlink_t *ml, int idx) {
+    for (int i = 0; i < MAX_PENDING_PROBES; i++) {  /* its probes go with it */
+        if (pending_probes[i].active && pending_probes[i].peer_index == idx) pending_probes[i].active = false;
+    }
 
     /* Remove from wireguard-lwip */
     if (ml->wg_netif && ml->peers[idx].wg_peer_index >= 0) {
@@ -711,10 +738,48 @@ static void process_peer_updates(microlink_t *ml) {
                 }
             }
             break;
+        case ML_PEER_SYNC_DONE:
+            /* A complete peer list ended: every peer that wasn't in it is gone from the tailnet
+             * (removed, revoked) and loses WireGuard access now (upstream 5d4536b) */
+            for (int i = 0; i < ml->peer_count; i++) {
+                if (ml->peers[i].active && ml->peers[i].netmap_gen != update->netmap_gen) {
+                    ESP_LOGI(TAG, "Peer %s is no longer in the netmap", ml->peers[i].hostname);
+                    remove_peer_idx(ml, i);
+                }
+            }
+            break;
         case ML_PEER_UPDATE_ENDPOINT:
-            /* Update endpoint/DERP for existing peer (delta patch) */
+            /* Update endpoint/DERP for existing peer (delta patch), by NodeID */
             {
-                int idx = find_peer_by_key(ml, update->public_key);
+                int idx = update->node_id ? find_peer_by_node_id(ml, update->node_id)
+                                          : find_peer_by_key(ml, update->public_key);
+                if (idx >= 0 && update->node_id && update->key_valid &&
+                    memcmp(ml->peers[idx].public_key, update->public_key, 32) != 0) {
+                    /* Key rotation by patch: re-create the peer under the new key */
+                    ml_peer_t *o = &ml->peers[idx];
+                    ml_peer_update_t *u = calloc(1, sizeof(*u));
+                    if (u) {
+                        u->action = ML_PEER_ADD;
+                        u->node_id = o->node_id;
+                        u->online = o->ts_online;
+                        u->vpn_ip = o->vpn_ip;
+                        memcpy(u->public_key, update->public_key, 32);
+                        memcpy(u->disco_key, update->disco_valid ? update->disco_key : o->disco_key, 32);
+                        strlcpy(u->hostname, o->hostname, sizeof(u->hostname));
+                        u->derp_region = update->derp_region ? update->derp_region : o->derp_region;
+                        const bool new_eps = update->endpoint_count > 0;
+                        u->endpoint_count = new_eps ? update->endpoint_count : o->endpoint_count;
+                        for (int e = 0; e < u->endpoint_count && e < ML_MAX_ENDPOINTS; e++) {
+                            u->endpoints[e].ip = new_eps ? update->endpoints[e].ip : o->endpoints[e].ip;
+                            u->endpoints[e].port = new_eps ? update->endpoints[e].port : o->endpoints[e].port;
+                        }
+                        u->netmap_gen = o->netmap_gen;
+                        add_peer(ml, u);  /* removes the old key's peer first */
+                        free(u);
+                    }
+                    break;
+                }
+                if (idx >= 0 && update->disco_valid) memcpy(ml->peers[idx].disco_key, update->disco_key, 32);
                 if (idx >= 0) {
                     ml_peer_t *p = &ml->peers[idx];
                     if (update->endpoint_count > 0) {

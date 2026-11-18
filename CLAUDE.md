@@ -2151,7 +2151,7 @@ back. Its 5 KB stack is internal only because a switch command saves the script 
 flash: handing that write to another task (e.g. `auto_io`) would let the stack move to PSRAM
 if RAM gets short.
 With device firmware updates (OTA server, update entities; 2026-11-18): **64.7 KB free, lowest
-24.6 KB** After the per-device HA settings and the Tailscale security update
+24.6 KB**. After the per-device HA settings and the Tailscale security update
 (2026-11-18): **58 KB free, lowest 20.9 KB** (16.7 KB until the new DISCO probe and filter tables
 moved to PSRAM). The image, the download task's stack and mbedTLS are in PSRAM; where the other
 1.5 KB went (the stack's OTA server cluster, the larger HA entity table?) was not measured.

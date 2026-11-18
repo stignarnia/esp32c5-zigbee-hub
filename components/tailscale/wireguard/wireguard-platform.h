@@ -61,6 +61,11 @@ void wireguard_random_bytes(void *bytes, size_t size);
 // The remote end of the Wireguard tunnel will use this value in handshake replay detection
 void wireguard_tai64n_now(uint8_t *output);
 
+// Hub port: the timestamp floor in NVS. Call from a task with an internal stack (flash access):
+// init once before WireGuard starts, persist periodically (writes a floor only when one is due)
+void wireguard_ts_init(void);
+void wireguard_ts_persist(void);
+
 // Is the system under load - i.e. should we generate cookie reply message in response to initiation messages
 bool wireguard_is_under_load();
 

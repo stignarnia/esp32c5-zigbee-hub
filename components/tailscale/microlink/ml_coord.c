@@ -677,7 +677,8 @@ static int do_h2_preface(microlink_t *ml, ml_noise_state_t *noise) {
      * beyond the 65535 default. SETTINGS INITIAL_WINDOW_SIZE only sets per-stream
      * window; the connection-level window starts at 65535 and must be explicitly
      * expanded with WINDOW_UPDATE on stream 0. */
-    uint32_t conn_window_delta = ML_H2_BUFFER_SIZE - 65535;
+    /* unsigned: a buffer under 64 KB underflowed to a ~4 GB delta (upstream d0aa0c3) */
+    uint32_t conn_window_delta = (ML_H2_BUFFER_SIZE > 65535) ? (ML_H2_BUFFER_SIZE - 65535) : 0;
     if (conn_window_delta > 0) {
         int wu_len = ml_h2_build_window_update(h2_init + pos, sizeof(h2_init) - pos,
                                                 0, conn_window_delta);
@@ -1638,6 +1639,11 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
             if (json_total + f_len < ML_JSON_BUFFER_SIZE) {
                 memcpy(resp_buf + json_total, h2_recv + fpos, f_len);
                 json_total += f_len;
+            } else {
+                /* Skipping this frame and appending later ones would stitch non-contiguous pieces
+                 * into plausible but corrupted JSON: stop here instead (upstream d0aa0c3) */
+                ESP_LOGW(TAG, "  JSON buffer full at %dKB, truncating", (int)(json_total / 1024));
+                break;
             }
         }
 

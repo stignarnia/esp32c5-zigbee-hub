@@ -25,6 +25,7 @@
 #include "lwip/netif.h"
 #include "esp_netif_net_stack.h"
 #include "hub_lwip_hooks.h"
+#include "wireguard-platform.h"
 
 static const char *TAG = "ts";
 
@@ -168,6 +169,7 @@ static void ts_task(void *arg)
     while (!sta_has_ip()) vTaskDelay(pdMS_TO_TICKS(500));
 
     int64_t t0 = esp_timer_get_time() / 1000;
+    wireguard_ts_init();  // handshake timestamp floor from NVS, before WireGuard can need it
     microlink_config_t cfg = {
         .auth_key = s_auth_key,  // "" once registered: RegisterRequest then carries no Auth
         .device_name = s_hostname,
@@ -222,6 +224,7 @@ static void ts_task(void *arg)
             if (err[0]) ESP_LOGW(TAG, "control server: %s", err);
             strlcpy(last_err, err, sizeof(last_err));
         }
+        wireguard_ts_persist();  // a new handshake timestamp floor, when one is due
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

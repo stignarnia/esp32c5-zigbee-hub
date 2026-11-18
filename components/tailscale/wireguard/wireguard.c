@@ -331,7 +331,7 @@ bool wireguard_check_replay(struct wireguard_keypair *keypair, uint64_t seq) {
 	// Adapted from code in Appendix C at https://tools.ietf.org/html/rfc2401
 	uint64_t diff;
 	bool result = false;
-	size_t ReplayWindowSize = sizeof(keypair->replay_bitmap) * CHAR_BIT; // 32 bits
+	size_t ReplayWindowSize = sizeof(keypair->replay_bitmap) * CHAR_BIT; // 64 bits
 
 	// WireGuard data packet counter starts from 0 but algorithm expects packet numbers to start from 1
 	seq++;
@@ -355,11 +355,11 @@ bool wireguard_check_replay(struct wireguard_keypair *keypair, uint64_t seq) {
 		} else {
 			diff = keypair->replay_counter - seq;
 			if (diff < ReplayWindowSize) {
-				if (keypair->replay_bitmap & ((uint32_t)1 << diff)) {
+				if (keypair->replay_bitmap & ((uint64_t)1 << diff)) {
 					// already seen
 				} else {
 					// mark as seen
-					keypair->replay_bitmap |= ((uint32_t)1 << diff);
+					keypair->replay_bitmap |= ((uint64_t)1 << diff);
 					// out of order but good
 					result = true;
 				}

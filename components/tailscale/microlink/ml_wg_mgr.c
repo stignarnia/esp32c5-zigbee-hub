@@ -1170,7 +1170,9 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
                         {
                             struct wireguard_device *dev = wireguardif_device(netif);
                             if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
+                                LOCK_TCPIP_CORE();  /* WireGuard state: under the core lock like every other access */
                                 dev->peers[p->wg_peer_index].active = false;
+                                UNLOCK_TCPIP_CORE();
                             }
                         }
                         ESP_LOGI(TAG, "WG one-shot handshake to %s (first direct path)", p->hostname);

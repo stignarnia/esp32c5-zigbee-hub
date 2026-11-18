@@ -61,16 +61,22 @@ bool ha_noise_decrypt(ha_noise_t *s, const uint8_t *in, size_t len, uint8_t *out
 void ha_noise_wipe(ha_noise_t *s);
 
 // ---- entity model (ha_model.c) -------------------------------------------------------------------
-typedef enum { ET_BINARY = 1, ET_SENSOR, ET_TEXT, ET_SWITCH, ET_BUTTON, ET_EVENT, ET_UPDATE } ent_type_t;
+typedef enum { ET_BINARY = 1, ET_SENSOR, ET_TEXT, ET_SWITCH, ET_BUTTON, ET_EVENT, ET_UPDATE, ET_SELECT } ent_type_t;
+
+// Options of a plug's "after a power cut" select, in zb.h's ZB_POWER_ON_* order
+#define HA_POWER_ON_OPTIONS {"Off", "On", "Toggle", "Previous"}
+
+// A select's options: count and list for that entity
+int ha_select_options(uint8_t val, const char *const **opts);
 
 typedef enum {
     V_HUB_PERMIT = 1, V_HUB_PAIRING, V_HUB_CHANNEL, V_HUB_DEVICES, V_HUB_RSSI, V_HUB_UPTIME, V_HUB_MOTION,
     V_ZB_ZONE, V_ZB_TAMPER, V_ZB_BATT_LOW, V_ZB_BATT, V_ZB_BATT_V, V_ZB_TEMP, V_ZB_HUM, V_ZB_OCC, V_ZB_ON,
-    V_ZB_ONLINE, V_ZB_RSSI, V_ZB_SEEN, V_ZB_WATTS, V_ZB_VOLTS, V_ZB_AMPS, V_ZB_KWH, V_ZB_FW,
+    V_ZB_ONLINE, V_ZB_RSSI, V_ZB_SEEN, V_ZB_WATTS, V_ZB_VOLTS, V_ZB_AMPS, V_ZB_KWH, V_ZB_FW, V_ZB_POWER_ON, V_ZB_CUSTOM,
     V_SCRIPT_ENABLED, V_SCRIPT_VALUE,
 } ent_val_t;
 
-#define HA_MAX_ENT   416      // hub 6 + motion 1 + 32 Zigbee devices × 11 + 16 script switches + 32 script entities
+#define HA_MAX_ENT   448      // hub 6 + motion 1 + 32 Zigbee devices × 12 + 16 script switches + 32 script entities
 #define HA_MAX_DEV   (1 + ZB_MAX_DEVICES + AUTO_MAX_SCRIPTS)   // motion sensor + Zigbee + scripts
 #define HA_NAME_LEN  40
 

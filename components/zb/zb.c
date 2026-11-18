@@ -183,6 +183,20 @@ static bool on_signal(const ezb_app_signal_t *sig)
 static uint32_t zcl_utc_now(void);
 static void zcl_utc_set(uint32_t utc);
 
+// Every incoming ZCL frame, before the stack handles it. Logs devices asking the hub's Time
+// server (it is kept only if some device uses it); OTA queries go to zb_ota.c. Never drops
+// a frame.
+static bool on_raw_frame(const ezb_zcl_raw_frame_t *f)
+{
+    const ezb_zcl_cmd_hdr_t *h = f ? f->header : NULL;
+    if (h && h->cluster_id == EZB_ZCL_CLUSTER_ID_TIME && h->src_addr.addr_mode == EZB_ADDR_MODE_SHORT) {
+        ESP_LOGI(TAG, "0x%04x asked the Time server (%s command 0x%02x)", h->src_addr.u.short_addr,
+                 EZB_ZCL_CMD_FC_GET_FRAME_TYPE(h->fc) == EZB_ZCL_FRAME_TYPE_CLUSTER_SPECIFIC ? "cluster" : "general",
+                 h->cmd_id);
+    }
+    return zb_ota_on_raw(f);
+}
+
 static esp_err_t register_hub_endpoint(void)
 {
     ezb_af_device_desc_t dev = ezb_af_create_device_desc();
@@ -221,7 +235,7 @@ static esp_err_t register_hub_endpoint(void)
     ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_ota_upgrade_create_cluster_desc(&ocfg, EZB_ZCL_CLUSTER_SERVER));
     esp_err_t err = esp_zigbee_err_to_esp(ezb_af_device_add_endpoint_desc(dev, ep));
     if (err == ESP_OK) ezb_zcl_core_action_handler_register(zb_dev_on_zcl);
-    if (err == ESP_OK) ezb_zcl_raw_command_handler_register(zb_ota_on_raw);
+    if (err == ESP_OK) ezb_zcl_raw_command_handler_register(on_raw_frame);
     if (err == ESP_OK) err = esp_zigbee_err_to_esp(ezb_af_device_desc_register(dev));
     if (err == ESP_OK) {
         ezb_zcl_time_interface_t ti = {.get_utc_time = zcl_utc_now, .set_utc_time = zcl_utc_set};
@@ -404,6 +418,7 @@ static void tick_on_zb_task(void *arg)
     time_update();
     zb_dev_tick(arg);
     zb_ota_tick();
+    zb_raw_tick();
 }
 
 static void tick_cb(TimerHandle_t t)
@@ -415,6 +430,7 @@ esp_err_t zb_start(void)
 {
     esp_err_t e = zb_dev_init();
     if (e == ESP_OK) e = zb_ota_init();
+    if (e == ESP_OK) e = zb_raw_init();
     if (e != ESP_OK) return e;
     TimerHandle_t t = xTimerCreate("zb_tick", pdMS_TO_TICKS(1000), pdTRUE, NULL, tick_cb);
     if (!t || xTimerStart(t, 0) != pdPASS) return ESP_ERR_NO_MEM;
@@ -555,6 +571,51 @@ esp_err_t zb_set_on(const char *device, int mode)
     if (!p) return ESP_ERR_NO_MEM;
     *p = t;
     err = esp_zigbee_task_queue_post(onoff_on_zb_task, p);
+    if (err != ESP_OK) free(p);
+    return err;
+}
+
+typedef struct {
+    uint16_t short_addr;
+    uint8_t ep, value;
+} startup_req_t;
+
+// Writes StartUpOnOff, then reads it back (the answer lands in the registry, zb_dev.c)
+static void startup_on_zb_task(void *arg)
+{
+    startup_req_t r = *(startup_req_t *)arg;
+    free(arg);
+    static uint8_t value;
+    value = r.value;
+    ezb_zcl_attribute_t a = {
+        .id = EZB_ZCL_ATTR_ON_OFF_START_UP_ON_OFF_ID,
+        .data = {.type = EZB_ZCL_ATTR_TYPE_ENUM8, .size = 1, .value = &value},
+    };
+    ezb_zcl_write_attr_cmd_t w = {.payload = {.attr_number = 1, .attr_field = &a}};
+    w.cmd_ctrl.dst_addr.addr_mode = EZB_ADDR_MODE_SHORT;
+    w.cmd_ctrl.dst_addr.u.short_addr = r.short_addr;
+    w.cmd_ctrl.dst_ep = r.ep;
+    w.cmd_ctrl.src_ep = ZB_HUB_EP;
+    w.cmd_ctrl.cluster_id = EZB_ZCL_CLUSTER_ID_ON_OFF;
+    static uint16_t attr = EZB_ZCL_ATTR_ON_OFF_START_UP_ON_OFF_ID;
+    ezb_zcl_read_attr_cmd_t rd = {.cmd_ctrl = w.cmd_ctrl, .payload = {.attr_number = 1, .attr_field = &attr}};
+    ezb_err_t e = ezb_zcl_write_attr_cmd_req(&w);
+    ezb_zcl_read_attr_cmd_req(&rd);
+    ESP_LOGI(TAG, "0x%04x: power-on state 0x%02x written (0x%x)", r.short_addr, r.value, e);
+}
+
+esp_err_t zb_set_power_on(const char *device, int mode)
+{
+    static const uint8_t VAL[] = {[ZB_POWER_ON_OFF] = 0x00, [ZB_POWER_ON_ON] = 0x01,
+                                  [ZB_POWER_ON_TOGGLE] = 0x02, [ZB_POWER_ON_PREVIOUS] = 0xFF};
+    if (mode < ZB_POWER_ON_OFF || mode > ZB_POWER_ON_PREVIOUS) return ESP_ERR_INVALID_ARG;
+    startup_req_t t = {.value = VAL[mode]};
+    esp_err_t err = zb_dev_target(device, EZB_ZCL_CLUSTER_ID_ON_OFF, &t.short_addr, &t.ep);
+    if (err != ESP_OK) return err;
+    startup_req_t *p = malloc(sizeof(*p));
+    if (!p) return ESP_ERR_NO_MEM;
+    *p = t;
+    err = esp_zigbee_task_queue_post(startup_on_zb_task, p);
     if (err != ESP_OK) free(p);
     return err;
 }

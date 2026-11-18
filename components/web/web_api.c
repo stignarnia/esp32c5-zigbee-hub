@@ -3,9 +3,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cJSON.h"
 #include "zb.h"
+#include "esphome_api.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_flash.h"
@@ -15,6 +17,8 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "hublog.h"
 #include "hubsys.h"
 #include "tailscale.h"
@@ -665,13 +669,25 @@ static esp_err_t h_zb_set(httpd_req_t *req)
     cJSON *j = read_json(req);
     const cJSON *ieee = cJSON_GetObjectItem(j, "ieee");
     const cJSON *on = cJSON_GetObjectItem(j, "on");
+    const cJSON *po = cJSON_GetObjectItem(j, "power_on");  // what it does when power comes back
     int mode = cJSON_IsBool(on) ? (cJSON_IsTrue(on) ? ZB_ON : ZB_OFF)
              : (cJSON_IsString(on) && strcmp(on->valuestring, "toggle") == 0) ? ZB_TOGGLE : -1;
-    esp_err_t err = cJSON_IsString(ieee) && mode >= 0 ? zb_set_on(ieee->valuestring, mode) : ESP_ERR_INVALID_ARG;
+    int pmode = !cJSON_IsString(po) ? -1
+              : strcmp(po->valuestring, "off") == 0 ? ZB_POWER_ON_OFF
+              : strcmp(po->valuestring, "on") == 0 ? ZB_POWER_ON_ON
+              : strcmp(po->valuestring, "toggle") == 0 ? ZB_POWER_ON_TOGGLE
+              : strcmp(po->valuestring, "previous") == 0 ? ZB_POWER_ON_PREVIOUS : -1;
+    esp_err_t err = !cJSON_IsString(ieee) ? ESP_ERR_INVALID_ARG
+                  : mode >= 0 ? zb_set_on(ieee->valuestring, mode)
+                  : pmode >= 0 ? zb_set_power_on(ieee->valuestring, pmode)
+                  : ESP_ERR_INVALID_ARG;
     cJSON_Delete(j);
-    if (err == ESP_ERR_INVALID_ARG) return web_send_error(req, "400 Bad Request", "ieee and on (true, false or \"toggle\") required");
+    if (err == ESP_ERR_INVALID_ARG) {
+        return web_send_error(req, "400 Bad Request",
+                              "ieee and on (true, false or \"toggle\") or power_on (off, on, toggle, previous) required");
+    }
     if (err == ESP_ERR_NOT_FOUND) return web_send_error(req, "404 Not Found", "no such device");
-    if (err == ESP_ERR_NOT_SUPPORTED) return web_send_error(req, "409 Conflict", "device can't be switched");
+    if (err == ESP_ERR_NOT_SUPPORTED) return web_send_error(req, "409 Conflict", "the device doesn't support that");
     if (err != ESP_OK) return web_send_error(req, "500 Internal Server Error", esp_err_to_name(err));
     return web_send_json(req, "200 OK", "{\"ok\":true}");
 }
@@ -762,6 +778,285 @@ static esp_err_t h_zb_ota_post(httpd_req_t *req)
     return web_send_error(req, "500 Internal Server Error", esp_err_to_name(err));
 }
 
+// ---- arbitrary Zigbee requests: POST /api/zb/raw ---------------------------------------------
+// {"device", "op": "read"|"write"|"command", "cluster", ["ep", "manuf", "client"],
+//  read: "attrs": [...]; write: "attr", "type", "value"; command: "cmd", "payload" (hex)}
+// Numbers may be given as JSON numbers or "0x..." strings. Waits for the device's answer.
+
+static struct {
+    SemaphoreHandle_t done;
+    portMUX_TYPE lock;
+    uint32_t gen;                // the request being waited for
+    zb_raw_result_t res;
+} s_raw = {.lock = portMUX_INITIALIZER_UNLOCKED};
+
+static void raw_done(const zb_raw_result_t *res, void *ctx)
+{
+    uint32_t gen = (uint32_t)(uintptr_t)ctx;
+    bool mine;
+    taskENTER_CRITICAL(&s_raw.lock);
+    mine = gen == s_raw.gen;
+    if (mine) s_raw.res = *res;
+    taskEXIT_CRITICAL(&s_raw.lock);
+    if (mine) xSemaphoreGive(s_raw.done);
+}
+
+static bool json_num(const cJSON *j, double *out)
+{
+    if (cJSON_IsNumber(j)) {
+        *out = j->valuedouble;
+        return true;
+    }
+    if (cJSON_IsString(j) && j->valuestring[0]) {
+        char *end;
+        unsigned long long v = strtoull(j->valuestring, &end, 0);
+        if (*end == '\0') {
+            *out = (double)v;
+            return true;
+        }
+    }
+    return false;
+}
+
+static esp_err_t h_zb_raw(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    char *body = malloc(768);
+    if (!body) return web_send_error(req, "500 Internal Server Error", "out of memory");
+    cJSON *j = web_read_body(req, body, 768) == ESP_OK ? cJSON_Parse(body) : NULL;
+    free(body);
+    zb_raw_req_t *q = calloc(1, sizeof(*q));
+    if (!q) {
+        cJSON_Delete(j);
+        return web_send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    const char *bad = NULL;
+    const cJSON *dev = cJSON_GetObjectItem(j, "device"), *op = cJSON_GetObjectItem(j, "op");
+    double cluster, v;
+    if (!cJSON_IsString(dev) || !cJSON_IsString(op) || !json_num(cJSON_GetObjectItem(j, "cluster"), &cluster) ||
+        cluster < 0 || cluster > 0xFFFF) {
+        bad = "device, op and cluster required";
+    } else {
+        strlcpy(q->device, dev->valuestring, sizeof(q->device));
+        q->cluster = (uint16_t)cluster;
+        if (json_num(cJSON_GetObjectItem(j, "ep"), &v)) q->ep = (uint8_t)v;
+        if (json_num(cJSON_GetObjectItem(j, "manuf"), &v)) q->manuf = (uint16_t)v;
+        q->to_client = cJSON_IsTrue(cJSON_GetObjectItem(j, "client"));
+        if (strcmp(op->valuestring, "read") == 0) {
+            q->op = ZB_RAW_READ;
+            const cJSON *a;
+            cJSON_ArrayForEach(a, cJSON_GetObjectItem(j, "attrs")) {
+                if (q->n_attrs < ZB_RAW_MAX_ATTRS && json_num(a, &v)) q->attrs[q->n_attrs++] = (uint16_t)v;
+            }
+            if (!q->n_attrs) bad = "attrs: 1 to 8 attribute ids";
+        } else if (strcmp(op->valuestring, "write") == 0) {
+            q->op = ZB_RAW_WRITE;
+            double attr, type;
+            const cJSON *val = cJSON_GetObjectItem(j, "value");
+            if (!json_num(cJSON_GetObjectItem(j, "attr"), &attr) || !json_num(cJSON_GetObjectItem(j, "type"), &type) ||
+                !val) {
+                bad = "attr, type and value required";
+            } else {
+                q->attr = (uint16_t)attr;
+                q->type = (uint8_t)type;
+                double num = 0;
+                bool is_num = cJSON_IsNumber(val) || (cJSON_IsBool(val) && ((num = cJSON_IsTrue(val)), true));
+                if (cJSON_IsNumber(val)) num = val->valuedouble;
+                esp_err_t e = zb_raw_encode(q->type, num, is_num ? NULL : cJSON_GetStringValue(val), q->value, &q->len);
+                if (e != ESP_OK) bad = "value doesn't fit that type (integers: a number; 0x42: text; 0x41: hex)";
+            }
+        } else if (strcmp(op->valuestring, "command") == 0) {
+            q->op = ZB_RAW_COMMAND;
+            const cJSON *pl = cJSON_GetObjectItem(j, "payload");
+            int n = cJSON_IsString(pl) ? zb_raw_hex(pl->valuestring, q->payload, sizeof(q->payload)) : 0;
+            if (!json_num(cJSON_GetObjectItem(j, "cmd"), &v) || n < 0) bad = "cmd and payload (hex) required";
+            q->cmd = (uint8_t)v;
+            q->payload_len = n < 0 ? 0 : (uint8_t)n;
+        } else {
+            bad = "op: read, write or command";
+        }
+    }
+    cJSON_Delete(j);
+    if (bad) {
+        free(q);
+        return web_send_error(req, "400 Bad Request", bad);
+    }
+    if (!s_raw.done) s_raw.done = xSemaphoreCreateBinary();
+    xSemaphoreTake(s_raw.done, 0);
+    taskENTER_CRITICAL(&s_raw.lock);
+    uint32_t gen = ++s_raw.gen;
+    taskEXIT_CRITICAL(&s_raw.lock);
+    esp_err_t err = zb_raw_request(q, raw_done, (void *)(uintptr_t)gen);
+    free(q);
+    if (err == ESP_ERR_NOT_SUPPORTED) return web_send_error(req, "400 Bad Request", "commands only on manufacturer clusters (>= 0xFC00)");
+    if (err != ESP_OK) return web_send_error(req, "503 Service Unavailable", esp_err_to_name(err));
+    bool answered = xSemaphoreTake(s_raw.done, pdMS_TO_TICKS(5000)) == pdTRUE;
+    taskENTER_CRITICAL(&s_raw.lock);
+    zb_raw_result_t *res = heap_caps_malloc(sizeof(*res), MALLOC_CAP_SPIRAM);
+    if (res) *res = s_raw.res;
+    s_raw.gen++;  // a late answer is dropped
+    taskEXIT_CRITICAL(&s_raw.lock);
+    if (!res) return web_send_error(req, "500 Internal Server Error", "out of memory");
+    cJSON *o = cJSON_CreateObject();
+    esp_err_t r = answered ? res->err : ESP_ERR_TIMEOUT;
+    cJSON_AddStringToObject(o, "result", r == ESP_OK ? "ok" : r == ESP_ERR_TIMEOUT ? "timeout"
+                                         : r == ESP_ERR_NOT_FOUND ? "no such device"
+                                         : r == ESP_ERR_NOT_SUPPORTED ? "refused" : esp_err_to_name(r));
+    if (r == ESP_OK || r == ESP_ERR_NOT_SUPPORTED) cJSON_AddNumberToObject(o, "status", res->zcl_status);
+    if (r == ESP_OK && res->n) {
+        cJSON *arr = cJSON_AddArrayToObject(o, "attrs");
+        for (int i = 0; i < res->n; i++) {
+            cJSON *a = cJSON_CreateObject();
+            char hex[8];
+            snprintf(hex, sizeof(hex), "0x%04x", res->v[i].attr);
+            cJSON_AddStringToObject(a, "attr", hex);
+            cJSON_AddNumberToObject(a, "status", res->v[i].status);
+            if (res->v[i].status == 0) {
+                snprintf(hex, sizeof(hex), "0x%02x", res->v[i].type);
+                cJSON_AddStringToObject(a, "type", hex);
+                char text[2 * ZB_RAW_VALUE_MAX + 1];
+                bool is_num;
+                double num;
+                zb_raw_value_text(res->v[i].type, res->v[i].data, res->v[i].len, text, sizeof(text), &is_num, &num);
+                if (is_num) cJSON_AddNumberToObject(a, "value", num);
+                else cJSON_AddStringToObject(a, "value", text);
+            }
+            cJSON_AddItemToArray(arr, a);
+        }
+    }
+    free(res);
+    return send_cjson(req, o);
+}
+
+// ---- per-device Home Assistant settings: GET/POST /api/zb/ha -------------------------------------
+// GET ?ieee=: {"builtin": [{key, name, kind, unit}], "hide": [keys], "custom": [...]}
+// POST {"ieee", "hide": [keys], "custom": [{name, kind: sensor|binary|switch, cluster, attr, type,
+//       manuf, ep, scale, unit, interval}]}: replaces the device's settings
+
+static const char *const CUSTOM_KIND[] = {"sensor", "binary", "switch"};
+
+static esp_err_t h_zb_ha_get(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    char q[64], ieee[24] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) httpd_query_key_value(q, "ieee", ieee, sizeof(ieee));
+    zb_dev_info_t *all = heap_caps_malloc(sizeof(zb_dev_info_t) * ZB_MAX_DEVICES, MALLOC_CAP_SPIRAM);
+    if (!all) return web_send_error(req, "500 Internal Server Error", "out of memory");
+    int n = zb_snapshot(all, ZB_MAX_DEVICES);
+    const zb_dev_info_t *d = NULL;
+    for (int i = 0; i < n && !d; i++) {
+        if (strcasecmp(all[i].ieee, ieee) == 0) d = &all[i];
+    }
+    if (!d) {
+        free(all);
+        return web_send_error(req, "404 Not Found", "no such device");
+    }
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddItemToObject(o, "builtin", ha_device_builtin_json(d));
+    cJSON *hide = cJSON_AddArrayToObject(o, "hide");
+    char tmp[ZB_HA_HIDE_LEN];
+    strlcpy(tmp, d->ha_hide, sizeof(tmp));
+    for (char *save = NULL, *k = strtok_r(tmp, ",", &save); k; k = strtok_r(NULL, ",", &save)) {
+        cJSON_AddItemToArray(hide, cJSON_CreateString(k));
+    }
+    cJSON *arr = cJSON_AddArrayToObject(o, "custom");
+    for (int i = 0; i < d->n_custom; i++) {
+        const zb_custom_t *c = &d->custom[i];
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "name", c->name);
+        cJSON_AddStringToObject(e, "kind", CUSTOM_KIND[c->kind <= ZB_CUSTOM_SWITCH ? c->kind : 0]);
+        cJSON_AddNumberToObject(e, "cluster", c->cluster);
+        cJSON_AddNumberToObject(e, "attr", c->attr);
+        cJSON_AddNumberToObject(e, "type", c->type);
+        cJSON_AddNumberToObject(e, "manuf", c->manuf);
+        cJSON_AddNumberToObject(e, "ep", c->ep);
+        cJSON_AddNumberToObject(e, "scale", c->scale);
+        cJSON_AddStringToObject(e, "unit", c->unit);
+        cJSON_AddStringToObject(e, "device_class", c->device_class);
+        cJSON_AddStringToObject(e, "state_class", c->state_class == ZB_STATE_CLASS_MEASUREMENT ? "measurement"
+                                                  : c->state_class == ZB_STATE_CLASS_TOTAL_INCREASING ? "total_increasing" : "");
+        cJSON_AddBoolToObject(e, "zero_when_off", c->flags & ZB_CUSTOM_ZERO_WHEN_OFF);
+        cJSON_AddNumberToObject(e, "interval", c->interval_s);
+        if (c->has_value) cJSON_AddNumberToObject(e, "value", c->value);
+        cJSON_AddItemToArray(arr, e);
+    }
+    free(all);
+    return send_cjson(req, o);
+}
+
+static esp_err_t h_zb_ha_post(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    char *body = malloc(4096);
+    if (!body) return web_send_error(req, "500 Internal Server Error", "out of memory");
+    cJSON *j = web_read_body(req, body, 4096) == ESP_OK ? cJSON_Parse(body) : NULL;
+    free(body);
+    zb_custom_t *cust = calloc(ZB_CUSTOM_MAX, sizeof(zb_custom_t));
+    if (!cust) {
+        cJSON_Delete(j);
+        return web_send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    const char *bad = NULL;
+    const cJSON *ieee = cJSON_GetObjectItem(j, "ieee");
+    char hide[ZB_HA_HIDE_LEN] = "";
+    const cJSON *h;
+    cJSON_ArrayForEach(h, cJSON_GetObjectItem(j, "hide")) {
+        if (!cJSON_IsString(h) || strpbrk(h->valuestring, ",")) continue;
+        if (strlen(hide) + strlen(h->valuestring) + 2 > sizeof(hide)) break;
+        if (hide[0]) strlcat(hide, ",", sizeof(hide));
+        strlcat(hide, h->valuestring, sizeof(hide));
+    }
+    int n = 0;
+    const cJSON *c;
+    cJSON_ArrayForEach(c, cJSON_GetObjectItem(j, "custom")) {
+        if (n >= ZB_CUSTOM_MAX) {
+            bad = "at most 8 own entities per device";
+            break;
+        }
+        zb_custom_t *u = &cust[n];
+        const cJSON *name = cJSON_GetObjectItem(c, "name"), *kind = cJSON_GetObjectItem(c, "kind"),
+                    *unit = cJSON_GetObjectItem(c, "unit");
+        double cl, at, ty, v;
+        if (!cJSON_IsString(name) || !name->valuestring[0] || strlen(name->valuestring) >= ZB_CUSTOM_NAME ||
+            !json_num(cJSON_GetObjectItem(c, "cluster"), &cl) || !json_num(cJSON_GetObjectItem(c, "attr"), &at) ||
+            !json_num(cJSON_GetObjectItem(c, "type"), &ty)) {
+            bad = "each entity needs name (< 32 chars), cluster, attr and type";
+            break;
+        }
+        strlcpy(u->name, name->valuestring, sizeof(u->name));
+        for (int k = 0; k < n; k++) {
+            if (strcmp(cust[k].name, u->name) == 0) bad = "names must be different";
+        }
+        u->kind = ZB_CUSTOM_SENSOR;
+        for (int k = 0; k < 3; k++) {
+            if (cJSON_IsString(kind) && strcmp(kind->valuestring, CUSTOM_KIND[k]) == 0) u->kind = (uint8_t)k;
+        }
+        u->cluster = (uint16_t)cl;
+        u->attr = (uint16_t)at;
+        u->type = (uint8_t)ty;
+        if (json_num(cJSON_GetObjectItem(c, "manuf"), &v)) u->manuf = (uint16_t)v;
+        if (json_num(cJSON_GetObjectItem(c, "ep"), &v)) u->ep = (uint8_t)v;
+        if (json_num(cJSON_GetObjectItem(c, "scale"), &v)) u->scale = (float)v;
+        u->interval_s = json_num(cJSON_GetObjectItem(c, "interval"), &v) && v >= 10 && v <= 65535 ? (uint16_t)v : 300;
+        if (cJSON_IsString(unit)) strlcpy(u->unit, unit->valuestring, sizeof(u->unit));
+        const cJSON *dc = cJSON_GetObjectItem(c, "device_class"), *sc = cJSON_GetObjectItem(c, "state_class");
+        if (cJSON_IsString(dc)) strlcpy(u->device_class, dc->valuestring, sizeof(u->device_class));
+        u->state_class = !cJSON_IsString(sc) ? ZB_STATE_CLASS_NONE
+                       : strcmp(sc->valuestring, "measurement") == 0 ? ZB_STATE_CLASS_MEASUREMENT
+                       : strcmp(sc->valuestring, "total_increasing") == 0 ? ZB_STATE_CLASS_TOTAL_INCREASING : ZB_STATE_CLASS_NONE;
+        if (cJSON_IsTrue(cJSON_GetObjectItem(c, "zero_when_off"))) u->flags |= ZB_CUSTOM_ZERO_WHEN_OFF;
+        n++;
+    }
+    esp_err_t err = bad ? ESP_ERR_INVALID_ARG
+                  : cJSON_IsString(ieee) ? zb_set_ha_config(ieee->valuestring, hide, cust, n) : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(j);
+    free(cust);
+    if (err == ESP_ERR_INVALID_ARG) return web_send_error(req, "400 Bad Request", bad ? bad : "ieee required");
+    if (err == ESP_ERR_NOT_FOUND) return web_send_error(req, "404 Not Found", "no such device");
+    if (err != ESP_OK) return web_send_error(req, "500 Internal Server Error", esp_err_to_name(err));
+    return web_send_json(req, "200 OK", "{\"ok\":true}");
+}
+
 static esp_err_t h_coredump(httpd_req_t *req)
 {
     if (!web_guard(req)) return ESP_OK;
@@ -828,6 +1123,9 @@ esp_err_t api_register(httpd_handle_t server)
         {.uri = "/api/zb/set", .method = HTTP_POST, .handler = h_zb_set},
         {.uri = "/api/zb/ota", .method = HTTP_GET, .handler = h_zb_ota_get},
         {.uri = "/api/zb/ota", .method = HTTP_POST, .handler = h_zb_ota_post},
+        {.uri = "/api/zb/raw", .method = HTTP_POST, .handler = h_zb_raw},
+        {.uri = "/api/zb/ha", .method = HTTP_GET, .handler = h_zb_ha_get},
+        {.uri = "/api/zb/ha", .method = HTTP_POST, .handler = h_zb_ha_post},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);

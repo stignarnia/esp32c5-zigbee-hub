@@ -33,6 +33,17 @@ void zb_dev_ota_done(uint16_t short_addr);  // updated: read its version again o
 esp_err_t zb_dev_set_offer(uint64_t ieee, uint32_t file_ver, const char *url, const char *sha512, const char *notes);
 bool zb_dev_get_offer(uint64_t ieee, char *url, size_t url_cap, char *sha512, size_t sha_cap);
 
+// Address and endpoint for a request on `cluster` (server side, or client side): the endpoint
+// with that cluster, else the first. ep NULL = only the address. Any task.
+bool zb_dev_resolve(const char *device, uint16_t cluster, bool client, uint16_t *short_addr, uint8_t *ep);
+
+// zb_raw.c (Zigbee task unless noted)
+esp_err_t zb_raw_init(void);                // any task, before the stack starts
+void zb_raw_on_read_rsp(const ezb_zcl_cmd_read_attr_rsp_message_t *m);
+void zb_raw_on_write_rsp(const ezb_zcl_cmd_write_attr_rsp_message_t *m);
+void zb_raw_on_default_rsp(const ezb_zcl_cmd_default_rsp_message_t *m);
+void zb_raw_tick(void);                     // 1 s: timeouts
+
 // zb_ota.c (Zigbee task unless noted)
 esp_err_t zb_ota_init(void);                // before the stack starts. Any task
 bool zb_ota_on_raw(const ezb_zcl_raw_frame_t *f);

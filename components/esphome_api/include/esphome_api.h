@@ -20,6 +20,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "cJSON.h"
+#include "zb.h"
 
 #define HA_API_PORT 6053
 
@@ -53,3 +55,8 @@ void ha_set_conn_filter(bool (*allowed)(int fd));
 
 // mDNS was just started (or restarted): advertise _esphomelib._tcp if the server runs.
 void ha_mdns_announce(void);
+
+// The hub's own Home Assistant entities for one Zigbee device, whether hidden or not, as
+// [{"key", "name", "kind"}]: "key" is what zb_set_ha_config's hide list holds. Works with the
+// integration off (the per-device settings are kept for when it's on). Caller frees.
+cJSON *ha_device_builtin_json(const zb_dev_info_t *d);

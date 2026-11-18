@@ -273,7 +273,7 @@ esp_err_t web_start(const web_config_t *cfg)
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size = 8192;           // PBKDF2 + JSON building
-    hc.max_uri_handlers = 56;       // ~48 in use; too few aborts the boot (ESP_ERR_HTTPD_HANDLERS_FULL)
+    hc.max_uri_handlers = 64;       // 52 in use; too few aborts the boot (ESP_ERR_HTTPD_HANDLERS_FULL)
     hc.lru_purge_enable = true;     // a stuck client can't lock others out
     hc.recv_wait_timeout = 10;      // OTA uploads stream for seconds
     hc.send_wait_timeout = 10;

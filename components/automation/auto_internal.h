@@ -53,7 +53,7 @@ extern SemaphoreHandle_t g_mtx;      // script table metadata, secrets
 // ---- events into the automation task -----------------------------------------------------
 typedef struct auto_cmd auto_cmd_t;
 
-typedef enum { EV_ZB = 1, EV_GPIO, EV_HTTP, EV_CMD } ev_type_t;
+typedef enum { EV_ZB = 1, EV_GPIO, EV_HTTP, EV_CMD, EV_ZBRAW } ev_type_t;
 
 typedef struct {
     uint8_t type;
@@ -70,6 +70,13 @@ typedef struct {
             char err[64];
         } http;
         auto_cmd_t *cmd;
+        struct {
+            uint8_t script;
+            uint8_t op;           // zb_raw_op_t
+            uint32_t gen;
+            int ref;              // the callback in that script's registry
+            zb_raw_result_t *res; // malloc'd (PSRAM); freed by the receiver
+        } zbraw;
     };
 } ev_t;
 

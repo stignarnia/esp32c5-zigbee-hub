@@ -87,7 +87,7 @@ enum { MSG_HELLO_REQ = 1, MSG_HELLO_RSP = 2, MSG_AUTH_REQ = 3, MSG_DISC_REQ = 5,
        MSG_ST_BINARY = 21, MSG_ST_SENSOR = 25, MSG_ST_SWITCH = 26, MSG_ST_TEXT = 27, MSG_EVENT = 108,
        MSG_SWITCH_CMD = 33, MSG_BUTTON_CMD = 62, MSG_CAPS_REQ = 149, MSG_CAPS_RSP = 150,
        MSG_LIST_UPDATE = 116, MSG_ST_UPDATE = 117, MSG_UPDATE_CMD = 118, MSG_SUBSCRIBE_ACTIONS = 34,
-       MSG_ACTION_REQ = 35 };
+       MSG_ACTION_REQ = 35, MSG_LIST_SELECT = 52, MSG_ST_SELECT = 53, MSG_SELECT_CMD = 54 };
 
 // The Home Assistant app that checks the OTA index for the Zigbee devices (ha_app/): asked
 // through Home Assistant, which writes "check" to the app's stdin
@@ -401,6 +401,17 @@ static bool list_entity(srv_t *S, client_t *c, const ha_ent_t *e)
         pb_str(&w, 8, e->device_class);
         pb_varint(&w, 9, e->device_id);
         break;
+    case ET_SELECT: {
+        type = MSG_LIST_SELECT;
+        const char *const *opt;
+        int n_opt = ha_select_options(e->val, &opt);
+        pb_str(&w, 5, e->icon);
+        for (int i = 0; i < n_opt; i++) pb_str(&w, 6, opt[i]);
+        pb_bool(&w, 7, e->disabled);
+        pb_varint(&w, 8, e->category);
+        pb_varint(&w, 9, e->device_id);
+        break;
+    }
     default:
         return true;
     }
@@ -446,6 +457,11 @@ static bool send_state(srv_t *S, client_t *c, const ha_ent_t *e, const ha_state_
         pb_bool(&w, 3, st->missing);
         pb_varint(&w, 4, e->device_id);
         return out_msg(S, c, MSG_ST_TEXT, &w);
+    case ET_SELECT:
+        pb_str(&w, 2, st->text);
+        pb_bool(&w, 3, st->missing);
+        pb_varint(&w, 4, e->device_id);
+        return out_msg(S, c, MSG_ST_SELECT, &w);
     case ET_UPDATE: {
         pb_bool(&w, 2, st->missing);
         pb_bool(&w, 3, st->b);
@@ -666,6 +682,16 @@ static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *
         } else if (e && e->val == V_ZB_ON) {
             esp_err_t err = zb_set_on(e->ref, on ? ZB_ON : ZB_OFF);
             ESP_LOGI(TAG, "%s: %s %s (%s)", c->info, e->ref, on ? "on" : "off", esp_err_to_name(err));
+        } else if (e && e->val == V_ZB_CUSTOM) {
+            int idx = -1;
+            for (int i = 0; i < S->in.n_zb && idx < 0; i++) {
+                if (strcmp(S->in.zb[i].ieee, e->ref) != 0) continue;
+                for (int k = 0; k < S->in.zb[i].n_custom; k++) {
+                    if (strcmp(S->in.zb[i].custom[k].name, e->ref2) == 0) idx = k;
+                }
+            }
+            esp_err_t err = idx >= 0 ? zb_custom_write(e->ref, idx, on) : ESP_ERR_NOT_FOUND;
+            ESP_LOGI(TAG, "%s: %s \"%s\" %s (%s)", c->info, e->ref, e->ref2, on ? "on" : "off", esp_err_to_name(err));
         }
         break;
     }
@@ -677,6 +703,34 @@ static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *
             zb_permit_join(PERMIT_S);
             S->next_poll_us = 0;
         }
+        break;
+    }
+    case MSG_SELECT_CMD: {
+        // key (1), chosen option (2)
+        pb_r_t r = {p, p + n};
+        pb_field_t f;
+        uint32_t key = 0;
+        char opt[24] = "";
+        while (pb_next(&r, &f)) {
+            if (f.field == 1 && f.wire == 5) key = (uint32_t)f.v;
+            if (f.field == 2 && f.wire == 2 && f.len < sizeof(opt)) {
+                memcpy(opt, f.data, f.len);
+                opt[f.len] = '\0';
+            }
+        }
+        const ha_ent_t *e = ent_by_key(S, key);
+        if (!e) break;
+        const char *const *options;
+        int n_opt = ha_select_options(e->val, &options), mode = -1;
+        for (int i = 0; i < n_opt; i++) {
+            if (strcmp(opt, options[i]) == 0) mode = i;
+        }
+        if (mode < 0) break;
+        esp_err_t err = ESP_ERR_NOT_SUPPORTED;
+        if (e->val == V_ZB_POWER_ON) {
+            err = zb_set_power_on(e->ref, mode);
+        }
+        ESP_LOGI(TAG, "%s: %s of %s: %s (%s)", c->info, e->name, e->ref, opt, esp_err_to_name(err));
         break;
     }
     case MSG_UPDATE_CMD: {

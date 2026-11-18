@@ -29,6 +29,45 @@ function zb.set(device, attribute, value) end
 ---@return true|nil ok
 ---@return string? err
 function zb.toggle(device) end
+---@class zb.RawOpts
+---@field ep? integer endpoint (default: the one with that cluster)
+---@field manuf? integer manufacturer code, for manufacturer-specific attributes
+---@field client? boolean the device's client side of the cluster
+---Read attributes of any cluster. Never waits: fn runs when the device answers (or after 4 s
+---without an answer). values[attr] = number, boolean or string; statuses[attr] = 0 or the ZCL
+---error (0x86 = unsupported attribute). On failure fn(nil, err).
+---Example: zb.read("Bike", 0xFC11, {0x7007, 0x7009}, function(v, s) print(v[0x7007]) end)
+---@param device string
+---@param cluster integer
+---@param attrs integer|integer[] up to 8
+---@param fn fun(values: table<integer, any>|nil, statuses: table<integer, integer>|string)
+---@param opts? zb.RawOpts
+---@return true|nil ok
+---@return string? err
+function zb.read(device, cluster, attrs, fn, opts) end
+---Write one attribute. type is the ZCL type: 0x10 bool, 0x20..0x27 uint8..uint64, 0x28..0x2F int,
+---0x30 enum8, 0x18 bitmap8, 0x42 text, 0x41 octets (value as hex). fn(true) or fn(nil, err).
+---@param device string
+---@param cluster integer
+---@param attr integer
+---@param type integer
+---@param value integer|boolean|string
+---@param fn fun(ok: true|nil, err: string|nil)
+---@param opts? zb.RawOpts
+---@return true|nil ok
+---@return string? err
+function zb.write(device, cluster, attr, type, value, fn, opts) end
+---Send a command on a manufacturer cluster (>= 0xFC00); payload as hex. fn(true) when the device
+---accepted it, fn(nil, err) otherwise.
+---@param device string
+---@param cluster integer
+---@param cmd integer
+---@param payload string hex, "" for none
+---@param fn fun(ok: true|nil, err: string|nil)
+---@param opts? zb.RawOpts
+---@return true|nil ok
+---@return string? err
+function zb.command(device, cluster, cmd, payload, fn, opts) end
 ---@return {name: string, ieee: string, model: string, manuf: string, kind: string, available: boolean}[]
 function zb.devices() end
 

@@ -221,13 +221,15 @@ pages.devices = {
   list(devs) {
     const el = $('#zb-devs');
     const a = document.activeElement;
-    if (a && a.tagName === 'INPUT' && el.contains(a)) return;  // don't clobber typing
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'SELECT') && el.contains(a)) return;  // don't clobber typing or an open list
     el.innerHTML = devs.length ? devs.map((v) => this.card(v)).join('') : '<div class="card muted">No devices yet. Press “Scan for devices”, then power up the device.</div>';
     el.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', () => this.rename(b.dataset.rename)));
     el.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', () => this.remove(b.dataset.remove)));
     el.querySelectorAll('[data-reinterview]').forEach((b) => b.addEventListener('click', () => this.reinterview(b.dataset.reinterview)));
     el.querySelectorAll('[data-switch]').forEach((b) => b.addEventListener('click', () => this.setOn(b.dataset.switch, b.dataset.to === '1')));
     el.querySelectorAll('[data-install]').forEach((b) => b.addEventListener('click', () => this.install(b.dataset.install)));
+    el.querySelectorAll('[data-ha]').forEach((b) => b.addEventListener('click', () => this.haOpen(b.dataset.ha)));
+    el.querySelectorAll('[data-poweron]').forEach((s) => s.addEventListener('change', () => this.setPowerOn(s.dataset.poweron, s.value, s)));
   },
   card(v) {
     const title = v.name || [v.manuf, v.model].filter(Boolean).join(' ') || `0x${v.short.toString(16).padStart(4, '0')}`;
@@ -249,6 +251,12 @@ pages.devices = {
       const state = v.on === undefined ? '<span class="muted">unknown</span>' : v.on ? '<span class="badge ok">on</span>' : '<span class="badge">off</span>';
       rows.push(['Power', `${state} <button class="ghost small" data-switch="${v.ieee}" data-to="${v.on ? 0 : 1}"${busy ? ' disabled' : ''}>${busy ? '…' : v.on ? 'Turn off' : 'Turn on'}</button>`]);
     } else if (v.on !== undefined) rows.push(['State', v.on ? 'on' : 'off']);
+    if (v.switchable) {
+      const opts = [['previous', 'as it was'], ['on', 'on'], ['off', 'off'], ['toggle', 'the opposite']];
+      const cur = v.power_on || '';
+      const sel = `<select data-poweron="${v.ieee}">${cur ? '' : '<option value="" selected>unknown</option>'}${opts.map(([k, t]) => `<option value="${k}"${k === cur ? ' selected' : ''}>${t}</option>`).join('')}</select>`;
+      rows.push(['After a power cut', sel]);
+    }
     if (v.watts !== undefined) rows.push(['Power draw', `${v.watts.toFixed(1)} W`]);
     if (v.volts !== undefined) rows.push(['Voltage', `${v.volts.toFixed(1)} V`]);
     if (v.amps !== undefined) rows.push(['Current', `${v.amps.toFixed(3)} A`]);
@@ -293,7 +301,124 @@ pages.devices = {
       <label>Name <input type="text" id="name-${v.ieee}" value="${esc(v.name)}" maxlength="31" placeholder="e.g. Front door"></label>
       <div class="row"><button class="ghost" data-rename="${v.ieee}">Save name</button>
         <button class="ghost" data-reinterview="${v.ieee}"${pending ? ' disabled' : ''} title="Read its endpoints and clusters again and redo enrollment and reporting${v.sleepy ? '. Battery devices: starts when it next wakes up (open/close it or press its button)' : ''}">${pending ? 'Re-interview requested' : 'Re-interview'}</button>
+        <button class="ghost" data-ha="${v.ieee}" title="What this device publishes to Home Assistant">Home Assistant</button>
         <button class="danger" data-remove="${v.ieee}">Remove</button></div></section>`;
+  },
+  // ---- per-device Home Assistant popup ----
+  async haOpen(ieee) {
+    const v = this.data && this.data.devices.find((d) => d.ieee === ieee);
+    let cfg;
+    try { cfg = await api(`api/zb/ha?ieee=${ieee}`); } catch (e) { alert(e.message); return; }
+    this.ha = { ieee, title: (v && (v.name || v.model)) || ieee, cfg, edit: -1 };
+    let dlg = $('#ha-dlg');
+    if (!dlg) {
+      dlg = document.createElement('dialog');
+      dlg.id = 'ha-dlg';
+      document.body.appendChild(dlg);
+    }
+    this.haRender();
+    dlg.showModal();
+  },
+  haRender() {
+    const { cfg, title, edit } = this.ha;
+    const hidden = new Set(cfg.hide);
+    const hex = (n, w = 4) => `0x${Number(n).toString(16).padStart(w, '0')}`;
+    const builtin = cfg.builtin.map((b) => `<li><label class="ha-row"><input type="checkbox" data-ha-pub="${esc(b.key)}"${hidden.has(b.key) ? '' : ' checked'}>
+      <span>${esc(b.name)}</span><span class="muted">${esc(b.unit || b.kind)}</span><span class="muted">built-in</span></label></li>`).join('');
+    const custom = cfg.custom.map((c, i) => `<li><div class="ha-row"><span class="ha-dot">●</span><span>${esc(c.name)}</span>
+      <span class="muted">${esc(c.unit || c.kind)}</span><span class="muted">${hex(c.cluster)}/${hex(c.attr)}${c.value !== undefined ? ` · ${esc(c.value)}` : ''}</span>
+      <span><button class="ghost small" data-ha-edit="${i}" title="Edit">✎</button> <button class="ghost small" data-ha-del="${i}" title="Delete">🗑</button></span></div></li>`).join('');
+    const f = edit >= 0 ? cfg.custom[edit] : { name: '', kind: 'sensor', unit: '', cluster: '', attr: '', type: 0x21, scale: 1, interval: 300, manuf: 0, ep: 0 };
+    const types = [[0x10, 'bool'], [0x18, 'bitmap8'], [0x20, 'uint8'], [0x21, 'uint16'], [0x22, 'uint24'], [0x23, 'uint32'],
+      [0x25, 'uint48'], [0x28, 'int8'], [0x29, 'int16'], [0x2b, 'int32'], [0x30, 'enum8'], [0x31, 'enum16']];
+    const reads = [[10, '10 s'], [30, '30 s'], [60, '1 min'], [300, '5 min'], [900, '15 min'], [3600, '1 h']];
+    const classes = [['', 'none'], ['power', 'power'], ['voltage', 'voltage'], ['current', 'current'], ['energy', 'energy'],
+      ['temperature', 'temperature'], ['humidity', 'humidity'], ['battery', 'battery'], ['illuminance', 'illuminance'],
+      ['signal_strength', 'signal strength'], ['outlet', 'outlet'], ['problem', 'problem']];
+    const opt = (list, cur) => list.map(([k, t]) => `<option value="${k}"${Number(k) === Number(cur) || k === cur ? ' selected' : ''}>${t}</option>`).join('');
+    $('#ha-dlg').innerHTML = `<form method="dialog" class="ha-form">
+      <div class="ha-head"><h2>${esc(title)} · Home Assistant</h2><button class="ghost small" value="close" title="Close">×</button></div>
+      <p class="muted">Published to Home Assistant</p>
+      <ul class="ha-list">${builtin}${custom}</ul>
+      <hr>
+      <p class="muted">${edit >= 0 ? 'Edit entity' : '+ Add entity'}</p>
+      <div class="ha-grid">
+        <label>Name <input type="text" id="ha-name" maxlength="31" value="${esc(f.name)}"></label>
+        <label>Kind <select id="ha-kind">${opt([['sensor', 'sensor'], ['binary', 'on/off'], ['switch', 'switch']], f.kind)}</select></label>
+        <label>Unit <input type="text" id="ha-unit" maxlength="11" value="${esc(f.unit)}"></label>
+        <label>Cluster <input type="text" id="ha-cluster" placeholder="0xFC11" value="${f.cluster === '' ? '' : hex(f.cluster)}"></label>
+        <label>Attr <input type="text" id="ha-attr" placeholder="0x700b" value="${f.attr === '' ? '' : hex(f.attr)}"></label>
+        <label>Type <select id="ha-type">${opt(types, f.type)}</select></label>
+        <label>Scale ÷ <input type="text" id="ha-scale" value="${esc(f.scale || 1)}"></label>
+        <label>Read every <select id="ha-int">${opt(reads, f.interval)}</select></label>
+        <label>Manufacturer code <input type="text" id="ha-manuf" placeholder="none" value="${f.manuf ? hex(f.manuf) : ''}"></label>
+        <label>Endpoint <input type="text" id="ha-ep" placeholder="auto" value="${f.ep || ''}"></label>
+        <label>Class <select id="ha-dc">${opt(classes, f.device_class || '')}</select></label>
+        <label>Statistics <select id="ha-sc">${opt([['', 'none'], ['measurement', 'measurement'], ['total_increasing', 'total (growing)']], f.state_class || '')}</select></label>
+      </div>
+      <label class="ha-check"><input type="checkbox" id="ha-zero"${f.zero_when_off ? ' checked' : ''}> 0 while the device's switch is off (for plugs that keep reporting the last reading)</label>
+      <div class="row"><button type="button" class="ghost" id="ha-test">Test read</button> <span id="ha-test-out" class="muted"></span>
+        <span class="spacer"></span>${edit >= 0 ? '<button type="button" class="ghost" id="ha-cancel">Cancel</button>' : ''}
+        <button type="button" id="ha-save">${edit >= 0 ? 'Save' : 'Add'}</button></div>
+    </form>`;
+    const dlg = $('#ha-dlg');
+    dlg.querySelectorAll('[data-ha-pub]').forEach((c) => c.addEventListener('change', () => this.haToggle(c.dataset.haPub, c.checked)));
+    dlg.querySelectorAll('[data-ha-edit]').forEach((b) => b.addEventListener('click', (ev) => { ev.preventDefault(); this.ha.edit = Number(b.dataset.haEdit); this.haRender(); }));
+    dlg.querySelectorAll('[data-ha-del]').forEach((b) => b.addEventListener('click', (ev) => { ev.preventDefault(); this.haDelete(Number(b.dataset.haDel)); }));
+    $('#ha-test').addEventListener('click', () => this.haTest());
+    $('#ha-save').addEventListener('click', () => this.haSaveForm());
+    const cancel = $('#ha-cancel');
+    if (cancel) cancel.addEventListener('click', () => { this.ha.edit = -1; this.haRender(); });
+  },
+  haForm() {
+    const num = (id) => { const s = $(id).value.trim(); return s === '' ? 0 : Number(s); };
+    return { name: $('#ha-name').value.trim(), kind: $('#ha-kind').value, unit: $('#ha-unit').value.trim(),
+      cluster: num('#ha-cluster'), attr: num('#ha-attr'), type: Number($('#ha-type').value), scale: num('#ha-scale') || 1,
+      interval: Number($('#ha-int').value), manuf: num('#ha-manuf'), ep: num('#ha-ep'), device_class: $('#ha-dc').value,
+      state_class: $('#ha-sc').value, zero_when_off: $('#ha-zero').checked };
+  },
+  async haTest() {
+    const f = this.haForm();
+    const out = $('#ha-test-out');
+    out.textContent = 'reading…';
+    try {
+      const r = await api('api/zb/raw', { method: 'POST', json: { device: this.ha.ieee, op: 'read', cluster: f.cluster, attrs: [f.attr],
+        ...(f.manuf ? { manuf: f.manuf } : {}), ...(f.ep ? { ep: f.ep } : {}) } });
+      const a = r.attrs && r.attrs[0];
+      if (r.result !== 'ok') out.textContent = `→ ${r.result}`;
+      else if (!a || a.status !== 0) out.textContent = `→ not supported (status ${a ? a.status : '?'})`;
+      else {
+        out.textContent = typeof a.value === 'number' ? `→ ${a.value} (${a.value / f.scale}${f.unit ? ` ${f.unit}` : ''}), type ${a.type}` : `→ ${a.value}, type ${a.type}`;
+        const t = $('#ha-type');
+        if ([...t.options].some((o) => Number(o.value) === Number(a.type))) t.value = String(Number(a.type));
+      }
+    } catch (e) { out.textContent = `→ ${e.message}`; }
+  },
+  async haPost() {
+    const { ieee, cfg } = this.ha;
+    await api('api/zb/ha', { method: 'POST', json: { ieee, hide: cfg.hide, custom: cfg.custom.map(({ value, ...c }) => c) } });
+    this.ha.cfg = await api(`api/zb/ha?ieee=${ieee}`);
+    this.haRender();
+  },
+  async haToggle(key, publish) {
+    const h = new Set(this.ha.cfg.hide);
+    if (publish) h.delete(key); else h.add(key);
+    this.ha.cfg.hide = [...h];
+    try { await this.haPost(); } catch (e) { alert(e.message); }
+  },
+  async haDelete(i) {
+    if (!confirm(`Delete "${this.ha.cfg.custom[i].name}"? It disappears from Home Assistant.`)) return;
+    this.ha.cfg.custom.splice(i, 1);
+    this.ha.edit = -1;
+    try { await this.haPost(); } catch (e) { alert(e.message); }
+  },
+  async haSaveForm() {
+    const f = this.haForm();
+    if (!f.name || !f.cluster && f.cluster !== 0 || Number.isNaN(f.cluster) || Number.isNaN(f.attr)) { alert('Name, cluster and attribute are needed'); return; }
+    const list = this.ha.cfg.custom;
+    if (this.ha.edit >= 0) list[this.ha.edit] = f; else list.push(f);
+    this.ha.edit = -1;
+    try { await this.haPost(); } catch (e) { alert(e.message); }
   },
   async permit() {
     const open = this.data && this.data.network.permit_s > 0;
@@ -315,6 +440,12 @@ pages.devices = {
     const v = this.data && this.data.devices.find((d) => d.ieee === ieee);
     this.switching[ieee] = { t: Date.now(), was: v ? v.on : undefined };
     try { await api('api/zb/set', { method: 'POST', json: { ieee, on } }); } catch (e) { delete this.switching[ieee]; alert(e.message); }
+    this.poll();
+  },
+  async setPowerOn(ieee, mode, el) {
+    if (!mode) return;
+    try { await api('api/zb/set', { method: 'POST', json: { ieee, power_on: mode } }); } catch (e) { alert(e.message); }
+    el.blur();  // lets the cards redraw with what the device confirmed
     this.poll();
   },
   async install(ieee) {

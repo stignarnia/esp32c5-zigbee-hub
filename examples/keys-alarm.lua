@@ -6,12 +6,14 @@
 --   - Settings -> Motion: the hub senses movement through Wi-Fi. Place it so the walk to the
 --     door crosses the line between the hub and the router.
 --   - Automations -> GPIO: "buzzer1", "buzzer2", "buzzer3" as outputs (plus ground pins).
---   - Automations -> Secrets: "alexa_alarm_url".
+--   - Home Assistant (Settings -> Home Assistant): the script publishes "Allarme", on for 30 s
+--     when an alarm starts. A Home Assistant automation on it has an Echo say the reminder.
 -- Rules (nothing is remembered from one opening to the next, so closing the door is the reset):
 --   - The Door opens within 60 s of a Keys tap: silent (leaving with the key). One tap, one opening.
 --   - The Door opens and nothing moved inside in the minute before: silent (someone coming home).
---   - Anything else: alarm, 3 buzzers + the Alexa routine, 10 s. A Keys tap or closing the Door
---     stops it; the tap changes nothing else. Alexa is called at once, but not again within 30 s.
+--   - Anything else: alarm, 3 buzzers for 10 s and "Allarme" on in Home Assistant. A Keys tap or
+--     closing the Door stops the buzzers; the tap changes nothing else. "Allarme" turns on at
+--     once and stays on 30 s; an alarm within those 30 s doesn't turn it on again.
 --   - No motion signal (Wi-Fi down, hub just started): counts as movement, so it sounds.
 
 local DOOR = "Door"
@@ -19,9 +21,12 @@ local KEYS = "Keys"
 local KEYS_WINDOW = 60  -- seconds a tap covers the next opening
 local STILL_S = 60      -- no movement for this long before the opening = opened from outside
 local GAP_S = 2         -- the last seconds before the opening are the opening itself
-local ALEXA_COOLDOWN = 30  -- seconds before Alexa is called again
+local ALERT_S = 30     -- seconds "Allarme" stays on in Home Assistant (no new reminder meanwhile)
 
 gpio.claim("buzzer1", "buzzer2", "buzzer3")
+-- Defined at load: a new entity makes Home Assistant reload the hub's entities, and a value
+-- published in that moment wouldn't reach it.
+ha.binary("Allarme", false, {device_class = "safety"})
 
 -- 2 s per round: chase 1->2->3, all three stuttering, rotating pairs, all on (they beat), pause
 local A, B, C = 1, 2, 4
@@ -34,7 +39,7 @@ local ROUNDS = 5  -- 10 s
 
 local tap_tmr = nil   -- set while a tap covers the next opening
 local ring_tmr = nil  -- set while the alarm sounds
-local alexa_cool = false
+local alert_tmr = nil -- set while "Allarme" is on
 
 local function stop_alarm(why)
   if not ring_tmr then return end
@@ -49,13 +54,13 @@ local function start_alarm(why)
   if ring_tmr then timer.cancel(ring_tmr) end
   ring_tmr = timer.after(ROUNDS * 2, function() ring_tmr = nil end)
   gpio.pattern({"buzzer1", "buzzer2", "buzzer3"}, ALARM, {rounds = ROUNDS})
-  local url = secret("alexa_alarm_url")
-  if url and not alexa_cool then
-    alexa_cool = true
-    timer.after(ALEXA_COOLDOWN, function() alexa_cool = false end)
-    http.get(url, {retry_for = 600, on_done = function(status, body)
-      if status > 0 then log("Alexa: HTTP " .. status) else log("Alexa not reached: " .. body) end
-    end})
+  if not alert_tmr then
+    ha.binary("Allarme", true)
+    log("Allarme on: Home Assistant has the Echo say the reminder")
+    alert_tmr = timer.after(ALERT_S, function()
+      alert_tmr = nil
+      ha.binary("Allarme", false)
+    end)
   end
 end
 

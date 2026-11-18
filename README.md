@@ -151,9 +151,26 @@ it, and the browser remembers your choice.
 First the hub's own **Motion sensor** (Wi-Fi motion sensing: moving / not moving, and its
 two calibration buttons), then every paired sensor with its live state: contact, motion,
 water leak, smoke, temperature, humidity and battery. Plugs show on/off with a **Turn on /
-Turn off** button, and those that measure it their power draw (W), voltage, current and energy
-(kWh). Each device shows signal strength, last seen, availability and the firmware it runs.
-Rename, re-interview or remove them.
+Turn off** button, what they do **after a power cut** (stay off, turn on, toggle, or go back
+to how they were; set on the card, stored in the plug), and, for those that measure it, their
+power draw (W), voltage, current and energy (kWh). The hub reads a plug's on/off state every 5
+minutes and whenever it rejoins, so the card is right after a power cut even if the plug
+doesn't report it. Each device shows signal strength, last seen, availability and the
+firmware it runs. Rename, re-interview or remove them.
+
+**Home Assistant** on a device card lists what that device publishes to Home Assistant. Untick
+any of the hub's own entities to leave it out, or add up to 8 of your own from any attribute
+the device has, even in a manufacturer's private cluster: a sensor (with scale, unit, device
+class and statistics), an on/off or a switch, read every 10 s to 1 h. **Test read** reads the
+attribute once and fills in its type. For plugs that keep reporting their last reading after
+the relay opens, an entity can be set to read 0 while the plug is off. An entity with the same
+kind and name as one you hid takes over its place in Home Assistant, history included: that's
+how a SONOFF S60ZBTPF's power draw, current and voltage come from its own cluster in mW, mA and
+mV instead of whole watts and hundredths of an amp.
+
+Not supported: **Zigbee Green Power** devices, the battery-free switches powered by their own
+button press (Philips Hue Tap and similar). The hub has no Green Power sink, so their presses
+are never received, even when a plug nearby relays them.
 
 The last known state of each sensor is kept across restarts, so a door that was
 open before a reboot still reads open after it.
@@ -278,6 +295,9 @@ The Automations page has everything scripts need, top to bottom:
 | `zb.get(device, attribute)` | current value, `nil` if not known yet. Plugs: `"on"`, `"power"` (W), `"voltage"`, `"current"`, `"energy"` (kWh) |
 | `zb.set(device, "on", true or false)` / `zb.toggle(device)` | switch a plug or relay; never blocks, the new state arrives as a change (`zb.on`). Returns `true`, or `nil` and the reason |
 | `zb.devices()` | list of `{name, ieee, model, manuf, kind, available}` |
+| `zb.read(device, cluster, attrs, fn, opts)` | read up to 8 attributes of any cluster; `fn(values, statuses)` when the device answers, keyed by attribute id, or `fn(nil, err)` (no answer within 4 s, refused…). `opts`: `ep`, `manuf` (manufacturer code), `client` |
+| `zb.write(device, cluster, attr, type, value, fn, opts)` | write one attribute; `type` is the ZCL type (`0x10` bool, `0x20` uint8, `0x30` enum8, `0x42` text…); `fn(true)` or `fn(nil, err)` |
+| `zb.command(device, cluster, cmd, payload_hex, fn, opts)` | send a command on a manufacturer cluster (`0xFC00` and up); `fn(true)` when the device accepted it |
 | `timer.after(s, fn)` / `timer.every(s, fn)` | one-shot / repeating timer, returns an id. Pass a global function's *name* instead of `fn` and the timer survives a restart |
 | `timer.cancel(id)` | stop a timer or cron job |
 | `cron(expr, fn)` | standard 5-field cron (`"min hour day month weekday"`), local time; returns an id |
@@ -481,8 +501,11 @@ a magnet glued to the key. Touching the key to "Keys" means "I'm leaving with it
 - The door opens within 60 s of a Keys tap: silent.
 - The door opens and nothing moved inside in the minute before: silent (someone
   coming home, seen by the hub's motion sensing).
-- Anything else: buzzers and the Alexa routine for 10 s. A Keys tap or closing the door
-  stops it. Alexa isn't called again within 30 s.
+- Anything else: buzzers for 10 s, and the script's "Allarme" binary sensor in Home
+  Assistant turns on for 30 s (an alarm within those 30 s doesn't turn it on again). A
+  Keys tap or closing the door stops the buzzers. A Home Assistant automation on
+  "Allarme" can do the rest, for example have an Echo say a reminder through Alexa Media
+  Player.
 - No motion signal (Wi-Fi down, hub just started) counts as movement, so it sounds.
 
 Nothing is remembered from one opening to the next, so whatever went wrong, closing the
@@ -532,12 +555,13 @@ shows the hub's ("Espressif, ESP32-C5 Zigbee hub") on each, and you set the area
 |---|---|
 | contact, motion, leak, smoke, CO, vibration sensor | a binary sensor of the right class (listed once the interview knows which it is) |
 | temperature / humidity sensor | sensors of the right class |
-| plug / relay (On/Off) | a switch, **Power**: Home Assistant turns it on and off |
+| plug / relay (On/Off) | a switch, **Power**: Home Assistant turns it on and off; and a select, **Power on behavior** (Off, On, Toggle, Previous: what it does after a power cut) |
 | plug with metering | power draw (W), voltage, current, energy (kWh, for the energy dashboard) |
 | any IAS sensor | tamper, battery low (diagnostic) |
 | any battery device | battery %, battery voltage (diagnostic; voltage disabled by default) |
 | any device | online, last seen, signal strength (diagnostic; signal disabled by default) |
 | any device that can be updated | **Firmware**, an update entity: installed and offered file version, release notes, **Install** with progress (listed once the installed version is known) |
+| anything else the device has | your own sensors, on/offs and switches, added from the device card's **Home Assistant** button (see Devices); any of the entities above can be left out there too |
 
 A device that goes offline shows its values as *unknown* until it reports again (online
 and last seen keep working).
@@ -755,7 +779,12 @@ USB flashing always works either way.
   lost report can't leave a wrong state. Reporting setup is confirmed per cluster and re-sent
   to always-on devices until they answer (frames get lost while Wi-Fi has the shared radio).
 - **Plugs that freeze their meter when off** (the SONOFF S60ZBTPF keeps reporting its last
-  reading): power and current show 0 while the plug reports off.
+  reading): power and current show 0 while the plug reports off; your own entities can do the
+  same (Devices, **Home Assistant**).
+- **Anything else a device has**: reads, writes and manufacturer commands on any cluster go
+  through one queue on the Zigbee task (`POST /api/zb/raw`, `zb.read` / `zb.write` /
+  `zb.command`); the answer comes back to the caller, and the hub's own bookkeeping still sees
+  it.
 
 ### Flash layout (16 MB)
 

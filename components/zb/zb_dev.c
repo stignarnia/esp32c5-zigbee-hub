@@ -115,6 +115,15 @@ typedef struct {
     // On/Off state read back after a command (the report can be lost): when, 0 = none
     int64_t onoff_read_us[2];
     uint8_t onoff_ep;
+    uint8_t startup;  bool has_startup;  // StartUpOnOff: 0 off, 1 on, 2 toggle, 0xFF previous; persisted
+    // On/Off state read from always-on devices every STATE_READ_US and when one rejoins: after a
+    // power cut a device may come back in another state without reporting it. 0 = due now
+    int64_t state_read_us;
+    // Home Assistant settings (zb_set_ha_config); persisted except the values and read times
+    char ha_hide[ZB_HA_HIDE_LEN];
+    uint8_t n_custom;
+    zb_custom_t custom[ZB_CUSTOM_MAX];
+    int64_t custom_next_us[ZB_CUSTOM_MAX];  // next read, 0 = due
     // Firmware version, read once per boot (ver_ok: VER_* answered); the values persist.
     // Basic: app/HW version, date code, SW build ID. The device's OTA client cluster:
     // current file version, manufacturer code, image type (what an OTA index matches).
@@ -144,6 +153,7 @@ static SemaphoreHandle_t s_mtx;
 static volatile bool s_dirty;
 static volatile bool s_state_dirty;      // only slow-changing values: saved within STATE_SAVE_US
 #define STATE_SAVE_US (5LL * 60 * 1000000)
+#define STATE_READ_US (5LL * 60 * 1000000)  // always-on switches: On/Off state read this often
 static uint32_t s_rev;                  // bumped on every change the UI should see
 static uint64_t s_my_ieee;
 
@@ -558,9 +568,9 @@ static void initial_read(zdev_t *d)
         ezb_zcl_read_attr_cmd_req(&r);
     }
     if (has_server(d, EZB_ZCL_CLUSTER_ID_ON_OFF, &ep)) {
-        static uint16_t onoff_attr[] = {0x0000};
+        static uint16_t onoff_attr[] = {0x0000, 0x4003};  // state, power-on state
         ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, ep, EZB_ZCL_CLUSTER_ID_ON_OFF),
-                                     .payload = {.attr_number = 1, .attr_field = onoff_attr}};
+                                     .payload = {.attr_number = 2, .attr_field = onoff_attr}};
         ezb_zcl_read_attr_cmd_req(&r);
     }
     if (has_server(d, EZB_ZCL_CLUSTER_ID_POWER_CONFIG, &ep)) {
@@ -677,6 +687,8 @@ static void interview_done_check(zdev_t *d)
     }
 }
 
+static void custom_poll(zdev_t *d, int64_t now);
+
 // Heard from: resume a stalled interview right away (the device is awake now).
 static void heard(zdev_t *d, int8_t rssi)
 {
@@ -695,6 +707,7 @@ static void heard(zdev_t *d, int8_t rssi)
         interview_step(d);
     }
     if (!(d->cap & 0x08)) ver_read(d, d->last_seen_us);
+    if (!(d->cap & 0x08) && complete(d)) custom_poll(d, d->last_seen_us);  // awake now
     zb_ota_heard(d->short_addr);
 }
 
@@ -764,8 +777,46 @@ static void zcl_string(char *out, size_t cap, const void *v)
     out[o] = '\0';
 }
 
+// A value for one of the user's own entities (read answer or report)
+static void custom_apply(zdev_t *d, uint16_t cluster, uint16_t attr, uint8_t type, const void *v)
+{
+    for (int i = 0; i < d->n_custom; i++) {
+        zb_custom_t *c = &d->custom[i];
+        if (c->cluster != cluster || c->attr != attr) continue;
+        uint16_t sz = ezb_zcl_get_attr_value_size(type, v);
+        double raw;
+        if (!zb_raw_value_number(type, v, sz > 255 ? 255 : (uint8_t)sz, &raw)) continue;
+        double val = c->kind == ZB_CUSTOM_SENSOR ? raw / (c->scale > 0 ? c->scale : 1) : (raw != 0);
+        if (!c->has_value || c->value != val) changed(false);
+        c->value = val;
+        c->has_value = true;
+    }
+}
+
+// Reads the user's entities that are due (one request each; the answers arrive as reads)
+static void custom_poll(zdev_t *d, int64_t now)
+{
+    for (int i = 0; i < d->n_custom; i++) {
+        zb_custom_t *c = &d->custom[i];
+        if (now < d->custom_next_us[i]) continue;
+        d->custom_next_us[i] = now + (int64_t)c->interval_s * 1000000;
+        uint8_t ep = c->ep;
+        if (!ep && !has_server(d, c->cluster, &ep)) ep = first_ep(d);
+        ezb_zcl_cmd_ctrl_t ctl = ctrl_to(d, ep, c->cluster);
+        if (c->manuf) {
+            ctl.fc.manuf_specific = 1;
+            ctl.manuf_code = c->manuf;
+        }
+        static uint16_t attr;
+        attr = c->attr;
+        ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctl, .payload = {.attr_number = 1, .attr_field = &attr}};
+        ezb_zcl_read_attr_cmd_req(&r);
+    }
+}
+
 static void apply_attr(zdev_t *d, uint16_t cluster, uint16_t attr, uint8_t type, const void *v)
 {
+    if (v) custom_apply(d, cluster, attr, type, v);
     if (!v) return;
     switch (cluster) {
     case EZB_ZCL_CLUSTER_ID_BASIC:
@@ -803,6 +854,15 @@ static void apply_attr(zdev_t *d, uint16_t cluster, uint16_t attr, uint8_t type,
         break;
     case EZB_ZCL_CLUSTER_ID_ON_OFF:
         if (attr == 0x0000) { d->on = *(const uint8_t *)v; d->has_on = true; }
+        else if (attr == 0x4003) {
+            uint8_t s = *(const uint8_t *)v;
+            if (!d->has_startup || d->startup != s) {
+                ESP_LOGI(TAG, "0x%04x: power-on state 0x%02x%s", d->short_addr, s, d->has_startup ? "" : " (first read)");
+                s_dirty = true;
+            }
+            d->startup = s;
+            d->has_startup = true;
+        }
         break;
     case EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING:
         if (attr == 0x0000) { d->occ = *(const uint8_t *)v; d->has_occ = true; }
@@ -868,6 +928,7 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
     switch (id) {
     case EZB_ZCL_CORE_READ_ATTR_RSP_CB_ID: {
         ezb_zcl_cmd_read_attr_rsp_message_t *m = message;
+        zb_raw_on_read_rsp(m);  // an answer to an arbitrary request (zb_raw.c)? The registry still applies it
         zdev_t *d = from_header(m->in.header);
         if (!d) break;
         live_t before;
@@ -933,12 +994,16 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
     }
     case EZB_ZCL_CORE_WRITE_ATTR_RSP_CB_ID: {
         ezb_zcl_cmd_write_attr_rsp_message_t *m = message;
+        zb_raw_on_write_rsp(m);
         zdev_t *d = from_header(m->in.header);
         if (!d) break;
         heard(d, m->in.header->rssi);
         if (m->info.cluster_id == EZB_ZCL_CLUSTER_ID_IAS_ZONE) {
             bool ok = m->in.variables && m->in.variables->status == EZB_ZCL_STATUS_SUCCESS;
             ESP_LOGI(TAG, "0x%04x: IAS CIE address write %s", d->short_addr, ok ? "ok" : "failed");
+        } else if (m->info.cluster_id == EZB_ZCL_CLUSTER_ID_ON_OFF) {
+            uint8_t status = m->in.variables ? m->in.variables->status : 0xFF;
+            ESP_LOGI(TAG, "0x%04x: power-on state write: status 0x%02x", d->short_addr, status);
         }
         m->out.result = EZB_ZCL_STATUS_SUCCESS;
         break;
@@ -991,6 +1056,7 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
     }
     case EZB_ZCL_CORE_DEFAULT_RSP_CB_ID: {
         ezb_zcl_cmd_default_rsp_message_t *m = message;
+        zb_raw_on_default_rsp(m);  // an answer to an arbitrary request (zb_raw.c)?
         zdev_t *d = from_header(m->in.header);
         if (!d || m->info.cluster_id != EZB_ZCL_CLUSTER_ID_OTA_UPGRADE || m->in.status_code == EZB_ZCL_STATUS_SUCCESS) break;
         // A refused read of the OTA client attributes: don't ask again this boot
@@ -1057,7 +1123,8 @@ static zdev_t *adopt(uint16_t short_addr, uint64_t ieee, uint8_t capability, con
     d->last_seen_us = esp_timer_get_time();  // not heard(): the interview starts below
     d->pings = 0;
     d->offline = false;
-    // re-paired or rejoined: it may run other firmware now
+    // re-paired or rejoined: it may be in another state, or run other firmware now
+    d->state_read_us = 0;
     d->ver_ok = 0;
     d->ver_tries = 0;
     d->ver_at_us = 0;
@@ -1090,9 +1157,10 @@ void zb_dev_on_joined(uint16_t short_addr, uint64_t ieee, uint8_t capability)
     unforget(ieee);
     zdev_t *d = by_ieee(ieee);
     if (d) {
-        d->ver_ok = 0;  // rejoined: it may run other firmware now
+        d->ver_ok = 0;  // rejoined: it may be in another state, or run other firmware now
         d->ver_tries = 0;
         d->ver_at_us = 0;
+        d->state_read_us = 0;
     }
     if (!d) {
         adopt(short_addr, ieee, capability, "join");
@@ -1209,6 +1277,16 @@ void zb_dev_tick(void *arg)
                 }
             }
             if ((d->cap & 0x08) && !d->offline) ver_read(d, now);
+            if ((d->cap & 0x08) && !d->offline && complete(d)) custom_poll(d, now);
+            uint8_t oep;
+            if ((d->cap & 0x08) && !d->offline && complete(d) && now >= d->state_read_us &&
+                has_server(d, EZB_ZCL_CLUSTER_ID_ON_OFF, &oep)) {
+                d->state_read_us = now + STATE_READ_US;
+                static uint16_t attrs[] = {0x0000, 0x4003};  // state, power-on state
+                ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, oep, EZB_ZCL_CLUSTER_ID_ON_OFF),
+                                             .payload = {.attr_number = 2, .attr_field = attrs}};
+                ezb_zcl_read_attr_cmd_req(&r);
+            }
             uint8_t miss;
             if (complete(d) && (d->cap & 0x08) && !d->offline && d->rep_retry_us && now >= d->rep_retry_us &&
                 (miss = rep_missing(d))) {
@@ -1280,6 +1358,30 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
     if (d->has_ota_file_ver) cJSON_AddNumberToObject(fw, "file_ver", d->ota_file_ver);
     if (d->has_ota_manuf) cJSON_AddNumberToObject(fw, "manuf_code", d->ota_manuf);
     if (d->has_ota_image) cJSON_AddNumberToObject(fw, "image_type", d->ota_image);
+    if (d->ha_hide[0] || d->n_custom) {
+        cJSON *ha = cJSON_AddObjectToObject(o, "ha");
+        cJSON_AddStringToObject(ha, "hide", d->ha_hide);
+        cJSON *arr = cJSON_AddArrayToObject(ha, "custom");
+        for (int i = 0; i < d->n_custom; i++) {
+            const zb_custom_t *c = &d->custom[i];
+            cJSON *e = cJSON_CreateObject();
+            cJSON_AddStringToObject(e, "name", c->name);
+            cJSON_AddNumberToObject(e, "kind", c->kind);
+            cJSON_AddNumberToObject(e, "ep", c->ep);
+            cJSON_AddNumberToObject(e, "cluster", c->cluster);
+            cJSON_AddNumberToObject(e, "attr", c->attr);
+            cJSON_AddNumberToObject(e, "type", c->type);
+            cJSON_AddNumberToObject(e, "manuf", c->manuf);
+            cJSON_AddNumberToObject(e, "scale", c->scale);
+            cJSON_AddStringToObject(e, "unit", c->unit);
+            cJSON_AddStringToObject(e, "dc", c->device_class);
+            cJSON_AddNumberToObject(e, "sc", c->state_class);
+            cJSON_AddNumberToObject(e, "flags", c->flags);
+            cJSON_AddNumberToObject(e, "interval", c->interval_s);
+            if (live && c->has_value) cJSON_AddNumberToObject(e, "value", c->value);
+            cJSON_AddItemToArray(arr, e);
+        }
+    }
     if (d->has_offer) {
         cJSON *of = cJSON_AddObjectToObject(o, "offer");
         cJSON_AddNumberToObject(of, "file_ver", d->offer_ver);
@@ -1306,6 +1408,7 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
         if (d->has_batt) cJSON_AddNumberToObject(st, "batt", d->batt);
         if (d->has_batt_v) cJSON_AddNumberToObject(st, "batt_v", d->batt_v);
         if (d->has_on) cJSON_AddBoolToObject(st, "on", d->on);
+        if (d->has_startup) cJSON_AddNumberToObject(st, "startup", d->startup);
         if (d->has_occ) cJSON_AddNumberToObject(st, "occ", d->occ);
         if (d->has_power) cJSON_AddNumberToObject(st, "pw", d->power);
         if (d->has_volt) cJSON_AddNumberToObject(st, "volt", d->volt);
@@ -1343,6 +1446,11 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
         if (d->has_on) cJSON_AddBoolToObject(o, "on", d->on);
         if (d->has_occ) cJSON_AddBoolToObject(o, "occupied", d->occ & 1);
         if (has_server(d, EZB_ZCL_CLUSTER_ID_ON_OFF, NULL)) cJSON_AddBoolToObject(o, "switchable", true);
+        if (d->has_startup) {
+            const char *s = d->startup == 0x00 ? "off" : d->startup == 0x01 ? "on" : d->startup == 0x02 ? "toggle"
+                          : d->startup == 0xFF ? "previous" : "other";
+            cJSON_AddStringToObject(o, "power_on", s);
+        }
         if (d->has_power) cJSON_AddNumberToObject(o, "watts", watts(d));
         if (d->has_volt) cJSON_AddNumberToObject(o, "volts", volts(d));
         if (d->has_curr) cJSON_AddNumberToObject(o, "amps", amps(d));
@@ -1511,6 +1619,8 @@ static void load(void)
         }
         const cJSON *on = cJSON_GetObjectItem(st, "on");
         if (cJSON_IsBool(on)) { d->on = cJSON_IsTrue(on); d->has_on = true; }
+        const cJSON *su = cJSON_GetObjectItem(st, "startup");
+        if (cJSON_IsNumber(su)) { d->startup = (uint8_t)su->valueint; d->has_startup = true; }
         const cJSON *fw = cJSON_GetObjectItem(o, "fw");
         const cJSON *fv;
         if (cJSON_IsNumber(fv = cJSON_GetObjectItem(fw, "app"))) { d->app_ver = fv->valueint; d->has_app_ver = true; }
@@ -1527,6 +1637,31 @@ static void load(void)
             d->has_ota_image = d->ota_image != 0xFFFF;
         }
         d->ver_at_us = 40LL * 1000000;  // after the reporting setup's first retry window
+        const cJSON *ha = cJSON_GetObjectItem(o, "ha");
+        if (cJSON_IsString(fv = cJSON_GetObjectItem(ha, "hide"))) strlcpy(d->ha_hide, fv->valuestring, sizeof(d->ha_hide));
+        const cJSON *ce;
+        cJSON_ArrayForEach(ce, cJSON_GetObjectItem(ha, "custom")) {
+            if (d->n_custom >= ZB_CUSTOM_MAX) break;
+            zb_custom_t *c = &d->custom[d->n_custom++];
+            memset(c, 0, sizeof(*c));
+#define CNUM(k) (cJSON_IsNumber(cJSON_GetObjectItem(ce, k)) ? cJSON_GetObjectItem(ce, k)->valuedouble : 0)
+            if (cJSON_IsString(fv = cJSON_GetObjectItem(ce, "name"))) strlcpy(c->name, fv->valuestring, sizeof(c->name));
+            if (cJSON_IsString(fv = cJSON_GetObjectItem(ce, "unit"))) strlcpy(c->unit, fv->valuestring, sizeof(c->unit));
+            if (cJSON_IsString(fv = cJSON_GetObjectItem(ce, "dc"))) strlcpy(c->device_class, fv->valuestring, sizeof(c->device_class));
+            c->state_class = (uint8_t)CNUM("sc");
+            c->flags = (uint8_t)CNUM("flags");
+            c->kind = (uint8_t)CNUM("kind");
+            c->ep = (uint8_t)CNUM("ep");
+            c->cluster = (uint16_t)CNUM("cluster");
+            c->attr = (uint16_t)CNUM("attr");
+            c->type = (uint8_t)CNUM("type");
+            c->manuf = (uint16_t)CNUM("manuf");
+            c->scale = (float)CNUM("scale");
+            c->interval_s = (uint16_t)CNUM("interval");
+            if (c->interval_s < 10) c->interval_s = 10;
+#undef CNUM
+            d->custom_next_us[d->n_custom - 1] = 45LL * 1000000;  // first read once the network is up
+        }
         const cJSON *of = cJSON_GetObjectItem(o, "offer");
         if (cJSON_IsNumber(fv = cJSON_GetObjectItem(of, "file_ver"))) {
             d->offer_ver = (uint32_t)fv->valuedouble;
@@ -1618,6 +1753,10 @@ int zb_snapshot(zb_dev_info_t *out, int max)
         o->has_fw_ver = d->has_ota_file_ver; o->fw_ver = d->ota_file_ver;
         o->has_offer = d->has_offer;      o->offer_ver = d->offer_ver;
         strlcpy(o->offer_notes, d->has_offer ? d->offer_notes : "", sizeof(o->offer_notes));
+        o->has_startup = d->has_startup;  o->startup = d->startup;
+        strlcpy(o->ha_hide, d->ha_hide, sizeof(o->ha_hide));
+        o->n_custom = d->n_custom;
+        memcpy(o->custom, d->custom, sizeof(o->custom));
     }
     UNLOCK();
     return n;
@@ -1859,4 +1998,83 @@ bool zb_dev_get_offer(uint64_t ieee, char *url, size_t url_cap, char *sha512, si
     }
     UNLOCK();
     return ok;
+}
+
+bool zb_dev_resolve(const char *device, uint16_t cluster, bool client, uint16_t *short_addr, uint8_t *ep)
+{
+    LOCK();
+    zdev_t *d = device ? by_name_or_ieee(device) : NULL;
+    if (d) {
+        *short_addr = d->short_addr;
+        if (ep) {
+            *ep = first_ep(d);
+            for (int e = 0; e < d->n_ep; e++) {
+                const uint16_t *list = client ? d->ep[e].out : d->ep[e].in;
+                int n = client ? d->ep[e].n_out : d->ep[e].n_in;
+                for (int c = 0; c < n; c++) {
+                    if (list[c] == cluster) *ep = d->ep[e].id;
+                }
+            }
+        }
+    }
+    UNLOCK();
+    return d != NULL;
+}
+
+// ---- per-device Home Assistant settings ---------------------------------------------------------
+
+esp_err_t zb_set_ha_config(const char *ieee_hex, const char *hide, const zb_custom_t *custom, int n)
+{
+    if (!ieee_hex || n < 0 || n > ZB_CUSTOM_MAX || (n && !custom)) return ESP_ERR_INVALID_ARG;
+    for (int i = 0; i < n; i++) {
+        if (!custom[i].name[0] || custom[i].kind > ZB_CUSTOM_SWITCH) return ESP_ERR_INVALID_ARG;
+    }
+    LOCK();
+    zdev_t *d = by_ieee(strtoull(ieee_hex, NULL, 16));
+    if (d) {
+        strlcpy(d->ha_hide, hide ? hide : "", sizeof(d->ha_hide));
+        d->n_custom = (uint8_t)n;
+        for (int i = 0; i < n; i++) {
+            zb_custom_t *c = &d->custom[i];
+            *c = custom[i];
+            c->has_value = false;
+            if (c->interval_s < 10) c->interval_s = 10;
+            if (c->scale < 0) c->scale = 0;
+            d->custom_next_us[i] = 0;  // read at once
+        }
+        changed(true);
+        ESP_LOGI(TAG, "0x%04x %s: Home Assistant settings: %d own entities, hidden \"%s\"", d->short_addr,
+                 d->name[0] ? d->name : d->model, n, d->ha_hide);
+    }
+    UNLOCK();
+    return d ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t zb_custom_write(const char *ieee_hex, int index, bool on)
+{
+    zb_raw_req_t *q = calloc(1, sizeof(*q));
+    if (!q) return ESP_ERR_NO_MEM;
+    esp_err_t err = ESP_OK;
+    LOCK();
+    zdev_t *d = ieee_hex ? by_ieee(strtoull(ieee_hex, NULL, 16)) : NULL;
+    if (!d || index < 0 || index >= d->n_custom) {
+        err = ESP_ERR_NOT_FOUND;
+    } else if (d->custom[index].kind != ZB_CUSTOM_SWITCH) {
+        err = ESP_ERR_NOT_SUPPORTED;
+    } else {
+        const zb_custom_t *c = &d->custom[index];
+        q->op = ZB_RAW_WRITE;
+        strlcpy(q->device, ieee_hex, sizeof(q->device));
+        q->ep = c->ep;
+        q->cluster = c->cluster;
+        q->manuf = c->manuf;
+        q->attr = c->attr;
+        q->type = c->type;
+        err = zb_raw_encode(c->type, on ? 1 : 0, NULL, q->value, &q->len);
+        d->custom_next_us[index] = esp_timer_get_time() + 1500000;  // read the result back
+    }
+    UNLOCK();
+    if (err == ESP_OK) err = zb_raw_request(q, NULL, NULL);
+    free(q);
+    return err;
 }

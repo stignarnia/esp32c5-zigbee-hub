@@ -973,6 +973,139 @@ static int l_zb_toggle(lua_State *L)
     return zb_switch_result(L, zb_set_on(luaL_checkstring(L, 1), ZB_TOGGLE));
 }
 
+// ---- zb.read / zb.write / zb.command: arbitrary requests (zb_raw.c) ----------------------------
+// The answer comes back as an event (EV_ZBRAW) and runs the script's callback: a script never
+// waits for the radio.
+
+typedef struct {
+    uint8_t script, op;
+    uint32_t gen;
+    int ref;
+} raw_ctx_t;
+
+// Zigbee task: copy and post
+static void raw_answer(const zb_raw_result_t *res, void *arg)
+{
+    raw_ctx_t *c = arg;
+    ev_t ev = {.type = EV_ZBRAW};
+    ev.zbraw.script = c->script;
+    ev.zbraw.op = c->op;
+    ev.zbraw.gen = c->gen;
+    ev.zbraw.ref = c->ref;
+    ev.zbraw.res = heap_caps_malloc(sizeof(*res), MALLOC_CAP_SPIRAM);
+    free(c);
+    if (ev.zbraw.res) *ev.zbraw.res = *res;
+    if (!ev.zbraw.res || !auto_post(&ev)) {
+        free(ev.zbraw.res);
+        ESP_LOGW(TAG, "zb request answer dropped (queue full or no memory)");
+    }
+}
+
+static uint16_t num_arg(lua_State *L, int i, uint32_t max, const char *what)
+{
+    lua_Integer v = luaL_checkinteger(L, i);
+    if (v < 0 || (uint32_t)v > max) luaL_error(L, "%s out of range", what);
+    return (uint16_t)v;
+}
+
+// opts {ep=, manuf=, client=} at index i
+static void raw_opts(lua_State *L, int i, zb_raw_req_t *q)
+{
+    if (lua_isnoneornil(L, i)) return;
+    luaL_checktype(L, i, LUA_TTABLE);
+    if (lua_getfield(L, i, "ep") != LUA_TNIL) q->ep = (uint8_t)luaL_checkinteger(L, -1);
+    if (lua_getfield(L, i, "manuf") != LUA_TNIL) q->manuf = (uint16_t)luaL_checkinteger(L, -1);
+    if (lua_getfield(L, i, "client") != LUA_TNIL) q->to_client = lua_toboolean(L, -1);
+    lua_pop(L, 3);
+}
+
+// Sends q with the callback at index fn; returns true, or nil + error
+static int raw_send(lua_State *L, zb_raw_req_t *q, int fn)
+{
+    script_t *s = auto_script_of(L);
+    raw_ctx_t *c = malloc(sizeof(*c));
+    if (!c) {
+        lua_pushnil(L);
+        lua_pushstring(L, "out of memory");
+        return 2;
+    }
+    lua_pushvalue(L, fn);
+    *c = (raw_ctx_t){.script = (uint8_t)auto_script_index(s), .op = (uint8_t)q->op, .gen = s->gen,
+                     .ref = luaL_ref(L, LUA_REGISTRYINDEX)};
+    esp_err_t err = zb_raw_request(q, raw_answer, c);
+    if (err != ESP_OK) {
+        luaL_unref(L, LUA_REGISTRYINDEX, c->ref);
+        free(c);
+        lua_pushnil(L);
+        lua_pushstring(L, err == ESP_ERR_NOT_SUPPORTED ? "commands only on manufacturer clusters (>= 0xFC00)"
+                          : err == ESP_ERR_INVALID_STATE ? "Zigbee is not up" : esp_err_to_name(err));
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// zb.read(device, cluster, attrs, fn, opts): attrs = an id or a list of up to 8;
+// fn(values, statuses) with values[attr] = value, statuses[attr] = ZCL status; fn(nil, err) on failure
+static int l_zb_read(lua_State *L)
+{
+    zb_raw_req_t q = {.op = ZB_RAW_READ};
+    strlcpy(q.device, luaL_checkstring(L, 1), sizeof(q.device));
+    q.cluster = num_arg(L, 2, 0xFFFF, "cluster");
+    if (lua_istable(L, 3)) {
+        int n = (int)luaL_len(L, 3);
+        if (n < 1 || n > ZB_RAW_MAX_ATTRS) return luaL_error(L, "zb.read: 1 to %d attributes", ZB_RAW_MAX_ATTRS);
+        for (int i = 1; i <= n; i++) {
+            lua_geti(L, 3, i);
+            q.attrs[q.n_attrs++] = num_arg(L, -1, 0xFFFF, "attribute");
+            lua_pop(L, 1);
+        }
+    } else {
+        q.attrs[q.n_attrs++] = num_arg(L, 3, 0xFFFF, "attribute");
+    }
+    luaL_checktype(L, 4, LUA_TFUNCTION);
+    raw_opts(L, 5, &q);
+    return raw_send(L, &q, 4);
+}
+
+// zb.write(device, cluster, attr, type, value, fn, opts): type = ZCL type (0x20 uint8, 0x30 enum8,
+// 0x10 bool, 0x42 text, 0x41 hex octets...); fn(true) or fn(nil, err)
+static int l_zb_write(lua_State *L)
+{
+    zb_raw_req_t q = {.op = ZB_RAW_WRITE};
+    strlcpy(q.device, luaL_checkstring(L, 1), sizeof(q.device));
+    q.cluster = num_arg(L, 2, 0xFFFF, "cluster");
+    q.attr = num_arg(L, 3, 0xFFFF, "attribute");
+    q.type = (uint8_t)num_arg(L, 4, 0xFF, "type");
+    double num = 0;
+    const char *str = NULL;
+    if (lua_isboolean(L, 5)) num = lua_toboolean(L, 5);
+    else if (lua_type(L, 5) == LUA_TNUMBER) num = lua_tonumber(L, 5);
+    else str = luaL_checkstring(L, 5);
+    if (zb_raw_encode(q.type, num, str, q.value, &q.len) != ESP_OK) {
+        return luaL_error(L, "zb.write: value doesn't fit type 0x%02x", q.type);
+    }
+    luaL_checktype(L, 6, LUA_TFUNCTION);
+    raw_opts(L, 7, &q);
+    return raw_send(L, &q, 6);
+}
+
+// zb.command(device, cluster, cmd, payload_hex, fn, opts): manufacturer clusters only;
+// fn(true) when the device accepted it, fn(nil, err) otherwise
+static int l_zb_command(lua_State *L)
+{
+    zb_raw_req_t q = {.op = ZB_RAW_COMMAND};
+    strlcpy(q.device, luaL_checkstring(L, 1), sizeof(q.device));
+    q.cluster = num_arg(L, 2, 0xFFFF, "cluster");
+    q.cmd = (uint8_t)num_arg(L, 3, 0xFF, "command");
+    int n = zb_raw_hex(luaL_optstring(L, 4, ""), q.payload, sizeof(q.payload));
+    if (n < 0) return luaL_error(L, "zb.command: payload must be hex, up to %d bytes", ZB_RAW_PAYLOAD_MAX);
+    q.payload_len = (uint8_t)n;
+    luaL_checktype(L, 5, LUA_TFUNCTION);
+    raw_opts(L, 6, &q);
+    return raw_send(L, &q, 5);
+}
+
 static int l_zb_devices(lua_State *L)
 {
     box_t *b = box_new(L);
@@ -1159,7 +1292,8 @@ static void open_libs(lua_State *L)
     lua_register(L, "cron", l_cron);
 
     static const luaL_Reg zb[] = {{"on", l_zb_on},          {"get", l_zb_get},       {"set", l_zb_set},
-                                  {"toggle", l_zb_toggle}, {"devices", l_zb_devices}, {NULL, NULL}};
+                                  {"toggle", l_zb_toggle}, {"devices", l_zb_devices}, {"read", l_zb_read},
+                                  {"write", l_zb_write},   {"command", l_zb_command}, {NULL, NULL}};
     luaL_newlib(L, zb);
     lua_setglobal(L, "zb");
     static const luaL_Reg tm[] = {{"after", l_timer_after}, {"every", l_timer_every}, {"cancel", l_timer_cancel},
@@ -1497,6 +1631,56 @@ static int http_p(lua_State *L)
     return 0;
 }
 
+static const char *raw_err(esp_err_t e)
+{
+    return e == ESP_ERR_TIMEOUT ? "no answer" : e == ESP_ERR_NOT_FOUND ? "no such device"
+         : e == ESP_ERR_NOT_SUPPORTED ? "refused" : e == ESP_ERR_NO_MEM ? "too many requests" : "not sent";
+}
+
+static int zbraw_p(lua_State *L)
+{
+    ev_t *ev = lua_touserdata(L, 1);
+    const zb_raw_result_t *r = ev->zbraw.res;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ev->zbraw.ref);
+    luaL_unref(L, LUA_REGISTRYINDEX, ev->zbraw.ref);
+    if (r->err != ESP_OK) {
+        lua_pushnil(L);
+        if (r->err == ESP_ERR_NOT_SUPPORTED) lua_pushfstring(L, "refused, status 0x%02x", r->zcl_status);
+        else lua_pushstring(L, raw_err(r->err));
+    } else if (ev->zbraw.op == ZB_RAW_READ) {
+        lua_createtable(L, 0, r->n);
+        lua_createtable(L, 0, r->n);
+        for (int i = 0; i < r->n; i++) {
+            lua_pushinteger(L, r->v[i].status);
+            lua_rawseti(L, -2, r->v[i].attr);
+            if (r->v[i].status != 0) continue;
+            char text[2 * ZB_RAW_VALUE_MAX + 1];
+            bool is_num;
+            double num;
+            zb_raw_value_text(r->v[i].type, r->v[i].data, r->v[i].len, text, sizeof(text), &is_num, &num);
+            if (r->v[i].type == 0x10) lua_pushboolean(L, num != 0);
+            else if (is_num) lua_pushinteger(L, (lua_Integer)num);
+            else lua_pushstring(L, text);
+            lua_rawseti(L, -3, r->v[i].attr);
+        }
+    } else if (r->zcl_status == 0) {
+        lua_pushboolean(L, 1);
+        lua_pushnil(L);
+    } else {
+        lua_pushnil(L);
+        lua_pushfstring(L, "status 0x%02x", r->zcl_status);
+    }
+    auto_call(L, 2);
+    return 0;
+}
+
+static void handle_zbraw(ev_t *ev)
+{
+    script_t *s = ev->zbraw.script < AUTO_MAX_SCRIPTS ? &g_scripts[ev->zbraw.script] : NULL;
+    if (s && s->status == ST_RUNNING && s->gen == ev->zbraw.gen && ev->zbraw.res) auto_run(s, zbraw_p, ev);
+    free(ev->zbraw.res);  // a stopped script's callback went with its Lua state
+}
+
 static void handle_http(ev_t *ev)
 {
     script_t *s = ev->http.script < AUTO_MAX_SCRIPTS ? &g_scripts[ev->http.script] : NULL;
@@ -1528,6 +1712,7 @@ static void auto_task(void *arg)
             case EV_GPIO: agpio_on_isr_event(ev.gpio.pin, esp_timer_get_time()); break;
             case EV_HTTP: handle_http(&ev); break;
             case EV_CMD: handle_cmd(ev.cmd); break;
+            case EV_ZBRAW: handle_zbraw(&ev); break;
             }
         }
         now = esp_timer_get_time();

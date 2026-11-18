@@ -202,7 +202,8 @@ components/
   hublog/        on-board diagnostic log (LittleFS)
   zb/            coordinator, enrollment, interview, ZCL helpers, and the device
                  registry with persistence (zb_dev.c; no separate devices/ component);
-                 device firmware updates, the OTA Upgrade server (zb_ota.c)
+                 device firmware updates, the OTA Upgrade server (zb_ota.c); reads, writes and
+                 manufacturer commands on any cluster (zb_raw.c)
   web/           http server, REST (web_api.c, web_auto.c, web_motion.c, web_ha.c), WebSocket,
                  auth, access mode
   web/ui/        index.html, app.js, style.css, favicon.svg (no build step, gzipped by
@@ -262,27 +263,21 @@ evidence; where something is still open there, it points here.
       Wi-Fi's coex slot (measured 2026-11-17, Phase 3). Registration no longer depends on it;
       giving 802.15.4 priority while pairing is open would make joins themselves more reliable
       (user's call: Wi-Fi slower during those minutes)
-- [ ] what makes the S60ZBTPF publish its energy total (Phase 3). The standard summation stayed 0
-      through a full hour on (2026-11-17 20:08–21:10, 88 → 15 W, ~70 Wh, 10 reads; 0xFC11 counters
-      0x7009–0x700c 0 too), then read 0.08 kWh at 21:49, after the load reached 0 W at 21:44:
-      about everything that went through it that day, so it counted all along and published late.
-      Two candidates, not separable from this run: the Time server added at 20:18 (it is a Time
-      client, out cluster 0x000A), or it publishes only when the load ends. Next charge: if the
-      counter rises while charging, it was the time
 - [ ] Optional: signed updates (design in Phase 2)
 - [ ] Zigbee device firmware updates (built 2026-11-18, Phase 3; the S60ZBTPF updated to 2.1.3
       from HA): still unseen: the jitter-only notify of a real offer, Cancel during a transfer, a
       wrong sha512, a battery device's update. Open decision: how HA shows versions (now the
       decimal OTA file version, 4098 / 8451; proposed: hex `0x00001002`)
-- [ ] the S60ZBTPF on 2.1.3: does it publish its energy total now (see the energy item above)?
-      After the update (11:00): on, 0 W (no load), total still 0.08 kWh; reporting on 0x0006,
-      0x0B04 and 0x0702 configured on the new firmware. Needs a charge to tell
+- [ ] SONOFF inching (the plug switching itself off N s after being turned on): built 2026-11-18
+      as SONOFF's 0xFC11 command, no effect on the S60ZBTPF, removed the same day (Phase 3). Next
+      (user, 2026-11-18): a radio capture of what Zigbee2MQTT really sends
 
 ### Tests: router off for about an hour (one session)
 - [ ] triggers, timers, cron and buzzers keep working; `net.on("down")` fires; a `retry_for`
       request made while offline goes out once the router is back (Phase 5)
-- [ ] the keys alarm: every opening without a tap sounds (no motion signal), Alexa once the
-      router is back (Phase 5b)
+- [ ] the keys alarm: every opening without a tap sounds (no motion signal). Since 2026-11-18
+      the Echo reminder goes through Home Assistant ("Allarme" on for 30 s), so with the router
+      off it is dropped, not sent late (accepted by the user) (Phase 5b)
 - [ ] the Wi-Fi watchdog firing: driver restart after 5 min, reboot after 20 min (Phase 1)
 - [ ] the reboot gate deferring that reboot (pairing open, a script running, a timer or cron
       job due within 2 min, a buzzer playing) (Phases 1 and 5)
@@ -302,7 +297,7 @@ evidence; where something is still open there, it points here.
 ### Tests: waiting or long runs
 - [ ] availability: a battery sensor marked offline after 25 h of silence (Phase 3)
 - [ ] internal heap low-water mark under full load: Zigbee + Tailscale + a UI client + 3
-      scripts, and the same with HA connected (26.1 KB today with HA at boot) (Phase 7)
+      scripts, and the same with HA connected (24.6 KB lowest with HA at boot, 2026-11-18) (Phase 7)
 
 ### Built, never seen with a real device of that kind (none here)
 - [ ] temperature, humidity and occupancy sensors (UI, `zb.*`, HA entities)
@@ -320,6 +315,10 @@ evidence; where something is still open there, it points here.
 - [ ] the forged-packet test with the tailnet input hook removed (the control experiment) (Phase 4)
 - [ ] `gpio.beep`'s cap of 2 s per pulse stays until a longer continuous tone is measured on the
       buzzers (only up to 1 s was) (Phase 1b)
+- [ ] the per-device Home Assistant dialog's last version (Class, Statistics, "0 while the
+      device's switch is off") not looked at in a browser yet (Phase 3)
+- [ ] `zb.read`, `zb.write`, `zb.command` never run from a script; the same requests ran through
+      `/api/zb/raw` (Phase 3)
 
 ### Open decisions (the user's)
 - [ ] keys alarm M2: what if Wi-Fi sensing misses a walk to the door (decided by the sensing
@@ -923,7 +922,11 @@ For long tests without a serial cable: log on the board, download later.
     protection limits, with uint8 flags 0x700c/0x700e/0x7010; 0x7009–0x700b (uint32) and
     0x700c = 0; also 0001, 0010, 001c, 7003 (a string), 7007. Labels other than the matched
     readings are inferred, not confirmed
-  - 0xFC57 (14): bool/uint8/uint16 settings (0002–0013); not identified
+  - 0xFC57 (14): bool/uint8/uint16 settings (0002–0013). Identified 2026-11-18: Amazon's
+    Works With All Hubs (WWAH) cluster, whose attribute list is exactly 0x0002
+    (DisableOTADowngrades) … 0x0013 (OTAMaxOfflineDuration)
+  - 0xFC11 0x0001 (bool) and 0x7007 (uint8) were later set up as the switches "Network LED" and
+    "Overload protection" (below); both read 1. What writing them does is not recorded here
 - [x] **Time server on the hub endpoint** (2026-11-17): Time cluster server with TimeStatus,
       TimeZone, DstShift, LocalTime. The stack serves the Time attribute from
       `ezb_zcl_time_server_interface_register` (`get_utc_time` returns ZCL time, seconds since
@@ -937,8 +940,10 @@ For long tests without a serial cable: log on the board, download later.
       the minutes it ran (it was removed before the plug could be power-cycled). First attempt wrote the Time attribute with `ezb_zcl_set_attr_value` and had no
       interface: an assertion in the stack on the trial boot (`zigbee` task, `__assert_func`,
       core dump without a usable backtrace), rolled back by the bootloader as designed; the
-      board wasn't on USB, so the assertion text wasn't captured. Not seen yet: a device reading it
-      (the S60ZBTPF may ask only at power-up)
+      board wasn't on USB, so the assertion text wasn't captured. **Used** (2026-11-18): every
+      incoming Time-cluster frame is logged (`on_raw_frame` in `zb.c`, "asked the Time server");
+      the S60ZBTPF, unplugged and plugged back in, read it 4 times (Read Attributes, 17:22:05–11)
+      then sent 2 Default Responses. It reads the time at power-up; the Time server stays
 - [x] **Firmware version per device** (2026-11-18): read at every boot, after a rejoin or
       announce, and 60 s after an update the hub ran (user: all three); always-on devices 40 s
       after boot, 20 s apart; sleepy ones when heard from, 30 s apart; 5 tries. Persisted in
@@ -1031,6 +1036,81 @@ For long tests without a serial cable: log on the board, download later.
       check. Fix: the offer's notify is jitter-only too (type 3 answered 0 of 1, type 0 4 of 4;
       one type-3 frame lost by chance can't be ruled out). That fix is installed, not exercised
       by a real offer yet
+- [x] **The S60ZBTPF's late energy total: fixed by 2.1.3** (2026-11-18). On 1.0.2 the summation
+      stayed 0 through a whole charge and published ~70 Wh only after the load ended (2026-11-17
+      20:08–21:49, Time server present from 20:18, so not the Time server). On 2.1.3, a charge
+      from 17:03:35 at 86 W: HA `sensor.bike_energia` 0.082 → 0.094 kWh by 17:13:18 in 1 Wh
+      steps every ~40 s (1 Wh at 86 W = 42 s), i.e. the plug reports each watt-hour while
+      charging. Unplugged at ~17:21 during the charge: the total came back as 0.080 kWh (was
+      0.094): the plug keeps its counter in RAM and saves it now and then, so a power cut loses
+      the unsaved part (HA's total_increasing takes the drop as a reset, no double counting)
+- [x] **The S60ZBTPF after a power cut, and its power-on behaviour** (2026-11-18). Came back with
+      the relay **off** (it was on), and the hub kept showing "on" for 5 min: no report after the
+      restart, no announce seen, so the registry kept the old state (the hub's mistake, read
+      back and corrected by a re-interview: `on: false`). So its factory StartUpOnOff was off or
+      toggle; it was overwritten (with "on") before being read, so which one is unknown. Now:
+  - `zb_set_power_on()` writes StartUpOnOff (0x4003: 0 off, 1 on, 2 toggle, 0xFF previous) and
+    reads it back; read at the interview, persisted, `power_on` in `/api/zb`; `/api/zb/set`
+    `{"power_on": …}`; a select on the card ("After a power cut"); HA select "Power on behavior"
+    (Off / On / Toggle / Previous, config category; the API's first select: ListEntitiesSelect
+    52 / SelectState 53 / SelectCommand 54). The S60ZBTPF accepted 0x01 and then 0xFF
+    (status 0, read back 0xff): set to Previous at the user's request
+  - the Devices page doesn't redraw while a select in a card has focus (an open list would close)
+  - always-on devices with On/Off: state (+ 0x4003) read every 5 min and as soon as one
+    rejoins or announces, so a silent power cut is corrected within 5 min
+  - the plug's clusters, all of them (after 2.1.3, re-interview): ep 1 server: Basic, Identify,
+    Groups, Scenes, On/Off, Metering, Electrical Measurement, Diagnostics, 0xFC57, 0xFC11; ep 1
+    client: Identify (new with 2.1.3; the hub's gateway endpoint has the Identify server), Time
+    (served), OTA (served); ep 242: Green Power proxy (client 0x0021)
+- [x] **Any attribute, any command: `zb_raw.c`** (2026-11-18). Read up to 8 attributes, write
+      one, or send a command on a manufacturer cluster (≥ 0xFC00; standard clusters keep their
+      dedicated calls), with optional endpoint (default: the one with that cluster), manufacturer
+      code and client side. Sent from the Zigbee task; the answer is matched by source address +
+      cluster + kind (a read response holding one of the asked attributes, so the hub's own reads
+      stay its own; a write response; a Default Response for a command or a refused read/write),
+      8 requests in flight, no answer in 4 s = timeout (a sleepy device answers only while awake).
+      The registry still applies every answer. Exposed as `POST /api/zb/raw` (waits up to 5 s;
+      numbers as JSON numbers or "0x…" strings) and Lua `zb.read` / `zb.write` / `zb.command`
+      (the answer comes back through the automation queue to a callback; a script never waits).
+      Used through the API (the dialog's Test read, below); never yet from a script (Still to do)
+- [x] **Per-device Home Assistant settings** (2026-11-18): a **Home Assistant** button on each
+      device card opens a dialog listing what the device publishes:
+  - the hub's own entities, each with a publish checkbox; a hidden one is stored by a stable key
+    (`zone`, `power_draw`, `voltage`, `current`, `energy`, `power_on`, `signal`, …; from
+    `ha_device_builtin_json`, so the UI and the HA model share one list)
+  - up to 8 own entities per device: name, sensor / on-off / switch, cluster, attribute, ZCL
+    type, manufacturer code, endpoint, scale (value = raw ÷ scale), unit, device class, state
+    class (none / measurement / total_increasing), read interval (10 s – 1 h; sleepy devices:
+    when heard from), and "0 while the device's switch is off". **Test read** reads the
+    attribute through `/api/zb/raw` and fills in its type. The hub reads each at its interval
+    (first read 45 s after boot) and also takes reports of that attribute; a switch writes 0/1
+    and reads it back 1.5 s later
+  - `GET /api/zb/ha?ieee=` / `POST /api/zb/ha` (replaces a device's settings), persisted in
+    `devices.json` (`"ha"`), applied by the HA model (entity set change → HA reloads)
+  - HA's entity identity is type + name (Phase 6), so an own entity with the same type and name
+    as a hidden built-in one takes over its entity id and history
+  - `HA_MAX_ENT` 416 → 448; own entities count against it (32 devices × 8 own would not fit:
+    the model stops adding at the limit). `max_uri_handlers` 56 → 64 (52 in use)
+- [x] **The Bike's precise readings** (2026-11-18, set up with the dialog): 0x0B04's power is in
+      whole watts and its current in 1/100 A; 0xFC11 has the same readings in mW, mA and mV
+      (survey above). Built-in Power draw, Voltage and Current hidden; own sensors with the
+      same names from 0xFC11: Power draw 0x7006 (÷1000, W, every 10 s, 0 while off), Current
+      0x7004 (÷1000, A, 10 s, 0 while off), Voltage 0x7005 (÷1000, V, 60 s), all class + state
+      class measurement; plus switches Network LED (0x0001) and Overload protection (0x7007).
+      Seen in HA's history under the same entity ids as before: 25.78 W / 0.216 A on, 0 / 0 at
+      the off (18:16:59.5), 27.45 W / 0.238 A on again (18:17:20): no stale reading while off
+- [ ] **SONOFF inching (auto-off), tried and removed** (2026-11-18). Built as `zb_set_auto_off`
+      (HA select "Auto-off", `/api/zb/set {"auto_off"}`, a select on the card): command 0x01 on
+      0xFC11 with manufacturer code 0x1286, payload `01 17 07 80 81 00 <seconds × 2, LE> 00 00
+      <XOR of the 10 bytes before>` (`80 00 …` = off), the same bytes as Zigbee2MQTT's. Set to
+      5 s at 18:16:17: the plug didn't switch itself off, and the "off" sent right after was
+      ignored (no change in HA's history at 18:16:18), so the command may leave the plug in an
+      odd state. Set back to off at 18:18:22. The plug can't be asked for its inching setting.
+      Code removed (user, 2026-11-18); next: a radio capture (Still to do)
+- **Green Power is not supported** (user, 2026-11-18): battery-free switches (Hue Tap and
+  similar) need a Green Power sink on the coordinator; the hub has none, so their presses are
+  never received, even when a mains device (the S60ZBTPF has a proxy on ep 242) relays them.
+  README says so
 - [x] **Network map drawn** (2026-11-17): SVG, hub in the middle, every device around it; a line
       per direct link from the neighbour table, coloured by LQI, dashed for sleepy end devices;
       square = router, circle = end device; devices not in the table sit unlinked ("route
@@ -1277,7 +1357,8 @@ Findings, in case it comes back:
 
 Built in addition to the list below: `zb.devices()`, `timer.cancel(id)` (also cancels
 cron), timers by global function name (survive a restart), `json.encode/decode`,
-`print` = `log`.
+`print` = `log`; since 2026-11-18 `zb.read` / `zb.write` / `zb.command` for any attribute or
+manufacturer command (Phase 3, `zb_raw.c`).
 
 **Decided (user, 2026-11-04): Lua.** Why: most pasted scripts will be written by
 the user or an AI, and Lua is widely known; the C API gives per-script memory caps
@@ -1303,7 +1384,7 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
   - `zb.on(device, attr, fn)` — state change triggers
   - `zb.get(device, attr)`. No `zb.set` yet: none of the paired devices can be commanded.
     In principle scripts set devices (user, 2026-11-08); `zb.set` comes with the first
-    device that takes commands
+    device that takes commands (built 2026-11-17 with the first plug, Phase 3)
   - `timer.after(s, fn)`, `timer.every(s, fn)`, `cron("0 7 * * 1-5", fn)`
   - `state.get/put(key, value)` — small persistent KV for scripts
   - **HTTP requests** (user request: call an Alexa skill URL that sounds the
@@ -1564,7 +1645,7 @@ has no runtime scripting (YAML compiled to C++), so nothing to borrow there.
   1. stack overflow on the main task (3.5 KB): a 2 KB config buffer on its stack in
      `agpio_init` → heap corruption → crash. Buffers moved to the heap
   2. `ESP_ERR_HTTPD_HANDLERS_FULL`: the URL-handler limit (40) was reached → abort at boot.
-     Raised to 56 (~40 in use). Found only by capturing the console during the trial boot
+     Raised to 56 (~40 in use; 64 since 2026-11-18, 52 in use). Found only by capturing the console during the trial boot
      (the core dump's backtrace stopped at `abort`)
 - **Two crashed trial boots in a row suspend Tailscale** (its own crash guard, `ts.c`):
   after the rollback the hub stayed off the tailnet, so in tailnet-only mode the UI was
@@ -1586,7 +1667,8 @@ nothing from Phase 6.
         the last 2 s left out as the opening itself): silent, coming home
       - anything else, `nil` (no motion signal) included: alarm — 3 buzzers + Alexa at once,
         10 s (5 rounds), stopped by a Keys tap or the Door closing; a tap changes nothing else.
-        Alexa called the moment the alarm starts (F12), but not again within 30 s: calling it
+        Alexa called the moment the alarm starts (F12; since 2026-11-18 through the "Allarme"
+        binary sensor in HA, below), but not again within 30 s: calling it
         on every alarm was "too eager" (user, 2026-11-08), as the earlier script's 30 s did
       - `STILL_S` = 60 s and `GAP_S` = 2 s (the last 2 s before the opening left out: the door
         and the person at it move the Wi-Fi signal themselves): both decided by the user
@@ -1596,11 +1678,18 @@ nothing from Phase 6.
       one flag per 500 ms; movement anywhere in the window → true even where part of it
       wasn't seen; otherwise any unseen part → nil). Verified with a throwaway script:
       true/false/nil as expected, bad windows raise an error
-- [x] **Buzzers always**, Alexa in addition (user decision 2026-11-08). The routine URL is a
-      virtualsmarthome.xyz URL Routine Trigger (`alexa_alarm_url`, `response=json`); its reply
-      `"triggerActivationStatus": "success"` means the service accepted it, **not** that an
-      Echo played. Alexa also announces the trigger as a doorbell visitor unless that device's
-      announcements are turned off in the Alexa app
+- [x] **Buzzers always**, Alexa in addition (user decision 2026-11-08). Until 2026-11-18 the
+      routine URL was a virtualsmarthome.xyz URL Routine Trigger (`alexa_alarm_url`); its reply
+      `"triggerActivationStatus": "success"` meant the service accepted it, **not** that an
+      Echo played, and Alexa also announced it as a doorbell visitor
+- [x] **Alexa through Home Assistant (user, 2026-11-18)**, replacing the third-party skill:
+      the script publishes `ha.binary("Allarme", …, {device_class = "safety"})`, defined false
+      at load (a new entity's first value never reaches HA), on for 30 s from an alarm start
+      (`ALERT_S`, the old cooldown). An HA automation on it has the Echo speak through Alexa
+      Media Player (`type: tts`: no announcement chime; volume raised to max only if lower,
+      then restored, because every remote volume change makes the Echo beep). Verified: the
+      reminder plays, no chime at max volume, restore after 8 s. Trade-off accepted: HA down or
+      router off → buzzers only; nothing is retried. Secret `alexa_alarm_url` deleted
 - [x] User, 2026-11-08: open without a tap → alarm; tap then open → silent. (The old script
       did the same; Alexa was called on every alarm, so the 30 s cooldown went back in)
 - [x] What the old script got wrong, verified by the user on hardware (2026-11-08): come home
@@ -1853,6 +1942,8 @@ connect sequence).
     "Signal" dBm (RSSI: the registry has no LQI; disabled by default, Claude's choice as ZHA
     and Zigbee2MQTT do for signal/LQI: diagnostic, noisy history), "Last seen" (text
     sensor, class `timestamp`, ISO UTC; made once per frame so it doesn't wobble)
+  - since 2026-11-18 (Phase 3): a select "Power on behavior" for On/Off devices, and per device
+    the user can hide any of these and add own entities from any attribute
   - offline device → its values unknown (Online / Last seen still reported)
   - verified: both contact sensors with 8 entities each, states right (Door closed, Keys
     open, battery 100 % / 3.0 V), with aioesphomeapi and in HA
@@ -1884,8 +1975,8 @@ connect sequence).
     indicator byte", closed; empty hello + 128-byte handshake → server hello, "Handshake MAC
     failure", closed. Hub stayed up
 - [x] Entity table in PSRAM (reference: 54 KB, moving it freed half the internal heap)
-  - everything of the server (two entity models of 384, states, 3 clients' buffers, inputs)
-    is one PSRAM block: 279 KB. Internal: the task's stack only (5 KB; it must be internal
+  - everything of the server (two entity models of 384 (448 since 2026-11-18), states, 3
+    clients' buffers, inputs) is one PSRAM block: 279 KB (measured with 384). Internal: the task's stack only (5 KB; it must be internal
     because a switch command saves the script list to flash; high-water 2.5 KB with that
     path and a handshake included)
 - [x] The web UI is unchanged by the integration (devices, enrollment, network, status);
@@ -2033,6 +2124,9 @@ All measured there on the same chip; re-verify, don't assume.
   and listen only on the Tailscale interface (Phase 4, "Access mode").
 - **The hub's UI proxied through Home Assistant needs no password** (2026-11-17): the HA UI is
   trusted; whoever can open HA may control the hub.
+- **No Zigbee Green Power** (2026-11-18): not supported, documented in README.
+- **Names in the firmware are English** (2026-11-18), also what Home Assistant shows as is
+  (select options); the user renames entities in HA. Italian is for what's built in HA itself.
 
 ## Conventions
 

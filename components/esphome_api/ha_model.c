@@ -12,10 +12,12 @@
 // An IAS sensor's main entity is listed only once its zone type is known, so a contact
 // sensor never shows up first as a generic "Alarm" that then disappears.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
 
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "ha_internal.h"
 #include "hublog.h"
@@ -84,6 +86,121 @@ static void zone_entity(uint16_t zone_type, const char **name, const char **dc)
     }
 }
 
+// Stable keys of a Zigbee device's own entities: what the per-device hide list holds
+static const char *zb_key(uint8_t val)
+{
+    switch (val) {
+    case V_ZB_ZONE: return "zone";           case V_ZB_TAMPER: return "tamper";
+    case V_ZB_BATT_LOW: return "battery_low"; case V_ZB_BATT: return "battery";
+    case V_ZB_BATT_V: return "battery_v";    case V_ZB_TEMP: return "temperature";
+    case V_ZB_HUM: return "humidity";        case V_ZB_OCC: return "occupancy";
+    case V_ZB_ON: return "power";            case V_ZB_POWER_ON: return "power_on";
+    case V_ZB_WATTS: return "power_draw";    case V_ZB_VOLTS: return "voltage";
+    case V_ZB_AMPS: return "current";        case V_ZB_KWH: return "energy";
+    case V_ZB_ONLINE: return "online";       case V_ZB_RSSI: return "signal";
+    case V_ZB_SEEN: return "last_seen";      case V_ZB_FW: return "firmware";
+    default: return "";
+    }
+}
+
+static bool key_hidden(const char *list, const char *key)
+{
+    size_t n = strlen(key);
+    for (const char *p = list; n && *p;) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == n && strncmp(p, key, n) == 0) return true;
+        if (!end) break;
+        p = end + 1;
+    }
+    return false;
+}
+
+// A Zigbee device's entities on sub-device `id`. for_ha: leave out what the user hid, add the
+// user's own entities (zb_custom_t); otherwise only the hub's own, all of them.
+static void zb_entities(ha_model_t *m, const zb_dev_info_t *d, uint32_t id, bool for_ha)
+{
+    ha_ent_t *e;
+    int first = m->n_ent;
+    if (d->ias && d->zone_type) {
+        const char *name, *dc;
+        zone_entity(d->zone_type, &name, &dc);
+        set(add(m, ET_BINARY, V_ZB_ZONE, id, name), dc, NULL, 0, 0, 0, false);
+    }
+    if (d->ias) {
+        set(add(m, ET_BINARY, V_ZB_TAMPER, id, "Tamper"), "tamper", NULL, 0, 0, DIAG, false);
+        set(add(m, ET_BINARY, V_ZB_BATT_LOW, id, "Battery low"), "battery", NULL, 0, 0, DIAG, false);
+    }
+    if (d->power_cfg) {
+        set(add(m, ET_SENSOR, V_ZB_BATT, id, "Battery"), "battery", "%", 0, MEAS, DIAG, false);
+        set(add(m, ET_SENSOR, V_ZB_BATT_V, id, "Battery voltage"), "voltage", "V", 1, MEAS, DIAG, true);
+    }
+    if (d->temp_meas) set(add(m, ET_SENSOR, V_ZB_TEMP, id, "Temperature"), "temperature", "°C", 1, MEAS, 0, false);
+    if (d->hum_meas) set(add(m, ET_SENSOR, V_ZB_HUM, id, "Humidity"), "humidity", "%", 0, MEAS, 0, false);
+    if (d->occ_sensing) set(add(m, ET_BINARY, V_ZB_OCC, id, "Occupancy"), "occupancy", NULL, 0, 0, 0, false);
+    // A switch: Home Assistant turns it on/off through zb_set_on (ha_server.c)
+    if (d->on_off) set(add(m, ET_SWITCH, V_ZB_ON, id, "Power"), "outlet", NULL, 0, 0, 0, false);
+    // What it does when power comes back; Home Assistant sets it through zb_set_power_on
+    if (d->on_off) {
+        e = add(m, ET_SELECT, V_ZB_POWER_ON, id, "Power on behavior");
+        set(e, NULL, NULL, 0, 0, 1, false);
+        if (e) strlcpy(e->icon, "mdi:power-settings", sizeof(e->icon));
+    }
+    if (d->elec_meas) {
+        set(add(m, ET_SENSOR, V_ZB_WATTS, id, "Power draw"), "power", "W", 1, MEAS, 0, false);
+        set(add(m, ET_SENSOR, V_ZB_VOLTS, id, "Voltage"), "voltage", "V", 1, MEAS, 0, false);
+        set(add(m, ET_SENSOR, V_ZB_AMPS, id, "Current"), "current", "A", 3, MEAS, 0, false);
+    }
+    if (d->metering) set(add(m, ET_SENSOR, V_ZB_KWH, id, "Energy"), "energy", "kWh", 3, 2, 0, false);
+    set(add(m, ET_BINARY, V_ZB_ONLINE, id, "Online"), "connectivity", NULL, 0, 0, DIAG, false);
+    set(add(m, ET_SENSOR, V_ZB_RSSI, id, "Signal"), "signal_strength", "dBm", 0, MEAS, DIAG, true);
+    set(add(m, ET_TEXT, V_ZB_SEEN, id, "Last seen"), "timestamp", NULL, 0, 0, DIAG, false);
+    // Installed vs offered OTA file version (zb_ota_offer); Install runs zb_ota_install.
+    // Listed once the installed version is known (a version "0" would read as up to date)
+    if (d->ota && d->has_fw_ver) set(add(m, ET_UPDATE, V_ZB_FW, id, "Firmware"), "firmware", NULL, 0, 0, 1, false);
+    if (for_ha) {
+        int w = first;
+        for (int k = first; k < m->n_ent; k++) {
+            if (!key_hidden(d->ha_hide, zb_key(m->ent[k].val))) m->ent[w++] = m->ent[k];
+        }
+        m->n_ent = w;
+        // The user's own: value read by the hub (zb_dev.c), a switch writes through zb_custom_write
+        for (int c = 0; c < d->n_custom; c++) {
+            const zb_custom_t *u = &d->custom[c];
+            uint8_t type = u->kind == ZB_CUSTOM_SWITCH ? ET_SWITCH : u->kind == ZB_CUSTOM_BINARY ? ET_BINARY : ET_SENSOR;
+            e = add(m, type, V_ZB_CUSTOM, id, u->name);
+            if (!e) break;
+            int dec = u->scale >= 1000 ? 3 : u->scale >= 100 ? 2 : u->scale >= 10 ? 1 : 0;
+            // HA's state classes: 1 measurement, 2 total_increasing (as ZB_STATE_CLASS_*)
+            set(e, u->device_class[0] ? u->device_class : NULL, u->unit, dec, type == ET_SENSOR ? u->state_class : 0, 0,
+                false);
+            strlcpy(e->ref2, u->name, sizeof(e->ref2));
+        }
+    }
+    for (int k = first; k < m->n_ent; k++) strlcpy(m->ent[k].ref, d->ieee, sizeof(m->ent[k].ref));
+}
+
+cJSON *ha_device_builtin_json(const zb_dev_info_t *d)
+{
+    cJSON *arr = cJSON_CreateArray();
+    ha_model_t *m = heap_caps_calloc(1, sizeof(*m), MALLOC_CAP_SPIRAM);
+    if (!m) return arr;
+    zb_entities(m, d, 1, false);
+    static const char *const KIND[] = {[ET_BINARY] = "binary", [ET_SENSOR] = "sensor", [ET_TEXT] = "text",
+                                       [ET_SWITCH] = "switch", [ET_BUTTON] = "button", [ET_EVENT] = "event",
+                                       [ET_UPDATE] = "update", [ET_SELECT] = "select"};
+    for (int k = 0; k < m->n_ent; k++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "key", zb_key(m->ent[k].val));
+        cJSON_AddStringToObject(o, "name", m->ent[k].name);
+        cJSON_AddStringToObject(o, "kind", m->ent[k].type <= ET_SELECT ? KIND[m->ent[k].type] : "");
+        if (m->ent[k].unit[0]) cJSON_AddStringToObject(o, "unit", m->ent[k].unit);
+        cJSON_AddItemToArray(arr, o);
+    }
+    free(m);
+    return arr;
+}
+
 void ha_model_build(ha_model_t *m, const ha_inputs_t *in)
 {
     m->n_ent = 0;
@@ -111,38 +228,7 @@ void ha_model_build(ha_model_t *m, const ha_inputs_t *in)
         ha_dev_t *dv = &m->dev[m->n_dev++];
         dv->id = id;
         strlcpy(dv->name, d->name[0] ? d->name : d->model[0] ? d->model : d->ieee, sizeof(dv->name));
-        int first = m->n_ent;
-        if (d->ias && d->zone_type) {
-            const char *name, *dc;
-            zone_entity(d->zone_type, &name, &dc);
-            set(add(m, ET_BINARY, V_ZB_ZONE, id, name), dc, NULL, 0, 0, 0, false);
-        }
-        if (d->ias) {
-            set(add(m, ET_BINARY, V_ZB_TAMPER, id, "Tamper"), "tamper", NULL, 0, 0, DIAG, false);
-            set(add(m, ET_BINARY, V_ZB_BATT_LOW, id, "Battery low"), "battery", NULL, 0, 0, DIAG, false);
-        }
-        if (d->power_cfg) {
-            set(add(m, ET_SENSOR, V_ZB_BATT, id, "Battery"), "battery", "%", 0, MEAS, DIAG, false);
-            set(add(m, ET_SENSOR, V_ZB_BATT_V, id, "Battery voltage"), "voltage", "V", 1, MEAS, DIAG, true);
-        }
-        if (d->temp_meas) set(add(m, ET_SENSOR, V_ZB_TEMP, id, "Temperature"), "temperature", "°C", 1, MEAS, 0, false);
-        if (d->hum_meas) set(add(m, ET_SENSOR, V_ZB_HUM, id, "Humidity"), "humidity", "%", 0, MEAS, 0, false);
-        if (d->occ_sensing) set(add(m, ET_BINARY, V_ZB_OCC, id, "Occupancy"), "occupancy", NULL, 0, 0, 0, false);
-        // A switch: Home Assistant turns it on/off through zb_set_on (ha_server.c)
-        if (d->on_off) set(add(m, ET_SWITCH, V_ZB_ON, id, "Power"), "outlet", NULL, 0, 0, 0, false);
-        if (d->elec_meas) {
-            set(add(m, ET_SENSOR, V_ZB_WATTS, id, "Power draw"), "power", "W", 1, MEAS, 0, false);
-            set(add(m, ET_SENSOR, V_ZB_VOLTS, id, "Voltage"), "voltage", "V", 1, MEAS, 0, false);
-            set(add(m, ET_SENSOR, V_ZB_AMPS, id, "Current"), "current", "A", 3, MEAS, 0, false);
-        }
-        if (d->metering) set(add(m, ET_SENSOR, V_ZB_KWH, id, "Energy"), "energy", "kWh", 3, 2, 0, false);
-        set(add(m, ET_BINARY, V_ZB_ONLINE, id, "Online"), "connectivity", NULL, 0, 0, DIAG, false);
-        set(add(m, ET_SENSOR, V_ZB_RSSI, id, "Signal"), "signal_strength", "dBm", 0, MEAS, DIAG, true);
-        set(add(m, ET_TEXT, V_ZB_SEEN, id, "Last seen"), "timestamp", NULL, 0, 0, DIAG, false);
-        // Installed vs offered OTA file version (zb_ota_offer); Install runs zb_ota_install.
-        // Listed once the installed version is known (a version "0" would read as up to date)
-        if (d->ota && d->has_fw_ver) set(add(m, ET_UPDATE, V_ZB_FW, id, "Firmware"), "firmware", NULL, 0, 0, 1, false);
-        for (int k = first; k < m->n_ent; k++) strlcpy(m->ent[k].ref, d->ieee, sizeof(m->ent[k].ref));
+        zb_entities(m, d, id, true);
     }
 
     // Scripts: one sub-device each, with its switch and what it publishes
@@ -243,6 +329,23 @@ static void zb_state(const ha_ent_t *e, const zb_dev_info_t *d, const ha_state_t
     case V_ZB_VOLTS:    st->missing = !d->has_volt; st->f = d->volt; break;
     case V_ZB_AMPS:     st->missing = !d->has_curr; st->f = d->curr; break;
     case V_ZB_KWH:      st->missing = !d->has_energy; st->f = d->energy; break;
+    case V_ZB_CUSTOM:
+        for (int i = 0; i < d->n_custom; i++) {
+            if (strcmp(d->custom[i].name, e->ref2) != 0) continue;
+            st->missing = !d->custom[i].has_value;
+            bool zero = (d->custom[i].flags & ZB_CUSTOM_ZERO_WHEN_OFF) && d->has_on && !d->on;
+            st->f = zero ? 0 : (float)d->custom[i].value;
+            st->b = !zero && d->custom[i].value != 0;
+        }
+        break;
+    case V_ZB_POWER_ON: {
+        static const char *const OPT[] = HA_POWER_ON_OPTIONS;
+        int i = !d->has_startup ? -1 : d->startup == 0x00 ? 0 : d->startup == 0x01 ? 1 : d->startup == 0x02 ? 2
+              : d->startup == 0xFF ? 3 : -1;
+        st->missing = i < 0;
+        if (i >= 0) strlcpy(st->text, OPT[i], sizeof(st->text));
+        break;
+    }
     case V_ZB_FW: {
         // Versions as the OTA file version in decimal, as OTA indexes list them; Home
         // Assistant compares them as numbers
@@ -326,4 +429,12 @@ void ha_model_state(const ha_ent_t *e, const ha_inputs_t *in, const ha_state_t *
         break;
     default: zb_state(e, zb_of(in, e->ref), prev, st); break;
     }
+}
+
+int ha_select_options(uint8_t val, const char *const **opts)
+{
+    (void)val;  // the only select so far: a plug's power-on behaviour
+    static const char *const POWER_ON[] = HA_POWER_ON_OPTIONS;
+    *opts = POWER_ON;
+    return sizeof(POWER_ON) / sizeof(POWER_ON[0]);
 }

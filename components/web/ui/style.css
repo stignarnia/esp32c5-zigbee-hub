@@ -142,3 +142,22 @@ td.actions > * { margin-left: .3rem; }
 .zmap .zm-hub-t { fill: var(--accent-fg); font-weight: 600; }
 .zm-key { font-size: .85rem; }
 button.small { padding: .15rem .6rem; font-size: .85rem; margin-left: .5rem; }
+
+/* Per-device Home Assistant popup */
+#ha-dlg { width: min(40rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); padding: 1rem; color: var(--fg);
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
+#ha-dlg::backdrop { background: rgb(0 0 0 / .45); }
+.ha-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: 0; background: none; border: 0; }
+.ha-head h2 { margin: 0; font-size: 1.1rem; }
+.ha-list { list-style: none; margin: .25rem 0; padding: 0; }
+.ha-row { display: grid; grid-template-columns: 1.5rem 1fr auto auto auto; gap: .5rem; align-items: center; margin: 0;
+  padding: .3rem 0; color: var(--fg); font-size: .95rem; border-bottom: 1px solid var(--line); }
+label.ha-row { grid-template-columns: 1.5rem 1fr auto auto; }
+.ha-dot { color: var(--accent); text-align: center; }
+.ha-row button.small { margin-left: 0; }
+#ha-dlg hr { border: 0; border-top: 1px solid var(--line); margin: .75rem 0; }
+.ha-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0 .75rem; }
+.ha-grid label { margin: .35rem 0; }
+.ha-grid select { display: block; width: 100%; margin-top: .25rem; }
+.spacer { flex: 1; }
+.ha-check { display: flex; gap: .5rem; align-items: center; color: var(--fg); font-size: .9rem; }

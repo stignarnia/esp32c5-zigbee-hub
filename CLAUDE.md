@@ -806,6 +806,11 @@ For long tests without a serial cable: log on the board, download later.
   - bug found: ZDO callback context carried the 64-bit IEEE in a pointer (32-bit on
     the C5) → truncated → every Active EP response dropped. Context is now slot+short
   - battery 100 % / 3.0 V, RSSI −44…−66 dBm at a few metres
+  - Power Configuration, read from Keys through `/api/zb/raw` on 2026-11-18 20:53 (answered when
+    woken by a tap): only 0x0020 BatteryVoltage (30 = 3.0 V) and 0x0021 BatteryPercentageRemaining
+    (200 = 100 %); 0x0000/0x0001/0x0010/0x0011, 0x0031, 0x0033–0x003A, 0x003E all 0x86
+    (unsupported). No battery size, thresholds or alarm mask: its low-battery signal is the IAS
+    zone status bit
 - [x] Web: Devices page (default), `GET /api/zb`, `POST /api/zb/{permit,rename,remove}`;
       live over WebSocket (polls only when the socket is down). Permit-join round trip verified (open 10 s → 9 s left → closed)
 - [x] OTA health = Zigbee up + web server (Wi-Fi no longer required)

@@ -199,7 +199,8 @@ components/
   hubsys/        planned reboots, OTA bookkeeping, core-dump summary
   hublog/        on-board diagnostic log (LittleFS)
   zb/            coordinator, enrollment, interview, ZCL helpers, and the device
-                 registry with persistence (zb_dev.c; no separate devices/ component)
+                 registry with persistence (zb_dev.c; no separate devices/ component);
+                 device firmware updates, the OTA Upgrade server (zb_ota.c)
   web/           http server, REST (web_api.c, web_auto.c, web_motion.c, web_ha.c), WebSocket,
                  auth, access mode
   web/ui/        index.html, app.js, style.css, favicon.svg (no build step, gzipped by
@@ -215,12 +216,13 @@ components/
                  ha_pb.c (protobuf subset)
 examples/        example Lua scripts offered in the editor (*.lua; put into app.js at
                  build time by components/web/gen_app_js.py; template.lua = new-script text)
+ha_app/          local Home Assistant app: nginx Ingress proxy to the hub's UI (run.sh), and
+                 the OTA index checker that leaves firmware offers on the hub (check_ota.sh)
 tools/
   mkprov.py      provisioning image for flash.sh
   gpio_probe/    Phase 1b buzzer/GPIO probe firmware
   codemirror/    editor bundle: pinned package.json + lockfile, entry.js, build.sh, LICENSE
   lua/hub.lua    the hub's Lua API as LuaLS definitions (completion, no "undefined global")
-  ha_app/        local Home Assistant Ingress app (nginx reverse proxy to the hub's UI)
 ```
 
 ### Partition table (16 MB)
@@ -266,6 +268,13 @@ evidence; where something is still open there, it points here.
       client, out cluster 0x000A), or it publishes only when the load ends. Next charge: if the
       counter rises while charging, it was the time
 - [ ] Optional: signed updates (design in Phase 2)
+- [ ] Zigbee device firmware updates (built 2026-11-18, Phase 3; the S60ZBTPF updated to 2.1.3
+      from HA): still unseen: the jitter-only notify of a real offer, Cancel during a transfer, a
+      wrong sha512, a battery device's update. Open decision: how HA shows versions (now the
+      decimal OTA file version, 4098 / 8451; proposed: hex `0x00001002`)
+- [ ] the S60ZBTPF on 2.1.3: does it publish its energy total now (see the energy item above)?
+      After the update (11:00): on, 0 W (no load), total still 0.08 kWh; reporting on 0x0006,
+      0x0B04 and 0x0702 configured on the new firmware. Needs a charge to tell
 
 ### Tests: router off for about an hour (one session)
 - [ ] triggers, timers, cron and buzzers keep working; `net.on("down")` fires; a `retry_for`
@@ -927,6 +936,98 @@ For long tests without a serial cable: log on the board, download later.
       core dump without a usable backtrace), rolled back by the bootloader as designed; the
       board wasn't on USB, so the assertion text wasn't captured. Not seen yet: a device reading it
       (the S60ZBTPF may ask only at power-up)
+- [x] **Firmware version per device** (2026-11-18): read at every boot, after a rejoin or
+      announce, and 60 s after an update the hub ran (user: all three); always-on devices 40 s
+      after boot, 20 s apart; sleepy ones when heard from, 30 s apart; 5 tries. Persisted in
+      `devices.json`, `fw` in `/api/zb`, "Firmware" row on the card. Basic 0x0001/0x0003/
+      0x0006/0x4000 and the device's OTA **client** attributes 0x0002/0x0007/0x0008 (read with
+      the ZCL direction bit set). S60ZBTPF: app 16, hw 16, date 20250411, build "1.0.2", OTA
+      file 0x00001002, manufacturer 0x1286, ImageTypeID **0xFFFF** (not filled in). Door/Keys:
+      not heard from yet after the update
+- [x] **Device firmware updates, the OTA Upgrade server** (built 2026-11-18; transfer not run yet,
+      see Still to do). Design agreed with the user: no OTA database on the board; Home Assistant
+      keeps the index. Pieces:
+  - `components/zb/zb_ota.c`: OTA Upgrade server cluster on the hub endpoint (file table 1). One
+    image at a time, in **PSRAM** (≤ 1 MB): the stack reads blocks on the Zigbee task, where file
+    I/O is not allowed, so not LittleFS. Stage = a task (PSRAM stack) downloads it (HTTPS with
+    the CA bundle, or http:// to LAN/tailnet only), checks sha512 (PSA), the OTA header (magic,
+    length, total size, optional destination IEEE) and the header against the device
+    (manufacturer code, image type, not its current version). Start = `add_ota_file` + Image
+    Notify, jitter only (sleepy target: when next heard from; always-on: every 5 min, 6 at
+    most; no ask 5 min after the 6th → failed, "the device didn't ask for the image", added
+    2026-11-18 at the user's request: before, it stayed "offered" and HA showed it installing
+    forever). Cancel = image removed from the stack (on the Zigbee task, so never mid-read) and
+    freed; the device's next block request gets NO_IMAGE_AVAILABLE (untested; no Cancel in HA or
+    the UI, API only). Every
+    server step goes through `zb_ota_on_server_progress`: START admits only the target's short
+    address with the image's manufacturer code and image type and another file version, else
+    `NO_IMAGE_AVAILABLE`; FINISH answers upgrade time 0 (now); 10 min without a block = failed.
+    The reboot gate waits while fetching or sending (`zb_ota_busy`)
+  - Every Query Next Image is also taken from the raw frame (`ezb_zcl_raw_command_handler`,
+    returns false so the stack still answers it): what the device runs, whether or not an image
+    is offered. **Ask** = an Image Notify with only a jitter, so an always-on device answers
+  - Offers (`zb_ota_offer`): newer file version + URL + sha512 + notes, persisted with the
+    device, dropped once it runs that version or newer. Install = stage from the offer, start
+    by itself once staged
+  - API: `GET /api/zb/ota` (state, progress, error), `POST /api/zb/ota` with `action` stage /
+    start / cancel / ask / offer / install (one handler pair: ~48 of 56 URI slots used). Card:
+    offer + **Install**, progress
+  - Home Assistant: an `update` entity "Firmware" per device with an OTA client, listed once its
+    version is known (ESPHome ListEntitiesUpdate 116 / UpdateState 117 / UpdateCommand 118:
+    install → `zb_ota_install`, check → asks HA for the index check, below). Versions as the
+    decimal OTA file version (HA compares them as numbers; the index lists them that way);
+    title = make + model, release notes = the offer's. `HA_MAX_ENT` 384 → 416
+  - `ha_app/check_ota.sh` in the HA app (moved from `tools/` to the root, user 2026-11-18):
+    Koenkk/zigbee-OTA `index.json` against `/api/zb`, matched as Zigbee2MQTT does
+    (zigbee-herdsman `findMatchingOtaImage`: manufacturer code + image type, min/max file
+    version, modelId, manufacturerName), highest version offered; never installs
+  - **When to check is HA's** (user's choice of "option A", 2026-11-18; the app's own 6 h timer
+    is gone, app 1.2.0): HA's native "Controlla aggiornamenti" sends CHECK to each Firmware
+    entity; the hub, which has no index, answers as an ESPHome device whose update source is
+    elsewhere: it sends HA a HomeassistantActionRequest (35, to the client that subscribed
+    with 34) `hassio.addon_stdin` {addon `local_zigbee_hub`, input `check`}, once per minute
+    (HA sends one CHECK per entity); the app reads "check" from stdin (`stdin: true`) and runs
+    the checker. Needs the ESPHome entry option `allow_service_calls` (set through the options
+    flow). HA never calls an ESPHome update entity's check by itself (`should_poll` False in
+    `esphome/entity.py`; 0 CHECKs in 70 min), unlike the marketplace integration, which has
+    its own 6 h timers: hence the automation `zigbee_controlla_aggiornamenti`
+    (`automation.zigbee_controlla_aggiornamenti_firmware`, `automations.yaml`, every 6 h at :00,
+    `homeassistant.update_entity` on `integration_entities('esphome')` update entities). The
+    device-version ask on CHECK was dropped (versions are kept current by the hub itself)
+  - library notes: esp-zigbee-lib is closed source; how the server behaves came from Espressif's
+    `examples/ota_upgrade/ota_server` and another project using the same calls (raw handler for
+    the query, START gate with `NO_IMAGE_AVAILABLE`, finish times 0)
+- [x] **S60ZBTPF update found, checked without installing** (2026-11-18): asked → Query Next
+      Image: manufacturer 0x1286, image type **0x000b**, file 0x00001002. Its own query right
+      after a hub restart said 0xFFFF (the wildcard) and the ImageTypeID read 40 s after boot
+      0xFFFF too, and both overwrote the real type: fixed, 0xFFFF never replaces a known type.
+      Index: `SN-TLSR8656-S60-01-v2.1.3.ota`, 0x1286 / 11 / file 8451 (0x2103), 148864 bytes, header
+      string "Telink OTA Sample Usage"; added to the index as "SONOFF S60ZBTPF\S60ZBTPG", and
+      S60ZBTPF owners report updating from 1.0.2 with Zigbee2MQTT (eWeLink forum). The checker
+      (run here, then in the HA app, v1.1.0 on the HAOS VM) offered it; aioesphomeapi and HA show
+      the update entity on, installed 4098, latest 8451, title "SONOFF S60ZBTPF", features
+      install + progress + release notes (HA serves the notes through `update/release_notes`, its
+      `release_summary` attribute stays null). Renamed to `update.bike_firmware` (the user's
+      scheme: `sensor.bike_potenza`…). Door/Keys reported later (manufacturer 0x1286, file
+      268645895 = 0x10030007, ImageTypeID 0xFFFF; nothing in the index) and were renamed
+      `update.door_firmware`, `update.keys_firmware`. Internal heap after it: 64.7 KB free,
+      lowest 24.6 KB (26.1 KB before)
+- [x] **The check path, end to end** (2026-11-18): Bike offer cleared on the hub → HA
+      `update.bike_firmware` off (latest 4098) → `homeassistant.update_entity` (what the native
+      button calls) → hub log "asked to have local_zigbee_hub check the OTA index" → app
+      "[check_ota] … offered a4c13811bfebffff file 8451" → HA on, latest 8451, within 15 s. The
+      automation, triggered by hand: same path (hub log at the same second, app ran, 0 new
+      offers)
+- [x] **First device update: the S60ZBTPF, 1.0.2 → 2.1.3** (2026-11-18, Install pressed by the
+      user in HA): fetched, sha512 + header ok and staged in 2 s, image notify sent at 10:36:32.
+      **The plug didn't ask** after that notify (payload type 3: manufacturer, image type,
+      version); a jitter-only notify (type 0, the "ask") at 10:37:25 → its Query Next Image 64 ms
+      later, admitted, 0x1002 → 0x2103. Transfer 148864 bytes in 408 s (~10 % per 40 s), Upgrade
+      End success, restart; 60 s later version read: app 17, date 20260907, build "2.1.3", file
+      8451; offer dropped; its next query (file 0x2103) got nothing. Online and on throughout the
+      check. Fix: the offer's notify is jitter-only too (type 3 answered 0 of 1, type 0 4 of 4;
+      one type-3 frame lost by chance can't be ruled out). That fix is installed, not exercised
+      by a real offer yet
 - [x] **Network map drawn** (2026-11-17): SVG, hub in the middle, every device around it; a line
       per direct link from the neighbour table, coloured by LQI, dashed for sleepy end devices;
       square = router, circle = end device; devices not in the table sit unlinked ("route
@@ -1802,7 +1903,7 @@ connect sequence).
     switched off → its entities unknown (the protocol has no per-entity unavailable). **Auto
     discovery cannot be tested yet** (see mDNS above)
 - [x] **The hub's UI inside Home Assistant** (2026-11-17, for networks that reach HA but not the
-      tailnet): local HA app `local_zigbee_hub` (`tools/ha_app/`, installed in
+      tailnet): local HA app `local_zigbee_hub` (`ha_app/`, installed in
       `/mnt/data/supervisor/apps/local/zigbee_hub` on the HAOS VM), Alpine 3.24 + nginx 1.30.6
       reverse proxy to the hub's tailnet IP on Ingress port 8099 (`allow 172.30.32.2; deny all`),
       shown as a sidebar panel ("Zigbee Hub", `mdi:zigbee`, `panel_admin: false`).
@@ -1814,7 +1915,7 @@ connect sequence).
   - **Header limit**: `esp_http_server`'s `CONFIG_HTTPD_MAX_REQ_HDR_LEN` is 1024 B; browser
     requests through HA Ingress carry Authentik + `ingress_session` cookies, `User-Agent`, `Sec-*`
     and Supervisor's `X-Remote-User-*` / `X-Ingress-Path` headers and hit `431 Header fields are
-    too long`. Fixed in `tools/ha_app/run.sh`: `proxy_pass_request_headers off`, forwarding only
+    too long`. Fixed in `ha_app/run.sh`: `proxy_pass_request_headers off`, forwarding only
     the headers the hub uses (`Host`, `If-None-Match`, `X-Hub`, `hub_session` cookie if present,
     `Content-Type`, `Content-Length`, and WebSocket upgrade headers)
   - verified: direct HTTP + WebSocket over the tailnet (`200` on all assets and APIs, `zb` +

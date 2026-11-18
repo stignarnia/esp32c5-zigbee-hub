@@ -85,7 +85,14 @@ enum { MSG_HELLO_REQ = 1, MSG_HELLO_RSP = 2, MSG_AUTH_REQ = 3, MSG_DISC_REQ = 5,
        MSG_LIST_DONE = 19, MSG_SUBSCRIBE_STATES = 20, MSG_LIST_BINARY = 12, MSG_LIST_SENSOR = 16,
        MSG_LIST_SWITCH = 17, MSG_LIST_TEXT = 18, MSG_LIST_BUTTON = 61, MSG_LIST_EVENT = 107,
        MSG_ST_BINARY = 21, MSG_ST_SENSOR = 25, MSG_ST_SWITCH = 26, MSG_ST_TEXT = 27, MSG_EVENT = 108,
-       MSG_SWITCH_CMD = 33, MSG_BUTTON_CMD = 62, MSG_CAPS_REQ = 149, MSG_CAPS_RSP = 150 };
+       MSG_SWITCH_CMD = 33, MSG_BUTTON_CMD = 62, MSG_CAPS_REQ = 149, MSG_CAPS_RSP = 150,
+       MSG_LIST_UPDATE = 116, MSG_ST_UPDATE = 117, MSG_UPDATE_CMD = 118, MSG_SUBSCRIBE_ACTIONS = 34,
+       MSG_ACTION_REQ = 35 };
+
+// The Home Assistant app that checks the OTA index for the Zigbee devices (ha_app/): asked
+// through Home Assistant, which writes "check" to the app's stdin
+#define OTA_CHECK_APP      "local_zigbee_hub"
+#define OTA_CHECK_EVERY_US (60LL * 1000000)  // one check per press: HA sends one command per entity
 
 // CS_HELLO_OUT: a connection the hub dialed; its server hello is already sent
 typedef enum { CS_FREE = 0, CS_HELLO, CS_HELLO_OUT, CS_HANDSHAKE, CS_DATA } cstate_t;
@@ -95,6 +102,7 @@ typedef struct {
     int fd;
     uint8_t state;
     bool subscribed;
+    bool actions;                 // takes action requests from the hub (SubscribeHomeassistantServices)
     bool target;                  // declared itself a dial-back target
     bool dialed;                  // the hub opened this connection
     size_t rx_len;
@@ -116,6 +124,7 @@ typedef struct {
     ha_state_t cur[HA_MAX_ENT];
     uint32_t zrev, arev;
     int64_t next_poll_us, next_slow_us, pending_us;
+    int64_t ota_check_us;         // last "check the OTA index" asked of Home Assistant
     bool slow_now;
     uint8_t dec[RX_CAP];          // decrypted incoming payload
     uint8_t msg[4 + MSG_CAP];     // header room + protobuf
@@ -384,6 +393,14 @@ static bool list_entity(srv_t *S, client_t *c, const ha_ent_t *e)
         for (int t = 0; t < e->n_types; t++) pb_str(&w, 9, e->types[t]);
         pb_varint(&w, 10, e->device_id);
         break;
+    case ET_UPDATE:
+        type = MSG_LIST_UPDATE;
+        pb_str(&w, 5, e->icon);
+        pb_bool(&w, 6, e->disabled);
+        pb_varint(&w, 7, e->category);
+        pb_str(&w, 8, e->device_class);
+        pb_varint(&w, 9, e->device_id);
+        break;
     default:
         return true;
     }
@@ -399,6 +416,8 @@ static uint32_t state_hash(const ha_state_t *st)
     p = (const uint8_t *)&st->f;
     for (int i = 0; i < 4; i++) h = (h ^ p[i]) * 16777619u;
     for (const char *s = st->text; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
+    h = (h ^ '|') * 16777619u;
+    for (const char *s = st->text2; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
     return h;
 }
 
@@ -427,6 +446,27 @@ static bool send_state(srv_t *S, client_t *c, const ha_ent_t *e, const ha_state_
         pb_bool(&w, 3, st->missing);
         pb_varint(&w, 4, e->device_id);
         return out_msg(S, c, MSG_ST_TEXT, &w);
+    case ET_UPDATE: {
+        pb_bool(&w, 2, st->missing);
+        pb_bool(&w, 3, st->b);
+        pb_bool(&w, 4, st->b && st->f >= 0);
+        if (st->b && st->f >= 0) pb_float(&w, 5, st->f);
+        pb_str(&w, 6, st->text);
+        pb_str(&w, 7, st->text2);
+        // Title (make and model) and the offer's release notes, from the device as last read.
+        // The notes change only with the offered version, which is in the state hash
+        for (int i = 0; i < S->in.n_zb; i++) {
+            const zb_dev_info_t *d = &S->in.zb[i];
+            if (strcmp(d->ieee, e->ref) != 0) continue;
+            char title[68];
+            snprintf(title, sizeof(title), "%s %s", d->manuf, d->model);
+            pb_str(&w, 8, title);
+            if (strcmp(st->text, st->text2) != 0) pb_str(&w, 9, d->offer_notes);
+            break;
+        }
+        pb_varint(&w, 11, e->device_id);
+        return out_msg(S, c, MSG_ST_UPDATE, &w);
+    }
     default:
         return true;  // buttons and events have no state
     }
@@ -518,6 +558,33 @@ static void remember_target(client_t *c)
     else ESP_LOGW(TAG, "dial-back address %s not saved: %s", c->peer, esp_err_to_name(err));
 }
 
+// "Check for updates" on a Firmware entity: the hub has no OTA index, the app does. Asks
+// Home Assistant (the client that sent it) to write "check" to the app's stdin; the app then
+// reads the versions from the hub, checks the index and leaves offers here. Home Assistant
+// sends one command per entity: one request per OTA_CHECK_EVERY_US.
+static void request_ota_check(srv_t *S, client_t *c)
+{
+    int64_t now = esp_timer_get_time();
+    if (S->ota_check_us && now - S->ota_check_us < OTA_CHECK_EVERY_US) return;
+    if (!c->actions) {
+        ESP_LOGW(TAG, "%s: OTA index check not requested: the client takes no actions from the hub", c->info);
+        return;
+    }
+    S->ota_check_us = now;
+    pb_w_t w = msg_begin(S);
+    pb_str(&w, 1, "hassio.addon_stdin");
+    static const char *const KV[][2] = {{"addon", OTA_CHECK_APP}, {"input", "check"}};
+    for (size_t i = 0; i < sizeof(KV) / sizeof(KV[0]); i++) {
+        uint8_t buf[48];
+        pb_w_t m = {.buf = buf, .cap = sizeof(buf)};
+        pb_str(&m, 1, KV[i][0]);
+        pb_str(&m, 2, KV[i][1]);
+        pb_bytes(&w, 2, buf, m.len);
+    }
+    if (out_msg(S, c, MSG_ACTION_REQ, &w)) out_flush(S, c);
+    ESP_LOGI(TAG, "%s: asked to have %s check the OTA index", c->info, OTA_CHECK_APP);
+}
+
 static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *p, size_t n)
 {
     switch (type) {
@@ -579,6 +646,9 @@ static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *
         }
         out_empty(S, c, MSG_LIST_DONE);
         break;
+    case MSG_SUBSCRIBE_ACTIONS:
+        c->actions = true;
+        break;
     case MSG_SUBSCRIBE_STATES:
         c->subscribed = true;
         memset(c->sent_ok, 0, sizeof(c->sent_ok));
@@ -606,6 +676,25 @@ static void handle_message(srv_t *S, client_t *c, uint16_t type, const uint8_t *
             ESP_LOGI(TAG, "%s: permit join for %d s", c->info, PERMIT_S);
             zb_permit_join(PERMIT_S);
             S->next_poll_us = 0;
+        }
+        break;
+    }
+    case MSG_UPDATE_CMD: {
+        // key (1), command (2): 1 = install, 2 = check
+        pb_r_t r = {p, p + n};
+        pb_field_t f;
+        uint32_t key = 0, cmd = 0;
+        while (pb_next(&r, &f)) {
+            if (f.field == 1 && f.wire == 5) key = (uint32_t)f.v;
+            if (f.field == 2 && f.wire == 0) cmd = (uint32_t)f.v;
+        }
+        const ha_ent_t *e = ent_by_key(S, key);
+        if (e && e->val == V_ZB_FW && cmd == 1) {
+            esp_err_t err = zb_ota_install(e->ref);
+            ESP_LOGI(TAG, "%s: install firmware on %s (%s)", c->info, e->ref, esp_err_to_name(err));
+            S->next_poll_us = 0;
+        } else if (e && e->val == V_ZB_FW && cmd == 2) {
+            request_ota_check(S, c);
         }
         break;
     }

@@ -213,8 +213,9 @@ static void log_boot_summary(void)
 }
 
 // Wi-Fi watchdog's last resort (a reboot after a long outage) waits for a safe moment:
-// nothing pairing, no device mid-interview, no firmware upload being written, no script
-// running, no script timer or cron job due within 2 min, no buzzer pattern playing.
+// nothing pairing, no device mid-interview, no device firmware being fetched or sent, no
+// firmware upload being written, no script running, no script timer or cron job due
+// within 2 min, no buzzer pattern playing.
 // Asked every second while the reboot is due; the registry, script state and named
 // script timers are saved before saying yes.
 static bool reboot_gate(void)
@@ -222,6 +223,7 @@ static bool reboot_gate(void)
     static const char *last;
     const char *why = zb_permit_left() > 0 ? "pairing window open"
                     : zb_interviewing()    ? "a device is being interviewed"
+                    : zb_ota_busy()        ? "a device firmware update is running"
                     : hubsys_ota_in_progress() ? "firmware upload in progress"
                     : automation_reboot_blocker();
     if (why) {

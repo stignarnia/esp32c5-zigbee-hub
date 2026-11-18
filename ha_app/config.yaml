@@ -1,7 +1,7 @@
 name: Zigbee Hub
-version: "1.0.0"
+version: "1.2.0"
 slug: zigbee_hub
-description: Reverse proxy to the ESP32-C5 Zigbee Hub web UI over Tailscale
+description: The ESP32-C5 Zigbee Hub's web UI over Tailscale, and firmware update checks for its devices
 arch:
   - amd64
   - aarch64
@@ -14,7 +14,10 @@ ingress_stream: true
 panel_icon: mdi:zigbee
 panel_title: Zigbee Hub
 panel_admin: false
+stdin: true
 options:
   upstream: "100.76.61.43:80"
+  ota_index: "https://raw.githubusercontent.com/Koenkk/zigbee-OTA/master/index.json"
 schema:
   upstream: "match(^[A-Za-z0-9._-]+(:[0-9]{1,5})?$)"
+  ota_index: url

@@ -216,8 +216,12 @@ static esp_err_t register_hub_endpoint(void)
     ezb_zcl_time_cluster_desc_add_attr(tcl, EZB_ZCL_ATTR_TIME_DST_SHIFT_ID, &zero32);
     ezb_zcl_time_cluster_desc_add_attr(tcl, EZB_ZCL_ATTR_TIME_LOCAL_TIME_ID, &invalid);
     ezb_af_endpoint_add_cluster_desc(ep, tcl);
+    // OTA Upgrade server: device firmware updates (zb_ota.c). One image at a time.
+    ezb_zcl_ota_upgrade_cluster_server_config_t ocfg = {.ota_upgrade_file_table_size = 1};
+    ezb_af_endpoint_add_cluster_desc(ep, ezb_zcl_ota_upgrade_create_cluster_desc(&ocfg, EZB_ZCL_CLUSTER_SERVER));
     esp_err_t err = esp_zigbee_err_to_esp(ezb_af_device_add_endpoint_desc(dev, ep));
     if (err == ESP_OK) ezb_zcl_core_action_handler_register(zb_dev_on_zcl);
+    if (err == ESP_OK) ezb_zcl_raw_command_handler_register(zb_ota_on_raw);
     if (err == ESP_OK) err = esp_zigbee_err_to_esp(ezb_af_device_desc_register(dev));
     if (err == ESP_OK) {
         ezb_zcl_time_interface_t ti = {.get_utc_time = zcl_utc_now, .set_utc_time = zcl_utc_set};
@@ -399,6 +403,7 @@ static void tick_on_zb_task(void *arg)
     net_adopt();
     time_update();
     zb_dev_tick(arg);
+    zb_ota_tick();
 }
 
 static void tick_cb(TimerHandle_t t)
@@ -409,6 +414,7 @@ static void tick_cb(TimerHandle_t t)
 esp_err_t zb_start(void)
 {
     esp_err_t e = zb_dev_init();
+    if (e == ESP_OK) e = zb_ota_init();
     if (e != ESP_OK) return e;
     TimerHandle_t t = xTimerCreate("zb_tick", pdMS_TO_TICKS(1000), pdTRUE, NULL, tick_cb);
     if (!t || xTimerStart(t, 0) != pdPASS) return ESP_ERR_NO_MEM;

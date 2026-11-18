@@ -115,7 +115,29 @@ typedef struct {
     // On/Off state read back after a command (the report can be lost): when, 0 = none
     int64_t onoff_read_us[2];
     uint8_t onoff_ep;
+    // Firmware version, read once per boot (ver_ok: VER_* answered); the values persist.
+    // Basic: app/HW version, date code, SW build ID. The device's OTA client cluster:
+    // current file version, manufacturer code, image type (what an OTA index matches).
+    uint8_t ver_ok;
+    uint8_t ver_tries;
+    int64_t ver_at_us;
+    uint8_t app_ver;  bool has_app_ver;
+    uint8_t hw_ver;   bool has_hw_ver;
+    char date_code[17], sw_build[17];
+    uint32_t ota_file_ver; bool has_ota_file_ver;
+    uint16_t ota_manuf;    bool has_ota_manuf;
+    uint16_t ota_image;    bool has_ota_image;
+    int64_t query_us;            // last Query Next Image from it, 0 = none since boot
+    // Newer firmware for it, left by whoever checks an OTA index (Home Assistant); persisted.
+    // Dropped once the device runs that version or newer.
+    uint32_t offer_ver;    bool has_offer;
+    char offer_url[200], offer_sha[129], offer_notes[128];
 } zdev_t;
+
+enum { VER_BASIC = 1 << 0, VER_OTA = 1 << 1 };
+#define VER_RETRY_US  (20LL * 1000000)   // always-on devices: between attempts
+#define VER_WAKE_US   (30LL * 1000000)   // sleepy devices: at most one attempt per this, when heard
+#define VER_TRIES     5
 
 static zdev_t *s_dev;                    // PSRAM, ZB_MAX_DEVICES
 static SemaphoreHandle_t s_mtx;
@@ -549,6 +571,63 @@ static void initial_read(zdev_t *d)
     }
 }
 
+static bool ota_client_ep(const zdev_t *d, uint8_t *ep_out)
+{
+    for (int e = 0; e < d->n_ep; e++) {
+        for (int c = 0; c < d->ep[e].n_out; c++) {
+            if (d->ep[e].out[c] == EZB_ZCL_CLUSTER_ID_OTA_UPGRADE) {
+                *ep_out = d->ep[e].id;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// An offer the device has caught up with (updated here or elsewhere) is dropped.
+static void offer_check(zdev_t *d)
+{
+    if (d->has_offer && d->has_ota_file_ver && d->ota_file_ver >= d->offer_ver) {
+        ESP_LOGI(TAG, "0x%04x: runs file %" PRIu32 ", offer of %" PRIu32 " dropped", d->short_addr, d->ota_file_ver,
+                 d->offer_ver);
+        d->has_offer = false;
+        s_dirty = true;
+    }
+}
+
+static uint8_t ver_want(const zdev_t *d)
+{
+    uint8_t ep;
+    return VER_BASIC | (ota_client_ep(d, &ep) ? VER_OTA : 0);
+}
+
+// Reads whatever firmware version information is still missing this boot. Always-on
+// devices are asked from the tick; sleepy ones when heard from (awake for a moment).
+static void ver_read(zdev_t *d, int64_t now)
+{
+    uint8_t miss = ver_want(d) & ~d->ver_ok;
+    if (!miss || !complete(d) || d->ver_tries >= VER_TRIES || now < d->ver_at_us) return;
+    d->ver_tries++;
+    d->ver_at_us = now + ((d->cap & 0x08) ? VER_RETRY_US : VER_WAKE_US);
+    if (miss & VER_BASIC) {
+        static uint16_t attrs[] = {0x0001, 0x0003, 0x0006, 0x4000};
+        ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, first_ep(d), EZB_ZCL_CLUSTER_ID_BASIC),
+                                     .payload = {.attr_number = 4, .attr_field = attrs}};
+        ezb_zcl_read_attr_cmd_req(&r);
+    }
+    uint8_t ep;
+    if ((miss & VER_OTA) && ota_client_ep(d, &ep)) {
+        // client-side attributes: the request goes server -> client
+        static uint16_t attrs[] = {0x0002, 0x0007, 0x0008};
+        ezb_zcl_read_attr_cmd_t r = {.cmd_ctrl = ctrl_to(d, ep, EZB_ZCL_CLUSTER_ID_OTA_UPGRADE),
+                                     .payload = {.attr_number = 3, .attr_field = attrs}};
+        r.cmd_ctrl.fc.direction = 1;
+        ezb_zcl_read_attr_cmd_req(&r);
+    }
+    ESP_LOGI(TAG, "0x%04x %s: firmware version read (missing 0x%x, try %d)", d->short_addr,
+             d->name[0] ? d->name : d->model, miss, d->ver_tries);
+}
+
 // Sends whatever the interview still needs. Called on announce, on every retry tick,
 // and when a device that fell asleep mid-interview is heard from again.
 static void interview_step(zdev_t *d)
@@ -615,6 +694,8 @@ static void heard(zdev_t *d, int8_t rssi)
         d->tries = 0;
         interview_step(d);
     }
+    if (!(d->cap & 0x08)) ver_read(d, d->last_seen_us);
+    zb_ota_heard(d->short_addr);
 }
 
 // ---- interview: responses --------------------------------------------------------------
@@ -691,6 +772,24 @@ static void apply_attr(zdev_t *d, uint16_t cluster, uint16_t attr, uint8_t type,
         if (attr == 0x0004 && type == EZB_ZCL_ATTR_TYPE_STRING) zcl_string(d->manuf, sizeof(d->manuf), v);
         else if (attr == 0x0005 && type == EZB_ZCL_ATTR_TYPE_STRING) zcl_string(d->model, sizeof(d->model), v);
         else if (attr == 0x0007) d->power_src = *(const uint8_t *)v;
+        else if (attr == 0x0001) { d->app_ver = *(const uint8_t *)v; d->has_app_ver = true; }
+        else if (attr == 0x0003) { d->hw_ver = *(const uint8_t *)v; d->has_hw_ver = true; }
+        else if (attr == 0x0006 && type == EZB_ZCL_ATTR_TYPE_STRING) zcl_string(d->date_code, sizeof(d->date_code), v);
+        else if (attr == 0x4000 && type == EZB_ZCL_ATTR_TYPE_STRING) zcl_string(d->sw_build, sizeof(d->sw_build), v);
+        break;
+    case EZB_ZCL_CLUSTER_ID_OTA_UPGRADE:
+        if (attr == 0x0002) { memcpy(&d->ota_file_ver, v, 4); d->has_ota_file_ver = d->ota_file_ver != 0xFFFFFFFF; }
+        else if (attr == 0x0007) { memcpy(&d->ota_manuf, v, 2); d->has_ota_manuf = true; }
+        else if (attr == 0x0008) {
+            // Some devices leave ImageTypeID at 0xFFFF ("unset") while their Query Next Image
+            // carries the real type: never let the placeholder replace a known type
+            uint16_t t;
+            memcpy(&t, v, 2);
+            if (t != 0xFFFF || !d->has_ota_image) {
+                d->ota_image = t;
+                d->has_ota_image = t != 0xFFFF;
+            }
+        }
         break;
     case EZB_ZCL_CLUSTER_ID_POWER_CONFIG:
         if (attr == 0x0021) { d->batt = *(const uint8_t *)v; d->has_batt = true; }
@@ -761,6 +860,10 @@ static zdev_t *from_header(const ezb_zcl_cmd_hdr_t *h)
 
 void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
 {
+    if (id == EZB_ZCL_CORE_OTA_UPGRADE_SERVER_PROGRESS_CB_ID) {
+        zb_ota_on_server_progress(message);  // takes the registry lock itself when it needs it
+        return;
+    }
     LOCK();
     switch (id) {
     case EZB_ZCL_CORE_READ_ATTR_RSP_CB_ID: {
@@ -771,8 +874,25 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
         live_of(d, &before);
         heard(d, m->in.header->rssi);
         uint16_t cl = m->info.cluster_id;
+        bool ver_rsp = false;
         for (ezb_zcl_read_attr_rsp_variable_t *v = m->in.variables; v; v = v->next) {
             if (v->status == EZB_ZCL_STATUS_SUCCESS) apply_attr(d, cl, v->attr_id, v->attr_type, v->attr_value);
+            if ((cl == EZB_ZCL_CLUSTER_ID_BASIC && v->attr_id == 0x4000) || cl == EZB_ZCL_CLUSTER_ID_OTA_UPGRADE) {
+                ver_rsp = true;
+                if (v->status != EZB_ZCL_STATUS_SUCCESS) {
+                    ESP_LOGI(TAG, "0x%04x: cluster 0x%04x attr 0x%04x: status 0x%02x", d->short_addr, cl, v->attr_id,
+                             v->status);
+                }
+            }
+        }
+        if (ver_rsp) {
+            d->ver_ok |= cl == EZB_ZCL_CLUSTER_ID_BASIC ? VER_BASIC : VER_OTA;
+            offer_check(d);
+            ESP_LOGI(TAG, "0x%04x %s: firmware app %d hw %d date '%s' build '%s', OTA file 0x%08" PRIx32
+                     " manuf 0x%04x image 0x%04x", d->short_addr, d->name[0] ? d->name : d->model,
+                     d->has_app_ver ? d->app_ver : -1, d->has_hw_ver ? d->hw_ver : -1, d->date_code, d->sw_build,
+                     d->has_ota_file_ver ? d->ota_file_ver : 0xFFFFFFFF, d->has_ota_manuf ? d->ota_manuf : 0xFFFF,
+                     d->has_ota_image ? d->ota_image : 0xFFFF);
         }
         if (cl == EZB_ZCL_CLUSTER_ID_BASIC && !(d->done & IV_BASIC)) {
             d->done |= IV_BASIC;
@@ -869,8 +989,16 @@ void zb_dev_on_zcl(ezb_zcl_core_action_callback_id_t id, void *message)
         m->out.result = EZB_ZCL_STATUS_SUCCESS;
         break;
     }
-    case EZB_ZCL_CORE_DEFAULT_RSP_CB_ID:
+    case EZB_ZCL_CORE_DEFAULT_RSP_CB_ID: {
+        ezb_zcl_cmd_default_rsp_message_t *m = message;
+        zdev_t *d = from_header(m->in.header);
+        if (!d || m->info.cluster_id != EZB_ZCL_CLUSTER_ID_OTA_UPGRADE || m->in.status_code == EZB_ZCL_STATUS_SUCCESS) break;
+        // A refused read of the OTA client attributes: don't ask again this boot
+        d->ver_ok |= VER_OTA;
+        ESP_LOGI(TAG, "0x%04x: OTA cluster command 0x%02x refused, status 0x%02x", d->short_addr, m->in.rsp_to_cmd,
+                 m->in.status_code);
         break;
+    }
     default:
         ESP_LOGD(TAG, "zcl action 0x%04" PRIx32, (uint32_t)id);
         break;
@@ -929,6 +1057,10 @@ static zdev_t *adopt(uint16_t short_addr, uint64_t ieee, uint8_t capability, con
     d->last_seen_us = esp_timer_get_time();  // not heard(): the interview starts below
     d->pings = 0;
     d->offline = false;
+    // re-paired or rejoined: it may run other firmware now
+    d->ver_ok = 0;
+    d->ver_tries = 0;
+    d->ver_at_us = 0;
     ESP_LOGI(TAG, "%s 0x%016llx short 0x%04x cap 0x%02x%s (%s)", fresh ? "NEW device" : "rejoined",
              (unsigned long long)ieee, short_addr, capability, (capability & 0x08) ? "" : " (sleepy)", how);
     if (!complete(d)) {
@@ -957,6 +1089,11 @@ void zb_dev_on_joined(uint16_t short_addr, uint64_t ieee, uint8_t capability)
     LOCK();
     unforget(ieee);
     zdev_t *d = by_ieee(ieee);
+    if (d) {
+        d->ver_ok = 0;  // rejoined: it may run other firmware now
+        d->ver_tries = 0;
+        d->ver_at_us = 0;
+    }
     if (!d) {
         adopt(short_addr, ieee, capability, "join");
     } else if (d->short_addr != short_addr) {
@@ -1071,6 +1208,7 @@ void zb_dev_tick(void *arg)
                     }
                 }
             }
+            if ((d->cap & 0x08) && !d->offline) ver_read(d, now);
             uint8_t miss;
             if (complete(d) && (d->cap & 0x08) && !d->offline && d->rep_retry_us && now >= d->rep_retry_us &&
                 (miss = rep_missing(d))) {
@@ -1134,6 +1272,31 @@ static cJSON *dev_to_json(const zdev_t *d, bool live)
         for (int c = 0; c < ep->n_out; c++) cJSON_AddItemToArray(out, cJSON_CreateNumber(ep->out[c]));
         cJSON_AddItemToArray(eps, j);
     }
+    cJSON *fw = cJSON_CreateObject();
+    if (d->has_app_ver) cJSON_AddNumberToObject(fw, "app", d->app_ver);
+    if (d->has_hw_ver) cJSON_AddNumberToObject(fw, "hw", d->hw_ver);
+    if (d->date_code[0]) cJSON_AddStringToObject(fw, "date", d->date_code);
+    if (d->sw_build[0]) cJSON_AddStringToObject(fw, "build", d->sw_build);
+    if (d->has_ota_file_ver) cJSON_AddNumberToObject(fw, "file_ver", d->ota_file_ver);
+    if (d->has_ota_manuf) cJSON_AddNumberToObject(fw, "manuf_code", d->ota_manuf);
+    if (d->has_ota_image) cJSON_AddNumberToObject(fw, "image_type", d->ota_image);
+    if (d->has_offer) {
+        cJSON *of = cJSON_AddObjectToObject(o, "offer");
+        cJSON_AddNumberToObject(of, "file_ver", d->offer_ver);
+        cJSON_AddStringToObject(of, "url", d->offer_url);
+        cJSON_AddStringToObject(of, "notes", d->offer_notes);
+        if (!live) cJSON_AddStringToObject(of, "sha512", d->offer_sha);
+    }
+    float pct;
+    if (live && zb_ota_device(hex, &pct)) {  // registry -> OTA lock order
+        cJSON *u = cJSON_AddObjectToObject(o, "updating");
+        if (pct >= 0) cJSON_AddNumberToObject(u, "progress", pct);
+    }
+    if (live && d->query_us) {
+        cJSON_AddNumberToObject(fw, "query_s", (double)((esp_timer_get_time() - d->query_us) / 1000000));
+    }
+    if (cJSON_GetArraySize(fw)) cJSON_AddItemToObject(o, "fw", fw);
+    else cJSON_Delete(fw);
     if (!live) {
         // Last known state (restored at boot; see zdev_t)
         cJSON *st = cJSON_AddObjectToObject(o, "state");
@@ -1348,6 +1511,30 @@ static void load(void)
         }
         const cJSON *on = cJSON_GetObjectItem(st, "on");
         if (cJSON_IsBool(on)) { d->on = cJSON_IsTrue(on); d->has_on = true; }
+        const cJSON *fw = cJSON_GetObjectItem(o, "fw");
+        const cJSON *fv;
+        if (cJSON_IsNumber(fv = cJSON_GetObjectItem(fw, "app"))) { d->app_ver = fv->valueint; d->has_app_ver = true; }
+        if (cJSON_IsNumber(fv = cJSON_GetObjectItem(fw, "hw"))) { d->hw_ver = fv->valueint; d->has_hw_ver = true; }
+        if (cJSON_IsString(fv = cJSON_GetObjectItem(fw, "date"))) strlcpy(d->date_code, fv->valuestring, sizeof(d->date_code));
+        if (cJSON_IsString(fv = cJSON_GetObjectItem(fw, "build"))) strlcpy(d->sw_build, fv->valuestring, sizeof(d->sw_build));
+        if (cJSON_IsNumber(fv = cJSON_GetObjectItem(fw, "file_ver"))) {
+            d->ota_file_ver = (uint32_t)fv->valuedouble;
+            d->has_ota_file_ver = true;
+        }
+        if (cJSON_IsNumber(fv = cJSON_GetObjectItem(fw, "manuf_code"))) { d->ota_manuf = fv->valueint; d->has_ota_manuf = true; }
+        if (cJSON_IsNumber(fv = cJSON_GetObjectItem(fw, "image_type"))) {
+            d->ota_image = fv->valueint;
+            d->has_ota_image = d->ota_image != 0xFFFF;
+        }
+        d->ver_at_us = 40LL * 1000000;  // after the reporting setup's first retry window
+        const cJSON *of = cJSON_GetObjectItem(o, "offer");
+        if (cJSON_IsNumber(fv = cJSON_GetObjectItem(of, "file_ver"))) {
+            d->offer_ver = (uint32_t)fv->valuedouble;
+            d->has_offer = true;
+            if (cJSON_IsString(fv = cJSON_GetObjectItem(of, "url"))) strlcpy(d->offer_url, fv->valuestring, sizeof(d->offer_url));
+            if (cJSON_IsString(fv = cJSON_GetObjectItem(of, "notes"))) strlcpy(d->offer_notes, fv->valuestring, sizeof(d->offer_notes));
+            if (cJSON_IsString(fv = cJSON_GetObjectItem(of, "sha512"))) strlcpy(d->offer_sha, fv->valuestring, sizeof(d->offer_sha));
+        }
         d->rep_retry_us = 30LL * 1000000;  // reporting setup confirmed again once the network is up
         count++;
     }
@@ -1426,6 +1613,11 @@ int zb_snapshot(zb_dev_info_t *out, int max)
         o->has_hum = d->has_hum;          o->hum = d->hum / 100.0f;
         o->has_on = d->has_on;            o->on = d->on;
         o->has_occ = d->has_occ;          o->occ = d->occ & 1;
+        uint8_t oep;
+        o->ota = ota_client_ep(d, &oep);
+        o->has_fw_ver = d->has_ota_file_ver; o->fw_ver = d->ota_file_ver;
+        o->has_offer = d->has_offer;      o->offer_ver = d->offer_ver;
+        strlcpy(o->offer_notes, d->has_offer ? d->offer_notes : "", sizeof(o->offer_notes));
     }
     UNLOCK();
     return n;
@@ -1571,4 +1763,100 @@ void zb_dev_onoff_sent(uint16_t short_addr, uint8_t ep)
         d->onoff_read_us[1] = now + 4000000;
     }
     UNLOCK();
+}
+
+// ---- for zb_ota.c ------------------------------------------------------------------------------
+
+bool zb_dev_ota_info(uint64_t ieee, uint16_t *short_addr, uint8_t *ota_ep, bool *sleepy, uint16_t *manuf,
+                     uint16_t *image_type, uint32_t *file_ver)
+{
+    LOCK();
+    zdev_t *d = by_ieee(ieee);
+    bool ok = d && ota_client_ep(d, ota_ep);
+    if (ok) {
+        *short_addr = d->short_addr;
+        *sleepy = !(d->cap & 0x08);
+        *manuf = d->has_ota_manuf ? d->ota_manuf : 0xFFFF;
+        *image_type = d->has_ota_image ? d->ota_image : 0xFFFF;
+        *file_ver = d->has_ota_file_ver ? d->ota_file_ver : 0xFFFFFFFF;
+    }
+    UNLOCK();
+    return ok;
+}
+
+// The query is what the device says it runs: it overrides the attributes read earlier
+// (some devices leave ImageTypeID at 0xFFFF).
+void zb_dev_ota_query(uint16_t short_addr, uint8_t ep, uint16_t manuf, uint16_t image_type, uint32_t file_ver)
+{
+    LOCK();
+    zdev_t *d = by_short(short_addr);
+    if (d) {
+        // 0xFFFF is the wildcard: a device may send it (seen right after the hub restarted)
+        // and the real type the next time; it never replaces a known type
+        if (image_type == 0xFFFF && d->has_ota_image) image_type = d->ota_image;
+        bool diff = !d->has_ota_manuf || d->ota_manuf != manuf || !d->has_ota_image || d->ota_image != image_type ||
+                    !d->has_ota_file_ver || d->ota_file_ver != file_ver;
+        d->ota_manuf = manuf;
+        d->has_ota_manuf = manuf != 0xFFFF;
+        d->ota_image = image_type;
+        d->has_ota_image = image_type != 0xFFFF;
+        d->ota_file_ver = file_ver;
+        d->has_ota_file_ver = file_ver != 0xFFFFFFFF;
+        d->query_us = esp_timer_get_time();
+        offer_check(d);
+        changed(diff);
+    }
+    UNLOCK();
+}
+
+void zb_dev_ota_done(uint16_t short_addr)
+{
+    LOCK();
+    zdev_t *d = by_short(short_addr);
+    if (d) {
+        d->ver_ok = 0;
+        d->ver_tries = 0;
+        d->ver_at_us = esp_timer_get_time() + 60LL * 1000000;  // after it has restarted
+        changed(false);
+    }
+    UNLOCK();
+}
+
+// url NULL: clears the offer
+esp_err_t zb_dev_set_offer(uint64_t ieee, uint32_t file_ver, const char *url, const char *sha512, const char *notes)
+{
+    LOCK();
+    zdev_t *d = by_ieee(ieee);
+    uint8_t ep;
+    esp_err_t err = !d ? ESP_ERR_NOT_FOUND : !ota_client_ep(d, &ep) ? ESP_ERR_NOT_SUPPORTED : ESP_OK;
+    if (err == ESP_OK && !url) {
+        d->has_offer = false;
+    } else if (err == ESP_OK) {
+        d->offer_ver = file_ver;
+        d->has_offer = true;
+        strlcpy(d->offer_url, url, sizeof(d->offer_url));
+        strlcpy(d->offer_sha, sha512, sizeof(d->offer_sha));
+        size_t o = 0;
+        for (size_t i = 0; notes && notes[i] && o < sizeof(d->offer_notes) - 1; i++) {
+            d->offer_notes[o++] = (unsigned char)notes[i] < 0x20 ? ' ' : notes[i];
+        }
+        d->offer_notes[o] = '\0';
+        offer_check(d);
+    }
+    if (err == ESP_OK) changed(true);
+    UNLOCK();
+    return err;
+}
+
+bool zb_dev_get_offer(uint64_t ieee, char *url, size_t url_cap, char *sha512, size_t sha_cap)
+{
+    LOCK();
+    zdev_t *d = by_ieee(ieee);
+    bool ok = d && d->has_offer;
+    if (ok) {
+        strlcpy(url, d->offer_url, url_cap);
+        strlcpy(sha512, d->offer_sha, sha_cap);
+    }
+    UNLOCK();
+    return ok;
 }

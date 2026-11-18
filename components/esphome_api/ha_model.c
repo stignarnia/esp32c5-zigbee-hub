@@ -139,6 +139,9 @@ void ha_model_build(ha_model_t *m, const ha_inputs_t *in)
         set(add(m, ET_BINARY, V_ZB_ONLINE, id, "Online"), "connectivity", NULL, 0, 0, DIAG, false);
         set(add(m, ET_SENSOR, V_ZB_RSSI, id, "Signal"), "signal_strength", "dBm", 0, MEAS, DIAG, true);
         set(add(m, ET_TEXT, V_ZB_SEEN, id, "Last seen"), "timestamp", NULL, 0, 0, DIAG, false);
+        // Installed vs offered OTA file version (zb_ota_offer); Install runs zb_ota_install.
+        // Listed once the installed version is known (a version "0" would read as up to date)
+        if (d->ota && d->has_fw_ver) set(add(m, ET_UPDATE, V_ZB_FW, id, "Firmware"), "firmware", NULL, 0, 0, 1, false);
         for (int k = first; k < m->n_ent; k++) strlcpy(m->ent[k].ref, d->ieee, sizeof(m->ent[k].ref));
     }
 
@@ -240,6 +243,18 @@ static void zb_state(const ha_ent_t *e, const zb_dev_info_t *d, const ha_state_t
     case V_ZB_VOLTS:    st->missing = !d->has_volt; st->f = d->volt; break;
     case V_ZB_AMPS:     st->missing = !d->has_curr; st->f = d->curr; break;
     case V_ZB_KWH:      st->missing = !d->has_energy; st->f = d->energy; break;
+    case V_ZB_FW: {
+        // Versions as the OTA file version in decimal, as OTA indexes list them; Home
+        // Assistant compares them as numbers
+        st->missing = !d->has_fw_ver;
+        snprintf(st->text, sizeof(st->text), "%lu", (unsigned long)d->fw_ver);
+        uint32_t latest = d->has_offer && d->offer_ver > d->fw_ver ? d->offer_ver : d->fw_ver;
+        snprintf(st->text2, sizeof(st->text2), "%lu", (unsigned long)latest);
+        float p;
+        st->b = zb_ota_device(d->ieee, &p);  // in progress
+        st->f = p;                           // %, -1 = not known
+        break;
+    }
     case V_ZB_ONLINE:   st->missing = false; st->b = d->available; break;
     case V_ZB_RSSI:     st->missing = d->rssi == 0; st->f = d->rssi; break;
     case V_ZB_SEEN:

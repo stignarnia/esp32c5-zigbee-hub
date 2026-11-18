@@ -2,6 +2,22 @@
 set -eu
 
 UPSTREAM="$(jq -r '.upstream // "100.76.61.43:80"' /data/options.json)"
+OTA_INDEX="$(jq -r '.ota_index // "https://raw.githubusercontent.com/Koenkk/zigbee-OTA/master/index.json"' /data/options.json)"
+
+# Firmware update checks for the hub's devices, on request only: Home Assistant writes "check"
+# to this app's stdin (hassio.addon_stdin) when the hub asks for it, i.e. on "Check for updates"
+# of a device's Firmware entity; when to check is decided in Home Assistant. Offers only;
+# installing is done from the update entity or the hub's UI. stdin is passed explicitly: a
+# background job's stdin is /dev/null otherwise.
+exec 3<&0
+(
+    while read -r line <&3; do
+        case "$line" in
+            *check*) /check_ota.sh "$UPSTREAM" "$OTA_INDEX" || true ;;
+            *) echo "[check_ota] ignored input: $line" ;;
+        esac
+    done
+) &
 
 cat > /etc/nginx/nginx.conf <<EOF
 daemon off;

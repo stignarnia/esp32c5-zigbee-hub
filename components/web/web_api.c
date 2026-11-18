@@ -689,6 +689,79 @@ static esp_err_t h_zb_reinterview(httpd_req_t *req)
     return web_send_json(req, "200 OK", "{\"ok\":true}");
 }
 
+static esp_err_t h_zb_ota_get(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    return send_cjson(req, zb_ota_json());
+}
+
+// {"action":"stage","ieee":…,"url":…,"sha512":…} | {"action":"start"} | {"action":"cancel"} |
+// {"action":"ask","ieee":…} | {"action":"offer","ieee":…,"file_ver":…,"url":…,"sha512":…,"notes":…} |
+// {"action":"offer","ieee":…,"clear":true} | {"action":"install","ieee":…}
+static esp_err_t h_zb_ota_post(httpd_req_t *req)
+{
+    if (!web_guard(req)) return ESP_OK;
+    char *body = malloc(768);
+    if (!body) return web_send_error(req, "500 Internal Server Error", "out of memory");
+    cJSON *j = web_read_body(req, body, 768) == ESP_OK ? cJSON_Parse(body) : NULL;
+    free(body);
+    const cJSON *action = cJSON_GetObjectItem(j, "action");
+    const char *a = cJSON_IsString(action) ? action->valuestring : "";
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    const char *msg = "action: stage, start, cancel, ask, offer or install";
+    if (strcmp(a, "stage") == 0) {
+        const cJSON *ieee = cJSON_GetObjectItem(j, "ieee"), *url = cJSON_GetObjectItem(j, "url"),
+                    *sha = cJSON_GetObjectItem(j, "sha512");
+        err = cJSON_IsString(ieee) && cJSON_IsString(url) && cJSON_IsString(sha)
+                  ? zb_ota_stage(ieee->valuestring, url->valuestring, sha->valuestring)
+                  : ESP_ERR_INVALID_ARG;
+        if (err == ESP_ERR_INVALID_ARG) msg = "ieee, url (https:// or LAN http://) and sha512 (128 hex digits) required";
+        else if (err == ESP_ERR_NOT_FOUND) msg = "no such device, or it has no OTA client";
+        else if (err == ESP_ERR_INVALID_STATE) msg = "another image is being fetched, offered or sent: cancel it first";
+    } else if (strcmp(a, "start") == 0) {
+        err = zb_ota_start();
+        if (err == ESP_ERR_INVALID_STATE) msg = "nothing staged, or Zigbee is down";
+        else if (err == ESP_ERR_NOT_FOUND) msg = "the device is gone";
+        else if (err == ESP_ERR_INVALID_RESPONSE) msg = "the device now reports another image type";
+    } else if (strcmp(a, "cancel") == 0) {
+        err = zb_ota_cancel();
+    } else if (strcmp(a, "offer") == 0) {
+        const cJSON *ieee = cJSON_GetObjectItem(j, "ieee"), *ver = cJSON_GetObjectItem(j, "file_ver"),
+                    *url = cJSON_GetObjectItem(j, "url"), *sha = cJSON_GetObjectItem(j, "sha512"),
+                    *notes = cJSON_GetObjectItem(j, "notes");
+        if (!cJSON_IsString(ieee)) err = ESP_ERR_INVALID_ARG;
+        else if (cJSON_IsTrue(cJSON_GetObjectItem(j, "clear"))) err = zb_ota_offer(ieee->valuestring, 0, NULL, NULL, NULL);
+        else if (cJSON_IsNumber(ver) && ver->valuedouble >= 0 && ver->valuedouble <= 0xFFFFFFFE && cJSON_IsString(url) &&
+                 cJSON_IsString(sha)) {
+            err = zb_ota_offer(ieee->valuestring, (uint32_t)ver->valuedouble, url->valuestring, sha->valuestring,
+                               cJSON_IsString(notes) ? notes->valuestring : "");
+        }
+        if (err == ESP_ERR_INVALID_ARG) msg = "ieee, file_ver, url (< 200 chars) and sha512 required, or ieee and clear";
+        else if (err == ESP_ERR_NOT_FOUND) msg = "no such device";
+        else if (err == ESP_ERR_NOT_SUPPORTED) msg = "the device has no OTA client";
+    } else if (strcmp(a, "install") == 0) {
+        const cJSON *ieee = cJSON_GetObjectItem(j, "ieee");
+        err = cJSON_IsString(ieee) ? zb_ota_install(ieee->valuestring) : ESP_ERR_INVALID_ARG;
+        if (err == ESP_ERR_INVALID_ARG) msg = "ieee required";
+        else if (err == ESP_ERR_NOT_FOUND) msg = "nothing offered for that device";
+        else if (err == ESP_ERR_INVALID_STATE) msg = "another image is being fetched, offered or sent";
+    } else if (strcmp(a, "ask") == 0) {
+        const cJSON *ieee = cJSON_GetObjectItem(j, "ieee");
+        err = cJSON_IsString(ieee) ? zb_ota_ask(ieee->valuestring) : ESP_ERR_INVALID_ARG;
+        if (err == ESP_ERR_INVALID_ARG) msg = "ieee required";
+        else if (err == ESP_ERR_NOT_FOUND) msg = "no such device, or it has no OTA client";
+        else if (err == ESP_ERR_NOT_SUPPORTED) msg = "a sleepy device can't be asked: it asks by itself";
+    }
+    cJSON_Delete(j);
+    if (err == ESP_OK) return send_cjson(req, zb_ota_json());
+    if (err == ESP_ERR_INVALID_ARG) return web_send_error(req, "400 Bad Request", msg);
+    if (err == ESP_ERR_NOT_FOUND) return web_send_error(req, "404 Not Found", msg);
+    if (err == ESP_ERR_INVALID_STATE || err == ESP_ERR_INVALID_RESPONSE || err == ESP_ERR_NOT_SUPPORTED) {
+        return web_send_error(req, "409 Conflict", msg);
+    }
+    return web_send_error(req, "500 Internal Server Error", esp_err_to_name(err));
+}
+
 static esp_err_t h_coredump(httpd_req_t *req)
 {
     if (!web_guard(req)) return ESP_OK;
@@ -753,6 +826,8 @@ esp_err_t api_register(httpd_handle_t server)
         {.uri = "/api/zb/remove", .method = HTTP_POST, .handler = h_zb_remove},
         {.uri = "/api/zb/reinterview", .method = HTTP_POST, .handler = h_zb_reinterview},
         {.uri = "/api/zb/set", .method = HTTP_POST, .handler = h_zb_set},
+        {.uri = "/api/zb/ota", .method = HTTP_GET, .handler = h_zb_ota_get},
+        {.uri = "/api/zb/ota", .method = HTTP_POST, .handler = h_zb_ota_post},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);

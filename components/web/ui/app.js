@@ -227,6 +227,7 @@ pages.devices = {
     el.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', () => this.remove(b.dataset.remove)));
     el.querySelectorAll('[data-reinterview]').forEach((b) => b.addEventListener('click', () => this.reinterview(b.dataset.reinterview)));
     el.querySelectorAll('[data-switch]').forEach((b) => b.addEventListener('click', () => this.setOn(b.dataset.switch, b.dataset.to === '1')));
+    el.querySelectorAll('[data-install]').forEach((b) => b.addEventListener('click', () => this.install(b.dataset.install)));
   },
   card(v) {
     const title = v.name || [v.manuf, v.model].filter(Boolean).join(' ') || `0x${v.short.toString(16).padStart(4, '0')}`;
@@ -259,6 +260,19 @@ pages.devices = {
     rows.push(['Last seen', v.seen_s < 0 ? 'not since boot' : v.seen_s < 5 ? 'just now' : `${dur(v.seen_s)} ago`]);
     rows.push(['Offline after', `${dur(v.timeout_s)} silent${v.sleepy ? '' : ' + 3 pings'}`]);
     rows.push(['Model', esc([v.manuf, v.model].filter(Boolean).join(' / ') || '—')]);
+    if (v.fw) {
+      const f = v.fw;
+      const hex = (n, w) => `0x${n.toString(16).padStart(w, '0')}`;
+      const parts = [f.build, f.file_ver !== undefined ? `file ${hex(f.file_ver, 8)}` : '', f.app !== undefined ? `app ${f.app}` : '', f.date].filter(Boolean);
+      const ota = f.manuf_code !== undefined && f.image_type !== undefined ? ` <span class="muted">(OTA ${hex(f.manuf_code, 4)} / ${hex(f.image_type, 4)})</span>` : '';
+      rows.push(['Firmware', esc(parts.join(' · ') || '—') + ota]);
+    }
+    if (v.updating) {
+      rows.push(['Update', `<span class="badge warn">${v.updating.progress !== undefined ? `sending ${v.updating.progress.toFixed(0)} %` : 'starting…'}</span>`]);
+    } else if (v.offer) {
+      const notes = v.offer.notes ? ` <span class="muted">${esc(v.offer.notes)}</span>` : '';
+      rows.push(['Update', `file ${v.offer.file_ver} available <button class="ghost small" data-install="${v.ieee}">Install</button>${notes}`]);
+    }
     rows.push(['IEEE', `<code>${esc(v.ieee)}</code>`]);
     rows.push(['Type', v.sleepy ? 'battery (sleepy)' : 'mains / router']);
     // Re-interview feedback: requested -> running -> done (shown 15 s).
@@ -301,6 +315,11 @@ pages.devices = {
     const v = this.data && this.data.devices.find((d) => d.ieee === ieee);
     this.switching[ieee] = { t: Date.now(), was: v ? v.on : undefined };
     try { await api('api/zb/set', { method: 'POST', json: { ieee, on } }); } catch (e) { delete this.switching[ieee]; alert(e.message); }
+    this.poll();
+  },
+  async install(ieee) {
+    if (!confirm('Install the new firmware on this device? It takes minutes (hours for a battery device); the device restarts at the end.')) return;
+    try { await api('api/zb/ota', { method: 'POST', json: { action: 'install', ieee } }); } catch (e) { alert(e.message); }
     this.poll();
   },
   async remove(ieee) {

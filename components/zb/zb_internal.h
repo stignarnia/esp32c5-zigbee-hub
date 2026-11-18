@@ -21,3 +21,21 @@ void zb_dev_forget(uint64_t ieee);
 void zb_dev_reinterview(uint64_t ieee);
 void zb_dev_onoff_sent(uint16_t short_addr, uint8_t ep);  // Zigbee task
 esp_err_t zb_dev_target(const char *device, uint16_t cluster, uint16_t *short_addr, uint8_t *ep);  // any task
+
+// zb_dev.c for zb_ota.c. Unknown manufacturer code / image type = 0xFFFF, file version
+// 0xFFFFFFFF. False: no such device, or it has no OTA client cluster. Any task.
+bool zb_dev_ota_info(uint64_t ieee, uint16_t *short_addr, uint8_t *ota_ep, bool *sleepy, uint16_t *manuf,
+                     uint16_t *image_type, uint32_t *file_ver);
+// What a device said it runs in its Query Next Image. Zigbee task.
+void zb_dev_ota_query(uint16_t short_addr, uint8_t ep, uint16_t manuf, uint16_t image_type, uint32_t file_ver);
+void zb_dev_ota_done(uint16_t short_addr);  // updated: read its version again once it's back. Zigbee task
+// Offers (persisted with the device). Any task.
+esp_err_t zb_dev_set_offer(uint64_t ieee, uint32_t file_ver, const char *url, const char *sha512, const char *notes);
+bool zb_dev_get_offer(uint64_t ieee, char *url, size_t url_cap, char *sha512, size_t sha_cap);
+
+// zb_ota.c (Zigbee task unless noted)
+esp_err_t zb_ota_init(void);                // before the stack starts. Any task
+bool zb_ota_on_raw(const ezb_zcl_raw_frame_t *f);
+void zb_ota_on_server_progress(ezb_zcl_ota_upgrade_server_progress_message_t *m);
+void zb_ota_heard(uint16_t short_addr);     // a device was heard from (registry lock may be held)
+void zb_ota_tick(void);                     // 1 s

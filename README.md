@@ -152,8 +152,8 @@ First the hub's own **Motion sensor** (Wi-Fi motion sensing: moving / not moving
 two calibration buttons), then every paired sensor with its live state: contact, motion,
 water leak, smoke, temperature, humidity and battery. Plugs show on/off with a **Turn on /
 Turn off** button, and those that measure it their power draw (W), voltage, current and energy
-(kWh). Each device shows signal strength, last seen and availability. Rename, re-interview or
-remove them.
+(kWh). Each device shows signal strength, last seen, availability and the firmware it runs.
+Rename, re-interview or remove them.
 
 The last known state of each sensor is kept across restarts, so a door that was
 open before a reboot still reads open after it.
@@ -180,6 +180,35 @@ the sensor checks in.
 New devices appear in the list as soon as they announce themselves, marked
 "interviewing" until the interview is done. Give it a name and it's ready, both in
 the Devices page and in your scripts (which refer to devices by that name).
+
+#### Updating a device's firmware
+
+The hub is the network's OTA Upgrade server. Each device's firmware (manufacturer code,
+image type, file version, build and date) is read at every start, after it rejoins and after
+an update, and whenever the device itself asks for an update.
+
+The hub keeps no firmware database. Something outside it, the [Home Assistant app](#home-assistant-optional)
+by default (when Home Assistant's **Check for updates** runs), compares those versions with an
+OTA index ([Koenkk/zigbee-OTA](https://github.com/Koenkk/zigbee-OTA)) and leaves an *offer* on
+the hub: the newer file version, its URL and sha512. The device card then shows **Install** (so
+does Home Assistant's update entity). Installing:
+
+1. the hub downloads the image (HTTPS, or plain HTTP to a LAN or tailnet host) into PSRAM,
+   checks its sha512, and checks its OTA header against the device (manufacturer code, image
+   type, not the version it already runs)
+2. it tells the device (a battery device when it next wakes up), up to 6 times, 5 minutes
+   apart, until the device asks; only that device, asking for that manufacturer code and image
+   type, gets the image. A device that hasn't asked 5 minutes after the 6th time: the update
+   fails ("the device didn't ask for the image") and the offer is shown again
+3. the device pulls it block by block at its own pace (a SONOFF S60ZBTPF plug: 145 KB in 7
+   minutes; hours for a battery device; progress on the card and in Home Assistant), then
+   restarts into it, and the hub reads its version again. 10 minutes without a block request:
+   the update fails
+
+One update at a time; a restart of the hub drops a staged image (the offer stays). The Wi-Fi
+watchdog never reboots the hub while an update is being sent. `POST /api/zb/ota`
+`{"action":"cancel"}` stops one: the hub withdraws the image and the device, which downloads
+into a separate area of its flash, drops the partial download and keeps its current firmware.
 
 ### Automations
 
@@ -508,6 +537,7 @@ shows the hub's ("Espressif, ESP32-C5 Zigbee hub") on each, and you set the area
 | any IAS sensor | tamper, battery low (diagnostic) |
 | any battery device | battery %, battery voltage (diagnostic; voltage disabled by default) |
 | any device | online, last seen, signal strength (diagnostic; signal disabled by default) |
+| any device that can be updated | **Firmware**, an update entity: installed and offered file version, release notes, **Install** with progress (listed once the installed version is known) |
 
 A device that goes offline shows its values as *unknown* until it reports again (online
 and last seen keep working).
@@ -542,13 +572,48 @@ Assistant runs somewhere else on your tailnet, add the hub manually as
 Assistant OS with the Tailscale app, run `ha dns options --servers dns://100.100.100.100`
 once (the app's documented step), or tailnet names won't resolve in Home Assistant.
 
-**The hub's UI inside Home Assistant.** To open the hub's own web UI (devices, network map,
-Lua script editor, logs, firmware updates) from a browser that reaches Home Assistant without
-Tailscale, copy [`tools/ha_app/`](tools/ha_app/) to `/addons/zigbee_hub` on Home Assistant OS
-(`/mnt/data/supervisor/apps/local/zigbee_hub`), set `upstream` to the hub's address, install it
-and turn on **Show in sidebar**. It runs a small nginx reverse proxy (with WebSocket passthrough)
-behind Home Assistant Ingress, so the UI opens as a **Zigbee Hub** panel in the Home Assistant
-sidebar.
+**The Home Assistant app.** Copy [`ha_app/`](ha_app/) to `/addons/zigbee_hub` on Home
+Assistant OS (`/mnt/data/supervisor/apps/local/zigbee_hub`), set `upstream` to the hub's
+address, install it and turn on **Show in sidebar**. It does two things:
+
+- **The hub's UI inside Home Assistant**, for a browser that reaches Home Assistant without
+  Tailscale: a small nginx reverse proxy (with WebSocket passthrough) behind Home Assistant
+  Ingress, so the hub's own web UI (devices, network map, Lua script editor, logs, firmware
+  updates) opens as a **Zigbee Hub** panel in the sidebar
+- **Firmware update checks** for the Zigbee devices, on request: it downloads the OTA index
+  (`ota_index`, default Koenkk/zigbee-OTA), matches it against what each device reports
+  (manufacturer code, image type, file version, plus the index's optional model, manufacturer
+  name and version limits), and leaves the newest match on the hub as an offer. It never
+  installs anything: that's the **Install** of the device's **Firmware** update entity, or of
+  its card in the hub's UI
+
+When to check is decided in Home Assistant, the way an ESPHome device checks for its own
+updates: Home Assistant's **Check for updates** (Settings → System → Updates) sends each
+**Firmware** entity a check command; the hub, which has no index, asks Home Assistant to pass
+"check" to the app (`hassio.addon_stdin`; once a minute at most), and the offers it finds
+appear within seconds. For that, turn on **Allow the device to perform Home Assistant
+actions** in the hub's ESPHome integration options, and keep the app's slug `zigbee_hub`
+(installed as `local_zigbee_hub`). Home Assistant doesn't run that check on its own; for
+automatic checks, add an automation that calls `homeassistant.update_entity` on the Firmware
+entities, for example every 6 hours:
+
+```yaml
+- id: zigbee_controlla_aggiornamenti
+  alias: "Zigbee: controlla aggiornamenti firmware"
+  triggers:
+    - trigger: time_pattern
+      hours: /6
+      minutes: 0
+  variables:
+    firmware: "{{ integration_entities('esphome') | select('match', 'update\\.') | list }}"
+  conditions:
+    - condition: template
+      value_template: "{{ firmware | count > 0 }}"
+  actions:
+    - action: homeassistant.update_entity
+      target:
+        entity_id: "{{ firmware }}"
+```
 
 ### Tailscale
 

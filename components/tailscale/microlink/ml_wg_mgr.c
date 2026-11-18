@@ -859,8 +859,17 @@ static void disco_build_ping(microlink_t *ml, int peer_idx,
     memcpy(out + pos, ciphertext, sizeof(ciphertext)); pos += sizeof(ciphertext);
     *out_len = pos;
 
-    /* Track pending probe */
+    /* Track pending probe; a full table reuses the oldest slot, so new probes always count */
     bool registered = false;
+    int oldest = 0;
+    for (int i = 0; i < MAX_PENDING_PROBES; i++) {
+        if (pending_probes[i].active && pending_probes[i].sent_ms < pending_probes[oldest].sent_ms) oldest = i;
+    }
+    if (pending_probes[oldest].active) {
+        bool any_free = false;
+        for (int i = 0; i < MAX_PENDING_PROBES && !any_free; i++) any_free = !pending_probes[i].active;
+        if (!any_free) pending_probes[oldest].active = false;
+    }
     for (int i = 0; i < MAX_PENDING_PROBES; i++) {
         if (!pending_probes[i].active) {
             memcpy(pending_probes[i].txid, txid, DISCO_TXID_LEN);
@@ -1369,6 +1378,16 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
                 ESP_LOGW(TAG, "CallMeMaybe from unknown peer");
                 break;
             }
+
+            /* At most one CallMeMaybe answered per peer every 5 s: each one pings every endpoint
+             * it lists, and a peer sending many would fill the probe table */
+            static uint64_t s_cmm_ms[ML_MAX_PEERS];
+            uint64_t cmm_now = ml_get_time_ms();
+            if (peer_idx < ML_MAX_PEERS && s_cmm_ms[peer_idx] && cmm_now - s_cmm_ms[peer_idx] < 5000) {
+                ESP_LOGD(TAG, "CallMeMaybe from %s within 5 s of the last, ignored", ml->peers[peer_idx].hostname);
+                break;
+            }
+            if (peer_idx < ML_MAX_PEERS) s_cmm_ms[peer_idx] = cmm_now;
 
             const uint8_t *ep_data = plaintext + 2;
             size_t ep_data_len = plaintext_len - 2;

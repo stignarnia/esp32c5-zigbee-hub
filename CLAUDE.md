@@ -1403,10 +1403,20 @@ first, then robustness; feature commits like cellular, subnet router, OTA, Ether
   Tailscale (2748d1c, was 1420); nonstring constants for GCC 15
 - [x] **DERP**: a frame header split across TLS records is finished, not a reconnect (6a7d72f,
   0a1e403); a stale connect request no longer reconnects over an unfreed session (2778a2d, leak)
+- [x] **Control reads and DISCO load** (ported after the user asked whether *every* update was done):
+  a read that has started must finish within 30 s without progress / 90 s in all and stops on
+  shutdown (it retried up to minutes; debc839); an early Noise frame cut off by the first read after
+  the handshake is completed before use instead of being parsed as a new header later (cf2fea8); a
+  peer's CallMeMaybe answered at most once per 5 s, and a full probe table reuses its oldest slot
+  (9996bcd, e422812). Installed: tunnel direct 30 ms, 4 peers direct, filter 0 dropped, HA connected,
+  lowest internal 20.9 KB
 - Not ported, and why: the keypair locking commits (d17a212, ac8ad21, f389f4f, 12796da): every
   WireGuard call here already holds the lwIP core lock (`wgl_*`), so TX can't reuse a nonce; RX via
-  `netif->input` (5c8d60c…): ours calls `ip_input` under the core lock; event-driven idle, subnet
-  router/exit node, OTA, Ethernet, cellular, config UI: features we don't use
+  `netif->input` (5c8d60c…): ours calls `ip_input` under the core lock; 787cf01 (handshake kick per
+  pong): ours sends at most one per peer; 9018254 (endpoint off the best path): every heartbeat pong
+  moves it back; 876200a (two slots, one /32): a key rotation removes the old slot first; dcba23b
+  (full peer table): 16 slots, 9 peers in the netmap; event-driven idle, subnet router/exit node,
+  OTA, Ethernet, cellular, config UI: features we don't use
 - RAM: the 64-slot probe table and the filter's tables first sat in internal RAM (lowest 16.7 KB),
   then were moved to PSRAM: **58 KB free, lowest 20.9 KB** (22.0 KB before the update)
 - `tailscale ping` 5–61 ms direct, UI requests 33–95 ms, `cm.js` 120 KB in 0.74 s over the tunnel

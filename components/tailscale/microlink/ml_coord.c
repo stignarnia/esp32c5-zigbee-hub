@@ -113,22 +113,33 @@ static int coord_send(microlink_t *ml, const uint8_t *data, size_t len) {
     return 0;
 }
 
-static int coord_recv(microlink_t *ml, uint8_t *buf, size_t len) {
+/* Limits for finishing a read that has started: without them a stalled partial read retried
+ * for minutes. Both stay below the coord watchdog */
+#define COORD_RECV_STALL_MS   30000
+#define COORD_RECV_TOTAL_MS   90000
+
+/* Reads exactly len bytes. must_complete false: a timeout before the first byte returns -1 with
+ * errno EAGAIN and nothing consumed, so the caller may retry later. Once a byte is consumed (or
+ * with must_complete, when the caller already consumed part of this frame) the read has to finish
+ * or the Noise stream is misaligned: it waits at most COORD_RECV_STALL_MS without progress and
+ * COORD_RECV_TOTAL_MS in all, and stops on shutdown; such a failure never leaves errno EAGAIN */
+static int coord_recv_ex(microlink_t *ml, uint8_t *buf, size_t len, bool must_complete) {
     size_t recvd = 0;
-    int retries = 0;
+    uint64_t start_ms = ml_get_time_ms(), progress_ms = start_ms;
     while (recvd < len) {
         int n = ml_recv(ml->coord_sock, buf + recvd, len - recvd, 0);
         if (n <= 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (recvd == 0) {
-                    /* No data consumed yet — timeout is fine, caller can retry */
+                if (recvd == 0 && !must_complete) return -1;  /* nothing consumed: caller may retry */
+                uint64_t now = ml_get_time_ms();
+                if (xEventGroupGetBits(ml->events) & ML_EVT_SHUTDOWN_REQUEST) {
+                    errno = ECANCELED;
                     return -1;
                 }
-                /* Partial data consumed — we MUST finish this read or the
-                 * Noise frame stream will be misaligned. Retry with backoff. */
-                if (++retries > 300) {  /* ~3 seconds */
-                    ESP_LOGE(TAG, "coord_recv partial timeout: %d/%d bytes",
-                             (int)recvd, (int)len);
+                if (now - progress_ms > COORD_RECV_STALL_MS || now - start_ms > COORD_RECV_TOTAL_MS) {
+                    ESP_LOGE(TAG, "coord_recv partial timeout: %d/%d bytes after %lu ms",
+                             (int)recvd, (int)len, (unsigned long)(now - start_ms));
+                    errno = ETIMEDOUT;
                     return -1;
                 }
                 vTaskDelay(pdMS_TO_TICKS(10));
@@ -139,9 +150,13 @@ static int coord_recv(microlink_t *ml, uint8_t *buf, size_t len) {
             return -1;
         }
         recvd += n;
-        retries = 0;  /* Reset on successful read */
+        progress_ms = ml_get_time_ms();
     }
     return 0;
+}
+
+static int coord_recv(microlink_t *ml, uint8_t *buf, size_t len) {
+    return coord_recv_ex(ml, buf, len, false);
 }
 
 /* ============================================================================
@@ -203,18 +218,11 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
     uint8_t *ciphertext = ml_psram_malloc(ct_len);
     if (!ciphertext) return -1;
 
-    /* Header already consumed — payload read MUST complete or stream
-     * alignment is permanently lost. Retry EAGAIN (coord_recv returns -1
-     * with errno==EAGAIN if recvd==0 on first byte). */
-    int payload_retries = 0;
-    while (coord_recv(ml, ciphertext, ct_len) < 0) {
-        if ((errno == EAGAIN || errno == EWOULDBLOCK) && ++payload_retries <= 300) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        ESP_LOGE(TAG, "noise_recv payload failed: ct_len=%d retries=%d errno=%d",
-                 ct_len, payload_retries, errno);
+    /* Header already consumed: the payload read must complete or the stream is misaligned */
+    if (coord_recv_ex(ml, ciphertext, ct_len, true) < 0) {
+        ESP_LOGE(TAG, "noise_recv payload failed: ct_len=%d errno=%d", ct_len, errno);
         free(ciphertext);
+        if (errno == EAGAIN || errno == EWOULDBLOCK) errno = ETIMEDOUT;
         return -1;
     }
 
@@ -444,7 +452,7 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
         free(body_buf);
         body_buf = tmp;
 
-        if (coord_recv(ml, body_buf + body_buf_len, msg2_total - body_buf_len) < 0) {
+        if (coord_recv_ex(ml, body_buf + body_buf_len, msg2_total - body_buf_len, true) < 0) {
             ESP_LOGE(TAG, "Failed to read Noise msg2 payload");
             free(body_buf);
             return -1;
@@ -510,6 +518,36 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
         /* Restore normal recv timeout */
         struct timeval normal_tv = { .tv_sec = 60, .tv_usec = 0 };
         ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &normal_tv, sizeof(normal_tv));
+    }
+
+    /* A proactive frame cut off at the end of what was read: read the rest now, or it would be
+     * parsed later as a new frame header and break decryption */
+    for (int guard = 0; extra_data && extra_len > 0 && guard < 32; guard++) {
+        int off = 0, need = 0;
+        while (off < extra_len) {
+            if (off + 3 > extra_len) { need = off + 3 - extra_len; break; }
+            int fl = (extra_data[off + 1] << 8) | extra_data[off + 2];
+            if (off + 3 + fl > extra_len) { need = off + 3 + fl - extra_len; break; }
+            off += 3 + fl;
+        }
+        if (need == 0) break;
+        uint8_t *nb = (extra_len + need <= 16384) ? ml_psram_malloc(extra_len + need) : NULL;
+        if (!nb) {
+            ESP_LOGE(TAG, "Proactive frame at offset %d: %d bytes missing, too large or no memory", off, need);
+            free(extra_data);
+            free(body_buf);
+            return -1;
+        }
+        memcpy(nb, extra_data, extra_len);
+        free(extra_data);
+        extra_data = nb;
+        if (coord_recv_ex(ml, extra_data + extra_len, need, true) < 0) {
+            ESP_LOGE(TAG, "Rest of a proactive frame did not arrive");
+            free(extra_data);
+            free(body_buf);
+            return -1;
+        }
+        extra_len += need;
     }
 
     if (extra_data && extra_len > 0) {

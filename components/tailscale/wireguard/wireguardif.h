@@ -40,7 +40,9 @@
 #include "wireguard.h"  // For wireguard_derp_output_fn typedef
 
 // Default MTU for WireGuard is 1420 bytes
-#define WIREGUARDIF_MTU (1420)
+// Tailscale's tunnel MTU: 1420 inner + overhead overflowed paths under 1500 (PPPoE, cellular);
+// lwIP sizes TCP segments from it (upstream microlink 2748d1c)
+#define WIREGUARDIF_MTU (1280)
 
 #define WIREGUARDIF_DEFAULT_PORT		(51820)
 #define WIREGUARDIF_KEEPALIVE_DEFAULT	(0xFFFF)

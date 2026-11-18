@@ -269,8 +269,8 @@ evidence; where something is still open there, it points here.
       wrong sha512, a battery device's update. Open decision: how HA shows versions (now the
       decimal OTA file version, 4098 / 8451; proposed: hex `0x00001002`)
 - [ ] SONOFF inching (the plug switching itself off N s after being turned on): built 2026-11-18
-      as SONOFF's 0xFC11 command, no effect on the S60ZBTPF, removed the same day (Phase 3). The
-      frame matches Zigbee2MQTT's and the plug accepts it; left: an off → on test after enabling
+      as SONOFF's 0xFC11 command and removed the same day: it sent mode 0x81, which turns the plug
+      back on after an off; 0x80 is the auto-off (tested, Phase 3). Rebuild only if the user wants it
 
 ### Tests: router off for about an hour (one session)
 - [ ] triggers, timers, cron and buzzers keep working; `net.on("down")` fires; a `retry_for`
@@ -1108,7 +1108,11 @@ For long tests without a serial cable: log on the board, download later.
       payload, `protocolData` 0x01 with the bytes as `LIST_UINT8` (no length prefix), manufacturer
       code 0x1286, endpoint 1. Sent again through `/api/zb/raw`: enable 5 s → status 0, disable →
       status 0, and also status 0 without the manufacturer code (so acceptance proves nothing).
-      Not yet tried: an off → on cycle after enabling, with mode 0x81 and with 0x80
+      **Solved by an off → on test** (19:36, relay state read from the plug every second): mode
+      0x81 (Zigbee2MQTT's inching_mode "ON") = back **on** 5 s after each off (off 19:36:20 → on
+      19:36:25; a later on stayed on); mode 0x80 = **off** 5 s after each on (on 19:36:54 → off
+      19:37:00). The build had sent 0x81, so the auto-off never happened and the "off" at
+      18:16:18 was undone 5 s later. Disabled again afterwards, Bike left on
   - the same file names more of 0xFC11 (`addCustomClusterEwelink`): 0x7009 energyToday, 0x700a
     energyMonth, 0x700b energyYesterday (uint32), read 2026-11-18 on 2.1.3: 56 / 136 / 80
     (0 on 1.0.2; Wh by their size: yesterday's charge was ~70 Wh). 0x0010 faultCode =

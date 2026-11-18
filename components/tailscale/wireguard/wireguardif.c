@@ -423,6 +423,7 @@ static void wireguardif_process_response_message(struct wireguard_device *device
 		update_peer_addr(peer, addr, port);
 
 		wireguard_start_session(peer, true);
+		peer->handshake_attempts = 0;
 		printf("[WG] Session started, sending keepalive to %s:%u\n",
 		       ip_addr_isany(&peer->ip) ? "DERP" : ipaddr_ntoa(&peer->ip), peer->port);
 		wireguardif_send_keepalive(device, peer);
@@ -924,6 +925,7 @@ static err_t wireguard_start_handshake(struct netif *netif, struct wireguard_pee
 		pbuf_free(pbuf);
 		peer->send_handshake = false;
 		peer->last_initiation_tx = wireguard_sys_now();
+		peer->handshake_attempts++;
 		memcpy(peer->handshake_mac1, msg.mac1, WIREGUARD_COOKIE_LEN);
 		peer->handshake_mac1_valid = true;
 	} else {
@@ -961,6 +963,7 @@ err_t wireguardif_connect(struct netif *netif, u8_t peer_index) {
 		if (!ip_addr_isany(&peer->connect_ip) && (peer->connect_port > 0)) {
 			// Set the flag that we want to try connecting
 			peer->active = true;
+			peer->handshake_attempts = 0;
 			peer->ip = peer->connect_ip;
 			peer->port = peer->connect_port;
 			// Force immediate handshake to the new endpoint
@@ -1128,7 +1131,13 @@ static bool should_send_initiation(struct wireguard_peer *peer) {
 		} else if (peer->curr_keypair.valid && !peer->curr_keypair.initiator && wireguard_expired(peer->curr_keypair.keypair_millis, REJECT_AFTER_TIME - peer->keepalive_interval)) {
 			result = true;
 		} else if (!peer->curr_keypair.valid && peer->active) {
-			result = true;
+			// A peer that never answers (unreachable, or it trimmed us) was retried every 5 s
+			// forever, a full X25519 handshake each time: give up after 90 s like wireguard-go
+			if (peer->handshake_attempts >= MAX_TIMER_HANDSHAKES) {
+				peer->active = false;
+			} else {
+				result = true;
+			}
 		}
 	}
 	return result;
@@ -1490,6 +1499,7 @@ err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index) {
 	if (result == ERR_OK) {
 		// Mark peer as active so timer will initiate handshakes
 		peer->active = true;
+		peer->handshake_attempts = 0;
 		// Force immediate handshake by setting send_handshake flag
 		peer->send_handshake = true;
 		// CRITICAL: Clear endpoint IP/port to force DERP relay output!

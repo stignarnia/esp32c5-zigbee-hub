@@ -1174,6 +1174,31 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
 
         p->last_pong_recv_ms = now;
 
+        /* A trusted direct path stays while its own pongs keep it trusted: another address of the
+         * same peer answering takes over only if it is LAN and the current one isn't (upstream
+         * 1637300's hysteresis, simplified). Its pong still counts as liveness */
+        if (path_ok && p->has_direct_path && now < p->trust_until_ms &&
+            (pkt->src_ip != p->best_ip || pkt->src_port != p->best_port) &&
+            !(ip_is_private_hbo(pkt->src_ip) && !ip_is_private_hbo(p->best_ip))) {
+            p->last_pong_recv_ms = now;
+            pending_probes[i].active = false;
+            matched = true;
+            break;
+        }
+
+        /* First direct pong of a round wins (upstream 1637300, simplified): the peer's other probes
+         * sent in the same round are retired, so a slower second address (wired + Wi-Fi, hairpin)
+         * can't take the path over on every heartbeat */
+        if (path_ok) {
+            for (int k = 0; k < MAX_PENDING_PROBES; k++) {
+                if (k != i && pending_probes[k].active && pending_probes[k].peer_index == peer_idx &&
+                    pending_probes[k].sent_ms + 1000 >= pending_probes[i].sent_ms &&
+                    pending_probes[k].sent_ms <= pending_probes[i].sent_ms + 1000) {
+                    pending_probes[k].active = false;
+                }
+            }
+        }
+
         /* Direct reply from the pinged address: update best path */
         if (path_ok) {
             if (!p->has_direct_path) {

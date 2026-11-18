@@ -44,10 +44,10 @@
 
 // 5.4 Messages
 // Constants
-static const uint8_t CONSTRUCTION[37] = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"; // The UTF-8 string literal "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s", 37 bytes of output
-static const uint8_t IDENTIFIER[34] = "WireGuard v1 zx2c4 Jason@zx2c4.com"; // The UTF-8 string literal "WireGuard v1 zx2c4 Jason@zx2c4.com", 34 bytes of output
-static const uint8_t LABEL_MAC1[8] = "mac1----"; // Label-Mac1 The UTF-8 string literal "mac1----", 8 bytes of output.
-static const uint8_t LABEL_COOKIE[8] = "cookie--"; // Label-Cookie The UTF-8 string literal "cookie--", 8 bytes of output
+static const uint8_t CONSTRUCTION[37] __attribute__((nonstring)) = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"; // The UTF-8 string literal "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s", 37 bytes of output
+static const uint8_t IDENTIFIER[34] __attribute__((nonstring)) = "WireGuard v1 zx2c4 Jason@zx2c4.com"; // The UTF-8 string literal "WireGuard v1 zx2c4 Jason@zx2c4.com", 34 bytes of output
+static const uint8_t LABEL_MAC1[8] __attribute__((nonstring)) = "mac1----"; // Label-Mac1 The UTF-8 string literal "mac1----", 8 bytes of output.
+static const uint8_t LABEL_COOKIE[8] __attribute__((nonstring)) = "cookie--"; // Label-Cookie The UTF-8 string literal "cookie--", 8 bytes of output
 
 static const char *base64_lookup = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -498,6 +498,7 @@ void wireguard_start_session(struct wireguard_peer *peer, bool initiator) {
 	new_keypair.remote_index = handshake->remote_index;
 
 	peer->last_session_millis = wireguard_sys_now();
+	peer->handshake_attempts = 0;  // a session, either side's initiation
 	new_keypair.keypair_millis = peer->last_session_millis;
 	new_keypair.sending_valid = true;
 	new_keypair.receiving_valid = true;

@@ -69,6 +69,9 @@
 #define REKEY_AFTER_TIME			(120)
 #define REJECT_AFTER_TIME			(180)
 #define REKEY_TIMEOUT				(5)
+// wireguard-go gives up timer-driven handshake retries after RekeyAttemptTime (upstream microlink a476b46)
+#define REKEY_ATTEMPT_TIME			(90)
+#define MAX_TIMER_HANDSHAKES		((REKEY_ATTEMPT_TIME) / (REKEY_TIMEOUT) - 1)
 #define KEEPALIVE_TIMEOUT			(10)
 
 // DERP relay output callback for peers without direct endpoints
@@ -173,6 +176,9 @@ struct wireguard_peer {
 	uint32_t last_initiation_rx;
 	// The last time we sent an initiation message to this peer
 	uint32_t last_initiation_tx;
+
+	// Timer-driven handshake initiations since the last session or explicit connect
+	uint16_t handshake_attempts;
 
 	// The time the last new secure session was created, 0 if none since the peer was last reset
 	uint32_t last_session_millis;
